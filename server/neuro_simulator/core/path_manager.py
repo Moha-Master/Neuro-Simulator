@@ -17,7 +17,6 @@ class PathManager:
         self.neuro_data_dir = self.working_dir / "neuro_data"
         self.assets_dir = self.working_dir / "assets"
         self.neuro_agent_dir = self.neuro_data_dir / "neuro"
-        self.memory_agent_dir = self.neuro_data_dir / "memory_manager"
         self.shared_memories_dir = self.neuro_data_dir / "memories"
         self.user_tools_dir = self.neuro_data_dir / "tools"
 
@@ -25,9 +24,6 @@ class PathManager:
         self.neuro_history_path = self.neuro_agent_dir / "history.jsonl"
         self.neuro_prompt_path = self.neuro_agent_dir / "neuro_prompt.txt"
 
-        self.memory_agent_tools_path = self.memory_agent_dir / "tools.json"
-        self.memory_agent_history_path = self.memory_agent_dir / "history.jsonl"
-        self.memory_agent_prompt_path = self.memory_agent_dir / "memory_prompt.txt"
         self.init_memory_path = self.shared_memories_dir / "init_memory.json"
         self.core_memory_path = self.shared_memories_dir / "core_memory.json"
         self.temp_memory_path = self.shared_memories_dir / "temp_memory.json"
@@ -35,29 +31,14 @@ class PathManager:
         # --- Chatbot Paths ---
         self.chatbot_data_dir = self.working_dir / "chatbot_data"
         self.chatbot_dir = self.chatbot_data_dir / "chatbot"
-        self.chatbot_memory_agent_dir = self.chatbot_data_dir / "memory_manager"
         self.chatbot_memories_dir = self.chatbot_data_dir / "memories"
         self.chatbot_tools_dir = self.chatbot_data_dir / "tools"
         self.chatbot_nickname_data_dir = self.chatbot_data_dir / "nickname_gen" / "data"
 
         self.chatbot_prompt_path = self.chatbot_dir / "chatbot_prompt.txt"
-        self.chatbot_ambient_prompt_path = self.chatbot_dir / "ambient_prompt.txt"
         self.chatbot_tools_path = self.chatbot_dir / "tools.json"
         self.chatbot_history_path = self.chatbot_dir / "history.jsonl"
 
-        self.chatbot_memory_agent_prompt_path = (
-            self.chatbot_memory_agent_dir / "memory_prompt.txt"
-        )
-        self.chatbot_memory_agent_tools_path = (
-            self.chatbot_memory_agent_dir / "tools.json"
-        )
-        self.chatbot_memory_agent_history_path = (
-            self.chatbot_memory_agent_dir / "history.jsonl"
-        )
-
-        self.chatbot_init_memory_path = self.chatbot_memories_dir / "init_memory.json"
-        self.chatbot_core_memory_path = self.chatbot_memories_dir / "core_memory.json"
-        self.chatbot_temp_memory_path = self.chatbot_memories_dir / "temp_memory.json"
 
     def initialize_directories(self):
         """Creates all necessary directories if they don't exist."""
@@ -65,12 +46,10 @@ class PathManager:
             self.neuro_data_dir,
             self.assets_dir,
             self.neuro_agent_dir,
-            self.memory_agent_dir,
             self.shared_memories_dir,
             self.user_tools_dir,
             self.chatbot_data_dir,
             self.chatbot_dir,
-            self.chatbot_memory_agent_dir,
             self.chatbot_memories_dir,
             self.chatbot_tools_dir,
             self.chatbot_nickname_data_dir,

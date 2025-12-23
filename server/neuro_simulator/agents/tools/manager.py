@@ -21,18 +21,20 @@ class ToolManager:
     """
 
     def __init__(
-        self, 
-        memory_manager: MemoryManager, 
-        builtin_tools_path: Path,
-        user_tools_path: Path,
-        tool_allocations_paths: Dict[str, Path],
-        default_allocations: Dict[str, List[str]]
+        self,
+        memory_manager: MemoryManager,
+        output_manager=None,
+        builtin_tools_path: Path = None,
+        user_tools_path: Path = None,
+        tool_allocations_paths: Dict[str, Path] = None,
+        default_allocations: Dict[str, List[str]] = None
     ):
         self.memory_manager = memory_manager
-        self.builtin_tools_path = builtin_tools_path
-        self.user_tools_path = user_tools_path
-        self.tool_allocations_paths = tool_allocations_paths
-        self.default_allocations = default_allocations
+        self.output_manager = output_manager
+        self.builtin_tools_path = builtin_tools_path or Path()
+        self.user_tools_path = user_tools_path or Path()
+        self.tool_allocations_paths = tool_allocations_paths or {}
+        self.default_allocations = default_allocations or {}
 
         self.tools: Dict[str, BaseTool] = {}
         self.agent_tool_allocations: Dict[str, List[str]] = {}
@@ -65,9 +67,22 @@ class ToolManager:
                                     issubclass(cls, BaseTool)
                                     and cls is not BaseTool
                                 ):
-                                    tool_instance = cls(
-                                        memory_manager=self.memory_manager
-                                    )
+                                    # Try to instantiate with both memory_manager and output_manager
+                                    try:
+                                        tool_instance = cls(
+                                            memory_manager=self.memory_manager,
+                                            output_manager=self.output_manager
+                                        )
+                                    except TypeError:
+                                        # If the tool doesn't accept output_manager, try with just memory_manager
+                                        try:
+                                            tool_instance = cls(
+                                                memory_manager=self.memory_manager
+                                            )
+                                        except TypeError:
+                                            # If the tool doesn't accept memory_manager either, try without parameters
+                                            tool_instance = cls()
+
                                     if tool_instance.name in self.tools:
                                         logger.warning(
                                             f"Duplicate tool name '{tool_instance.name}' found. Overwriting with version from {module_path}."

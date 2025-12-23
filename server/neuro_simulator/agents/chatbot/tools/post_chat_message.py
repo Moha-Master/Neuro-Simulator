@@ -1,16 +1,20 @@
 # neuro_simulator/chatbot/tools/post_chat_message.py
 """The Post Chat Message tool for the chatbot agent."""
 
+import logging
 from typing import Dict, Any, List
 
 from neuro_simulator.agents.tools.base import BaseTool
+
+logger = logging.getLogger(__name__)
 
 
 class PostChatMessageTool(BaseTool):
     """Tool for the chatbot to post a message to the stream chat."""
 
-    def __init__(self, memory_manager):
+    def __init__(self, memory_manager=None, output_manager=None):
         super().__init__(memory_manager)
+        self.output_manager = output_manager
 
     @property
     def name(self) -> str:
@@ -33,13 +37,20 @@ class PostChatMessageTool(BaseTool):
 
     async def execute(self, **kwargs: Any) -> Dict[str, Any]:
         """
-        Executes the action. This tool doesn't *actually* send the message,
-        it just structures the output for the core agent logic to handle.
+        Executes the action. This tool sends the message through the output manager.
         """
         text = kwargs.get("text")
         if not isinstance(text, str) or not text:
             raise ValueError("The 'text' parameter must be a non-empty string.")
 
-        # The result is the text to be posted. The core agent will combine this
-        # with a generated nickname before sending it to the stream.
+        # Send chat message through output manager
+        if self.output_manager:
+            await self.output_manager.send_custom_output(
+                output_type="chat_message",
+                payload={
+                    "text": text
+                }
+            )
+
+        # The result is the text to be posted.
         return {"status": "success", "text_to_post": text}

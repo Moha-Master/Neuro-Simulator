@@ -44,16 +44,13 @@ class NeuroSettings(BaseModel):
     """Settings for the main agent (Neuro)."""
 
     neuro_llm_provider_id: Optional[str] = Field(default=None, title="Neuro LLM Provider ID", description="The ID of the LLM provider for Neuro's main responses.")
-    neuro_memory_llm_provider_id: Optional[str] = Field(default=None, title="Neuro Memory LLM Provider ID", description="The ID of the LLM provider for Neuro's memory operations.")
-    neuro_filter_llm_provider_id: Optional[str] = Field(default=None, title="Neuro Filter LLM Provider ID", description="The ID of the LLM provider for Neuro's filter module. If not set, it will fallback to neuro_llm_provider_id.")
     tts_provider_id: Optional[str] = Field(default=None, title="TTS Provider ID", description="The ID of the TTS provider for speech synthesis.")
     input_chat_sample_size: int = Field(10, title="Input Chat Sample Size", description="Number of recent chat messages to use as context in one turn.")
     post_speech_cooldown_sec: List[float] = Field(default_factory=lambda: [1.0, 3.0], title="Post-Speech Cooldown Range (sec)", description="The min and max time to wait after a speech segment. A random value in this range is chosen. Set both to the same value for a fixed delay.")
     initial_greeting: str = Field("The stream has just started. Greet your audience and say hello!", title="Initial Greeting", format="text-area", description="The message Neuro will see when the stream first starts.")  # type: ignore[call-overload]
     neuro_input_queue_max_size: int = Field(200, title="Neuro Input Queue Max Size", description="Max number of incoming events (chats, etc.) to hold in the queue.")
-    reflection_threshold: int = Field(5, title="Reflection Threshold", description="Number of turns before triggering memory consolidation. Set to 0 to disable.")
     recent_history_lines: int = Field(10, title="Recent History Lines", description="Number of recent spoken lines to include in the prompt context.")
-    filter_enabled: bool = Field(default=False, title="Enable Filter", description="If true, a second LLM call is made via the Filter module to review and potentially revise Neuro's response.")
+    filter_keywords: List[str] = Field(default_factory=list, title="Filter Keywords", description="List of keywords that will be filtered out from Neuro's speech. Case-insensitive. Leave empty to disable filtering.")
 
     @field_validator('post_speech_cooldown_sec', mode='before')
     @classmethod
@@ -67,13 +64,8 @@ class ChatbotSettings(BaseModel):
     """Settings for the audience chatbot."""
 
     chatbot_llm_provider_id: Optional[str] = Field(default=None, title="Chatbot LLM Provider ID", description="The ID of the LLM provider for the audience-facing chatbot.")
-    chatbot_memory_llm_provider_id: Optional[str] = Field(default=None, title="Chatbot Memory LLM Provider ID", description="The ID of the LLM provider for the chatbot's memory operations.")
     generation_interval_sec: int = Field(3, title="Generation Interval (sec)", description="How often (in seconds) the chatbot should try to generate a message.")
-    chats_per_batch: int = Field(4, title="Chats per Batch", description="How many chat messages the chatbot should generate at once.")
-    ambient_chat_ratio: float = Field(default=0.1, ge=0.0, le=1.0, title="Ambient Chat Ratio", description="The proportion of chat messages in a batch that should be ambient/random instead of reacting to Neuro.")
-    reflection_threshold: int = Field(50, title="Reflection Threshold", description="Number of turns before triggering memory consolidation. Set to 0 to disable.")
-    enable_dynamic_pool: bool = Field(False, title="Enable Dynamic Nickname Pool", description="Whether to dynamically generate nicknames for viewers.")
-    dynamic_pool_size: int = Field(256, title="Dynamic Nickname Pool Size", description="The number of dynamically generated nicknames to maintain.")
+    chats_per_batch: int = Field(4, title="Chats per batch", description="How many chat messages the chatbot should generate at once.")
     initial_prompt: str = Field(default="The stream is starting! Let's say hello and get the hype going!", title="Initial Prompt", format="text-area", description="The message the chatbot will use as context before Neuro has spoken.")  # type: ignore[call-overload]
 
 

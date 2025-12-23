@@ -69,14 +69,6 @@ def main():
             path_manager.path_manager.neuro_prompt_path,
         )
         copy_if_not_exists(
-            neuro_source_path / "prompts" / "memory_prompt.txt",
-            path_manager.path_manager.memory_agent_prompt_path,
-        )
-        copy_if_not_exists(
-            neuro_source_path / "prompts" / "filter_prompt.txt",
-            path_manager.path_manager.neuro_agent_dir / "filter_prompt.txt",
-        )
-        copy_if_not_exists(
             neuro_source_path / "memory" / "core_memory.json",
             path_manager.path_manager.core_memory_path,
         )
@@ -94,26 +86,6 @@ def main():
         copy_if_not_exists(
             chatbot_source_path / "prompts" / "chatbot_prompt.txt",
             path_manager.path_manager.chatbot_prompt_path,
-        )
-        copy_if_not_exists(
-            chatbot_source_path / "prompts" / "ambient_prompt.txt",
-            path_manager.path_manager.chatbot_ambient_prompt_path,
-        )
-        copy_if_not_exists(
-            chatbot_source_path / "prompts" / "memory_prompt.txt",
-            path_manager.path_manager.chatbot_memory_agent_prompt_path,
-        )
-        copy_if_not_exists(
-            chatbot_source_path / "memory" / "init_memory.json",
-            path_manager.path_manager.chatbot_init_memory_path,
-        )
-        copy_if_not_exists(
-            chatbot_source_path / "memory" / "core_memory.json",
-            path_manager.path_manager.chatbot_core_memory_path,
-        )
-        copy_if_not_exists(
-            chatbot_source_path / "memory" / "temp_memory.json",
-            path_manager.path_manager.chatbot_temp_memory_path,
         )
         copy_if_not_exists(
             chatbot_source_path / "nickname_gen" / "data" / "adjectives.txt",

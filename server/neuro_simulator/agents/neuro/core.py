@@ -1,8 +1,7 @@
 # server/neuro_simulator/agents/neuro/core.py
 """
 Core module for the Neuro Simulator's built-in agent.
-Implements a dual-LLM "Actor/Thinker" architecture for responsive interaction
-and asynchronous memory consolidation.
+Implements a single-LLM "Actor" architecture for responsive interaction.
 """
 
 import asyncio
@@ -20,7 +19,7 @@ from ...utils import console
 from ..streaming_parser import parse_json_stream
 from ..memory.manager import MemoryManager
 from ..tools.manager import ToolManager
-from .filter.filter import NeuroFilter
+from ..output_manager import OutputManager
 
 logger = logging.getLogger(__name__)
 
@@ -31,7 +30,7 @@ class Neuro(BaseAgent):
     This class handles the core logic for Neuro's responses and memory.
     """
 
-    def __init__(self):
+    def __init__(self, output_callback=None):
         if not path_manager:
             raise RuntimeError("PathManager must be initialized before the Neuro agent.")
 
@@ -40,15 +39,12 @@ class Neuro(BaseAgent):
 
         settings = config_manager.settings
         self.neuro_llm = llm_manager.get_client(settings.neuro.neuro_llm_provider_id)
-        self.memory_llm = llm_manager.get_client(
-            settings.neuro.neuro_memory_llm_provider_id
-        )
 
-        filter_llm_id = (
-            settings.neuro.neuro_filter_llm_provider_id
-            or settings.neuro.neuro_llm_provider_id
+        # Create output manager
+        self.output_manager = OutputManager(
+            agent_type="neuro",
+            output_callback=output_callback
         )
-        self.filter = NeuroFilter(filter_llm_id)
 
         self.memory_manager = MemoryManager(
             init_memory_path=path_manager.init_memory_path,
@@ -57,11 +53,11 @@ class Neuro(BaseAgent):
         )
         self._tool_manager = ToolManager(
             memory_manager=self.memory_manager,
+            output_manager=self.output_manager,
             builtin_tools_path=Path(__file__).parent / "tools",
             user_tools_path=path_manager.user_tools_dir,
             tool_allocations_paths={
                 "neuro_agent": path_manager.neuro_tools_path,
-                "memory_manager": path_manager.memory_agent_tools_path,
             },
             default_allocations={
                 "neuro_agent": [
@@ -72,23 +68,16 @@ class Neuro(BaseAgent):
                     "get_core_memory_block",
                     "model_spin",
                     "model_zoom",
-                ],
-                "memory_manager": [
-                    "add_temp_memory",
                     "create_core_memory_block",
                     "update_core_memory_block",
                     "delete_core_memory_block",
                     "add_to_core_memory_block",
                     "remove_from_core_memory_block",
-                    "get_core_memory_blocks",
-                    "get_core_memory_block",
                 ],
             }
         )
 
         self._initialized = False
-        self.turn_counter = 0
-        self.reflection_threshold = settings.neuro.reflection_threshold
 
         console.box_it_up(
             ["Hello everyone, Neuro-sama here."],
@@ -115,7 +104,6 @@ class Neuro(BaseAgent):
         await self.memory_manager.reset_temp_memory()
         # Clear history files by overwriting them
         open(path_manager.neuro_history_path, "w").close()
-        open(path_manager.memory_agent_history_path, "w").close()
         logger.debug("All agent memory and history logs have been reset.")
 
     async def get_message_history(self, limit: int = 20) -> List[Dict[str, Any]]:
@@ -217,35 +205,6 @@ class Neuro(BaseAgent):
             user_messages=user_messages_text,
         )
 
-    async def _build_memory_prompt(
-        self,
-        conversation_history: List[Dict[str, str]],
-    ) -> str:
-        """Builds the prompt for the Memory (Thinker) LLM."""
-        assert path_manager is not None
-        prompt_template = ""
-        if path_manager.memory_agent_prompt_path.exists():
-            with open(
-                path_manager.memory_agent_prompt_path, "r", encoding="utf-8"
-            ) as f:
-                prompt_template = f.read()
-        else:
-            logger.warning(
-                f"Memory prompt template not found at {path_manager.memory_agent_prompt_path}"
-            )
-
-        tool_schemas = self.tool_manager.get_tool_schemas_for_agent("memory_manager")
-        tool_descriptions = self._format_tool_schemas_for_prompt(tool_schemas)
-        history_text = "\n".join(
-            [
-                f"{msg.get('role', 'unknown')}: {msg.get('content', '')}"
-                for msg in conversation_history
-            ]
-        )
-
-        return prompt_template.format(
-            tool_descriptions=tool_descriptions, conversation_history=history_text
-        )
 
     async def process_and_respond(
         self, messages: List[Dict[str, str]]
@@ -279,33 +238,6 @@ class Neuro(BaseAgent):
             )
 
             for tool_call in tool_calls_to_process:
-                # Filter speak tool calls before execution
-                if (
-                    self.filter
-                    and config_manager.settings.neuro.filter_enabled
-                    and tool_call.get("name") == "speak"
-                ):
-                    logger.debug("Filter enabled. Reviewing a speak call.")
-                    original_text = (
-                        tool_call.get("params") or tool_call.get("parameters", {})
-                    ).get("text", "")
-
-                    if original_text:
-                        filtered_calls = await self.filter.process(
-                            original_output=original_text
-                        )
-                        if filtered_calls:
-                            tool_call = filtered_calls[
-                                0
-                            ]  # Replace with filtered call
-                        else:
-                            logger.warning(
-                                "Filter did not return a tool call. Suppressing this speech."
-                            )
-                            continue  # Skip this tool call
-                    else:
-                        continue  # Skip speak call with no text
-
                 # Execute the tool call
                 tool_name = tool_call.get("name")
                 params = tool_call.get("params") or tool_call.get("parameters", {})
@@ -336,66 +268,11 @@ class Neuro(BaseAgent):
                 {"role": "assistant", "content": full_response},
             )
 
-        self.turn_counter += 1
-        if self.turn_counter >= self.reflection_threshold:
-            asyncio.create_task(self._reflect_and_consolidate())
-
         return {
             "tool_executions": execution_results,
             "final_responses": final_responses,
         }
 
-    async def _reflect_and_consolidate(self):
-        """The main thinker loop to consolidate memories for the Neuro agent."""
-        if not self.reflection_threshold > 0:
-            return
-
-        if not self.memory_llm:
-            logger.warning(
-                "Neuro Memory LLM is not configured. Skipping memory consolidation."
-            )
-            return
-
-        assert path_manager is not None
-        logger.debug("Neuro is reflecting on recent conversations...")
-        console.box_it_up(
-            ["The 'Thinker' agent is now active.", "Consolidating recent memories..."],
-            title="Neuro Memory Consolidation Started",
-            border_color=console.THEME["STATUS"],
-        )
-        self.turn_counter = 0
-        # Use neuro's history path
-        history = await self._read_history_log(path_manager.neuro_history_path, limit=50)
-        if len(history) < self.reflection_threshold:
-            return
-
-        prompt = await self._build_memory_prompt(history)
-        response_text = await self.memory_llm.generate(prompt)
-        console.box_it_up(
-            response_text.split('\n'),
-            title="Neuro (Thinker) Raw Response",
-            border_color=console.THEME["INFO"],
-        )
-        if not response_text:
-            return
-
-        tool_calls = self._parse_tool_calls(response_text)
-        console.box_it_up(
-            json.dumps(tool_calls, indent=2).split('\n'),
-            title="Neuro (Thinker) Parsed Tool Calls",
-            border_color=console.THEME["WARNING"],
-        )
-        if not tool_calls:
-            return
-
-        # Execute with the 'memory_manager' agent name
-        await self._execute_tool_calls(tool_calls, "memory_manager")
-        console.box_it_up(
-            ["The 'Thinker' agent has finished its task."],
-            title="Neuro Memory Consolidation Complete",
-            border_color=console.THEME["STATUS"],
-        )
-        logger.debug("Neuro memory consolidation complete.")
 
     # --- Implementation of BaseAgent interface methods ---
 

@@ -1,5 +1,16 @@
 // src/types/common.ts
 
+// 输出包结构定义
+export interface OutputPack {
+    type: string;        // 输出类型，如 "speak", "model_action", "chat_message"
+    timestamp: number;   // 时间戳
+    payload: any;        // 具体载荷内容
+    metadata: {
+        agent_type: string;    // "neuro" 或 "chatbot"
+        source_tool: string;   // 原始工具名
+    };
+}
+
 // 定义后端 WebSocket 消息的通用结构
 export interface WebSocketMessage {
     type: string;
@@ -24,6 +35,7 @@ export interface NeuroSpeechSegmentMessage extends WebSocketMessage {
     segment_id?: number; // 片段 ID，可选
     text?: string;       // 字幕文本，可选
     audio_base64?: string; // 音频数据 Base64，可选
+    duration?: number;   // 音频时长，可选
     is_end: boolean;     // 是否是本次发言的最后一个片段
 }
 

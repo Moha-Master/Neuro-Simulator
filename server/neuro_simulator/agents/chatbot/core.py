@@ -1,7 +1,7 @@
 # neuro_simulator/chatbot/core.py
 """
 Core module for the Neuro Simulator's Chatbot agent.
-Implements a dual-LLM "Actor/Thinker" architecture.
+Implements a single-LLM "Actor" architecture.
 """
 
 import asyncio
@@ -15,8 +15,8 @@ from ...core.agent_interface import BaseAgent
 from ...core.config import config_manager
 from ...core.llm_manager import llm_manager
 from ...core.path_manager import path_manager
-from ..memory.manager import MemoryManager
 from ..tools.manager import ToolManager
+from ..output_manager import OutputManager
 from .nickname_gen.generator import NicknameGenerator
 
 logger = logging.getLogger(__name__)
@@ -24,10 +24,10 @@ logger = logging.getLogger(__name__)
 
 class Chatbot(BaseAgent):
     """
-    Chatbot Agent class implementing the Actor/Thinker model and BaseAgent interface.
+    Chatbot Agent class implementing the Actor model and BaseAgent interface.
     """
 
-    def __init__(self):
+    def __init__(self, output_callback=None):
         if not path_manager:
             raise RuntimeError(
                 "PathManager must be initialized before the Chatbot agent."
@@ -39,33 +39,30 @@ class Chatbot(BaseAgent):
         self.chatbot_llm = llm_manager.get_client(
             settings.chatbot.chatbot_llm_provider_id
         )
-        self.memory_llm = llm_manager.get_client(
-            settings.chatbot.chatbot_memory_llm_provider_id
+
+        # Create output manager
+        self.output_manager = OutputManager(
+            agent_type="chatbot",
+            output_callback=output_callback
         )
 
-        self.memory_manager = MemoryManager(
-            init_memory_path=path_manager.chatbot_init_memory_path,
-            core_memory_path=path_manager.chatbot_core_memory_path,
-            temp_memory_path=path_manager.chatbot_temp_memory_path,
-        )
         self._tool_manager = ToolManager(
-            memory_manager=self.memory_manager,
+            memory_manager=None,  # No memory manager for simplified chatbot
+            output_manager=self.output_manager,
             builtin_tools_path=Path(__file__).parent / "tools",
             user_tools_path=path_manager.chatbot_tools_dir,
             tool_allocations_paths={
                 "chatbot": path_manager.chatbot_tools_path,
-                "chatbot_memory_manager": path_manager.chatbot_memory_agent_tools_path,
             },
             default_allocations={
-                "chatbot": ["post_chat_message"],
-                "chatbot_memory_manager": ["add_temp_memory"],
+                "chatbot": [
+                    "post_chat_message",
+                ],
             }
         )
-        self.nickname_generator = NicknameGenerator(llm_client=self.chatbot_llm)
+        self.nickname_generator = NicknameGenerator()
 
         self._initialized = False
-        self.turn_counter = 0
-        self.reflection_threshold = settings.chatbot.reflection_threshold
 
     @property
     def tool_manager(self) -> ToolManager:
@@ -75,7 +72,7 @@ class Chatbot(BaseAgent):
         """Initializes components that are safe to run on startup."""
         if not self._initialized:
             logger.info("Initializing Chatbot agent (startup-safe components)...")
-            await self.memory_manager.initialize()
+            await self.nickname_generator.initialize()
             self.tool_manager.load_tools()
             self._initialized = True
             logger.info("Chatbot agent startup components initialized successfully.")
@@ -83,16 +80,14 @@ class Chatbot(BaseAgent):
     async def initialize_runtime_components(self):
         """Initializes components that require a live configuration, like the LLM."""
         logger.info("Initializing Chatbot agent (runtime components)...")
-        await self.nickname_generator.initialize()
         logger.info("Chatbot agent runtime components initialized successfully.")
 
     async def reset_memory(self):
-        """Reset all agent memory types and clear history logs."""
+        """Reset chatbot history logs."""
         assert path_manager is not None
-        await self.memory_manager.reset_temp_memory()
         # Clear history files by overwriting them
         open(path_manager.chatbot_history_path, "w").close()
-        logger.info("All chatbot memory and history logs have been reset.")
+        logger.info("Chatbot history logs have been reset.")
 
     async def get_message_history(self, limit: int = 20) -> List[Dict[str, Any]]:
         """Reads the last N lines from the Chatbot agent's history log."""
@@ -125,7 +120,7 @@ class Chatbot(BaseAgent):
             return []
 
     def _format_tool_schemas_for_prompt(self, agent_name: str) -> str:
-        """Formats tool schemas for a specific agent (actor or thinker)."""
+        """Formats tool schemas for a specific agent (actor)."""
         schemas = self.tool_manager.get_tool_schemas_for_agent(agent_name)
         if not schemas:
             return "No tools available."
@@ -154,18 +149,12 @@ class Chatbot(BaseAgent):
             prompt_template = f.read()
 
         tool_descriptions = self._format_tool_schemas_for_prompt("chatbot")
-        init_memory_text = json.dumps(self.memory_manager.init_memory, indent=2)
-        core_memory_text = json.dumps(self.memory_manager.core_memory, indent=2)
-        temp_memory_text = json.dumps(self.memory_manager.temp_memory, indent=2)
         recent_history_text = "\n".join(
             [f"{msg.get('role')}: {msg.get('content')}" for msg in recent_history]
         )
 
         return prompt_template.format(
             tool_descriptions=tool_descriptions,
-            init_memory=init_memory_text,
-            core_memory=core_memory_text,
-            temp_memory=temp_memory_text,
             recent_history=recent_history_text,
             neuro_speech=neuro_speech,
             chats_per_batch=num_messages,
@@ -184,34 +173,47 @@ class Chatbot(BaseAgent):
         
         return await self.build_chatbot_prompt(neuro_speech, recent_history, chats_per_batch)
 
-    async def _build_memory_prompt(
-        self,
-        conversation_history: List[Dict[str, str]],
-    ) -> str:
-        """Builds the prompt for the Memory (Thinker) LLM."""
-        assert path_manager is not None
-        with open(path_manager.chatbot_memory_agent_prompt_path, 'r', encoding='utf-8') as f:
-            prompt_template = f.read()
-        tool_descriptions = self._format_tool_schemas_for_prompt('chatbot_memory_manager')
-        history_text = "\n".join([f"{msg.get('role')}: {msg.get('content')}" for msg in conversation_history])
-        return prompt_template.format(
-            tool_descriptions=tool_descriptions, conversation_history=history_text
-        )
 
     def _parse_tool_calls(self, response_text: str) -> List[Dict[str, Any]]:
-        """Extracts and parses a JSON array from the LLM's response text."""
+        """Extracts and parses JSON objects from the LLM's response text."""
         try:
+            # First, try to find a JSON array
             start_index = response_text.find("[")
             end_index = response_text.rfind("]")
 
             if start_index != -1 and end_index != -1 and end_index > start_index:
+                # Found an array
                 json_str = response_text[start_index : end_index + 1]
                 return json.loads(json_str)
             else:
-                logger.warning(
-                    f"Could not find a valid JSON array in response: {response_text}"
-                )
-                return []
+                # Try to find a single JSON object instead
+                start_index = response_text.find("{")
+                end_index = response_text.rfind("}")
+
+                if start_index != -1 and end_index != -1 and end_index > start_index:
+                    # Found a single object
+                    json_str = response_text[start_index : end_index + 1]
+                    single_obj = json.loads(json_str)
+                    # Convert single object to list
+                    if isinstance(single_obj, dict):
+                        return [single_obj]
+                    elif isinstance(single_obj, list):
+                        return single_obj
+                    else:
+                        logger.warning(
+                            f"Unexpected JSON type in response: {type(single_obj)}"
+                        )
+                        return []
+                else:
+                    logger.warning(
+                        f"Could not find a valid JSON object or array in response: {response_text}"
+                    )
+                    return []
+        except json.JSONDecodeError as e:
+            logger.warning(
+                f"Failed to decode JSON from LLM response: {e}\nRaw text: {response_text}"
+            )
+            return []
         except Exception as e:
             logger.error(
                 f"Failed to parse tool calls from LLM response: {e}\nRaw text: {response_text}"
@@ -264,18 +266,16 @@ class Chatbot(BaseAgent):
                     {"role": "assistant", "content": f"{nickname}: {text_to_post}"},
                 )
 
-    async def _build_ambient_prompt(self, num_messages: int) -> str:
-        """Builds the prompt for the ambient Chatbot LLM."""
-        assert path_manager is not None
-        with open(path_manager.chatbot_ambient_prompt_path, "r", encoding="utf-8") as f:
-            prompt_template = f.read()
+                # Send chat message through output manager
+                if hasattr(self, 'output_manager') and self.output_manager:
+                    await self.output_manager.send_custom_output(
+                        output_type="chat_message",
+                        payload={
+                            "username": nickname,
+                            "text": text_to_post
+                        }
+                    )
 
-        tool_descriptions = self._format_tool_schemas_for_prompt("chatbot")
-
-        return prompt_template.format(
-            tool_descriptions=tool_descriptions,
-            num_messages=num_messages,
-        )
 
     async def _generate_contextual_chats(
         self,
@@ -297,20 +297,6 @@ class Chatbot(BaseAgent):
 
         return await self._execute_tool_calls(tool_calls, "chatbot")
 
-    async def _generate_ambient_chats(
-        self, num_ambient: int
-    ) -> List[Dict[str, str]]:
-        """Generates random, non-contextual chat messages."""
-        prompt = await self._build_ambient_prompt(num_ambient)
-        response_text = await self.chatbot_llm.generate(prompt)
-        if not response_text:
-            return []
-
-        tool_calls = self._parse_tool_calls(response_text)
-        if not tool_calls:
-            return []
-
-        return await self._execute_tool_calls(tool_calls, "chatbot")
 
     async def generate_chat_messages(
         self,
@@ -318,10 +304,7 @@ class Chatbot(BaseAgent):
         recent_history: List[Dict[str, str]],
     ) -> List[Dict[str, str]]:
         """
-        The main actor loop to generate chat messages.
-        It splits the generation into two parallel tasks:
-        1. Contextual chats based on Neuro's speech.
-        2. Ambient chats to add diversity.
+        The main actor loop to generate chat messages based on context.
         """
         if not self.chatbot_llm:
             logger.warning("Chatbot LLM is not configured. Skipping message generation.")
@@ -333,80 +316,28 @@ class Chatbot(BaseAgent):
 
         settings = config_manager.settings.chatbot
         chats_per_batch = settings.chats_per_batch
-        ambient_ratio = settings.ambient_chat_ratio
 
         # Determine the contextual speech to use
         contextual_speech = neuro_speech
         if not contextual_speech:
             contextual_speech = settings.initial_prompt
 
-        num_ambient = round(chats_per_batch * ambient_ratio)
-        num_contextual = chats_per_batch - num_ambient
+        # Generate contextual chats based on Neuro's speech
+        contextual_messages = await self._generate_contextual_chats(
+            contextual_speech, recent_history, chats_per_batch
+        )
 
-        tasks = []
-        if num_contextual > 0:
-            tasks.append(
-                self._generate_contextual_chats(
-                    contextual_speech, recent_history, num_contextual
-                )
-            )
-        if num_ambient > 0:
-            tasks.append(self._generate_ambient_chats(num_ambient))
+        return contextual_messages
 
-        if not tasks:
-            return []
-
-        generated_messages_lists = await asyncio.gather(*tasks)
-        
-        all_messages = []
-        for msg_list in generated_messages_lists:
-            all_messages.extend(msg_list)
-
-        self.turn_counter += 1
-        if self.reflection_threshold > 0 and self.turn_counter >= self.reflection_threshold:
-            asyncio.create_task(self._reflect_and_consolidate())
-
-        return all_messages
-
-    async def _reflect_and_consolidate(self):
-        """The main thinker loop to consolidate memories."""
-        if not self.reflection_threshold > 0:
-            return
-
-        if not self.memory_llm:
-            logger.warning(
-                "Chatbot Memory LLM is not configured. Skipping memory consolidation."
-            )
-            return
-
-        assert path_manager is not None
-        logger.info("Chatbot is reflecting on recent conversations...")
-        self.turn_counter = 0
-        history = await self._read_history(path_manager.chatbot_history_path, limit=50)
-        if len(history) < self.reflection_threshold:
-            return
-
-        prompt = await self._build_memory_prompt(history)
-        response_text = await self.memory_llm.generate(prompt)
-        if not response_text:
-            return
-
-        tool_calls = self._parse_tool_calls(response_text)
-        if not tool_calls:
-            return
-
-        await self._execute_tool_calls(tool_calls, 'chatbot_memory_manager')
-        logger.info("Chatbot memory consolidation complete.")
 
     # --- Implementation of BaseAgent interface methods ---
 
-    # Memory Block Management
+    # Memory Block Management - Not implemented for simplified chatbot
     async def get_memory_blocks(self) -> List[Dict[str, Any]]:
-        blocks_dict = await self.memory_manager.get_core_memory_blocks()
-        return list(blocks_dict.values())
+        return []
 
     async def get_memory_block(self, block_id: str) -> Optional[Dict[str, Any]]:
-        return await self.memory_manager.get_core_memory_block(block_id)
+        return None
 
     async def create_memory_block(
         self,
@@ -414,10 +345,7 @@ class Chatbot(BaseAgent):
         description: str,
         content: List[str],
     ) -> Dict[str, str]:
-        block_id = await self.memory_manager.create_core_memory_block(
-            title, description, content
-        )
-        return {"block_id": block_id}
+        return {"block_id": "not_implemented"}
 
     async def update_memory_block(
         self,
@@ -426,38 +354,36 @@ class Chatbot(BaseAgent):
         description: Optional[str],
         content: Optional[List[str]],
     ):
-        await self.memory_manager.update_core_memory_block(
-            block_id, title, description, content
-        )
+        pass
 
     async def delete_memory_block(self, block_id: str):
-        await self.memory_manager.delete_core_memory_block(block_id)
+        pass
 
-    # Init Memory Management
+    # Init Memory Management - Not implemented for simplified chatbot
     async def get_init_memory(self) -> Dict[str, Any]:
-        return self.memory_manager.init_memory
+        return {}
 
     async def update_init_memory(self, memory: Dict[str, Any]):
-        await self.memory_manager.replace_init_memory(memory)
+        pass
 
     async def update_init_memory_item(self, key: str, value: Any):
-        await self.memory_manager.update_init_memory_item(key, value)
+        pass
 
     async def delete_init_memory_key(self, key: str):
-        await self.memory_manager.delete_init_memory_key(key)
+        pass
 
-    # Temp Memory Management
+    # Temp Memory Management - Not implemented for simplified chatbot
     async def get_temp_memory(self) -> List[Dict[str, Any]]:
-        return self.memory_manager.temp_memory
+        return []
 
     async def add_temp_memory(self, content: str, role: str):
-        await self.memory_manager.add_temp_memory(content, role)
+        pass
 
     async def delete_temp_memory_item(self, item_id: str):
-        await self.memory_manager.delete_temp_memory_item(item_id)
+        pass
 
     async def clear_temp_memory(self):
-        await self.memory_manager.reset_temp_memory()
+        pass
 
     # Tool Management
     async def get_available_tools(self) -> List[Dict[str, Any]]:

@@ -20,7 +20,6 @@ neuro_simulator/
 │   ├── __init__.py
 │   ├── core.py
 │   ├── llm.py
-│   ├── memory_prompt.txt
 │   ├── neuro_prompt.txt
 │   ├── memory/
 │   │   ├── __init__.py
@@ -69,10 +68,6 @@ working_dir_example/     # 工作目录结构，供你参考
     │   ├── core_memory.json
     │   ├── init_memory.json
     │   └── temp_memory.json
-    ├── memory_manager/  # 记忆管理器Agent
-    │   ├── history.jsonl
-    │   ├── memory_prompt.txt
-    │   └── tools.json
     ├── neuro/           # Neuro主Agent
     │   ├── history.jsonl
     │   ├── neuro_prompt.txt

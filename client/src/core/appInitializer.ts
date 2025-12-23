@@ -427,6 +427,14 @@ export class AppInitializer {
     }
 
     private handleWebSocketMessage(message: WebSocketMessage): void {
+        // Check if this is an output pack format message
+        if (this.isOutputPack(message)) {
+            // Convert output pack to legacy message format
+            this.handleOutputPack(message as any);
+            return;
+        }
+
+        // Handle legacy message format
         if (this.currentPhase === 'offline' && ['play_welcome_video', 'start_avatar_intro', 'enter_live_phase'].includes(message.type)) {
             console.log("Connection successful, transitioning from OFFLINE to active state.");
             this.goOnline(); // Use the new goOnline method
@@ -463,29 +471,29 @@ export class AppInitializer {
             case 'start_avatar_intro':
                 this.currentPhase = 'avatar_intro';
                 this.videoPlayer.pauseAndMute();
-                this.neuroAvatar.startIntroAnimation(() => { 
-                    this.videoPlayer.hide(); 
+                this.neuroAvatar.startIntroAnimation(() => {
+                    this.videoPlayer.hide();
                 });
                 break;
             case 'enter_live_phase':
                 this.updateLogoState('live');
                 this.currentPhase = 'live';
                 this.videoPlayer.hide();
-                this.neuroAvatar.setStage('step2'); 
+                this.neuroAvatar.setStage('step2');
                 break;
             case 'neuro_is_speaking':
                 break;
             case 'neuro_speech_segment':
                 const segment = message as NeuroSpeechSegmentMessage;
                 if (segment.is_end) {
-                    this.audioPlayer.setAllSegmentsReceived(); 
-                } else if (segment.audio_base64 && segment.text && typeof segment.duration === 'number') { 
+                    this.audioPlayer.setAllSegmentsReceived();
+                } else if (segment.audio_base64 && segment.text && typeof segment.duration === 'number') {
                     this.audioPlayer.addAudioSegment(segment.text, segment.audio_base64, segment.duration);
                 } else {
                     console.warn("Received neuro_speech_segment message with missing audio/text/duration:", segment);
                 }
                 break;
-            case 'neuro_error_signal': 
+            case 'neuro_error_signal':
                 console.warn("Received neuro_error_signal from backend.");
                 showNeuroCaption("Someone tell Vedal there is a problem with my AI.");
                 this.audioPlayer.playErrorSound();
@@ -498,6 +506,96 @@ export class AppInitializer {
             case 'error':
                 this.chatDisplay.appendChatMessage({ type: "chat_message", username: "System", text: `后端错误: ${(message as any).message}`, is_user_message: false });
                 break;
+        }
+    }
+
+    private isOutputPack(message: any): boolean {
+        return (
+            typeof message === 'object' &&
+            message.type &&
+            message.timestamp !== undefined &&
+            message.payload !== undefined &&
+            message.metadata &&
+            message.metadata.agent_type &&
+            message.metadata.source_tool
+        );
+    }
+
+    private handleOutputPack(outputPack: any): void {
+        switch (outputPack.type) {
+            case 'speak':
+                this.handleSpeakOutput(outputPack);
+                break;
+            case 'model_action':
+                this.handleModelActionOutput(outputPack);
+                break;
+            case 'chat_message':
+                this.handleChatMessageOutput(outputPack);
+                break;
+            default:
+                console.warn("Unknown output pack type:", outputPack.type, outputPack);
+                break;
+        }
+    }
+
+    private handleSpeakOutput(outputPack: any): void {
+        const payload = outputPack.payload;
+        if (payload.audio_base64 && payload.text && typeof payload.duration === 'number') {
+            // First, send the audio segment
+            const segmentMessage: NeuroSpeechSegmentMessage = {
+                type: "neuro_speech_segment",
+                text: payload.text,
+                audio_base64: payload.audio_base64,
+                duration: payload.duration,
+                is_end: false // Send as non-ending segment first
+            };
+            this.handleWebSocketMessage(segmentMessage);
+
+            // Then, send the end signal
+            const endMessage: NeuroSpeechSegmentMessage = {
+                type: "neuro_speech_segment",
+                is_end: true // Now mark as end
+            };
+            this.handleWebSocketMessage(endMessage);
+        } else if (payload.text) {
+            // Text-only speak (no audio)
+            const segmentMessage: NeuroSpeechSegmentMessage = {
+                type: "neuro_speech_segment",
+                text: payload.text,
+                is_end: false // Send as non-ending segment first
+            };
+            this.handleWebSocketMessage(segmentMessage);
+
+            // Then, send the end signal
+            const endMessage: NeuroSpeechSegmentMessage = {
+                type: "neuro_speech_segment",
+                is_end: true // Now mark as end
+            };
+            this.handleWebSocketMessage(endMessage);
+        }
+    }
+
+    private handleModelActionOutput(outputPack: any): void {
+        const payload = outputPack.payload;
+        if (payload.action === 'spin') {
+            this.neuroAvatar.triggerSpin();
+        } else if (payload.action === 'zoom') {
+            this.neuroAvatar.triggerZoom();
+        } else {
+            console.warn("Unknown model action:", payload.action);
+        }
+    }
+
+    private handleChatMessageOutput(outputPack: any): void {
+        const payload = outputPack.payload;
+        const chatMessage: ChatMessage = {
+            type: "chat_message",
+            username: payload.username || 'Chatbot',
+            text: payload.text || '',
+            is_user_message: false
+        };
+        if (!this.chatSidebar.getIsCollapsed()) {
+            this.chatDisplay.appendChatMessage(chatMessage);
         }
     }
     

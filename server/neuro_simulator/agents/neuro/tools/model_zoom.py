@@ -3,7 +3,6 @@ import logging
 from typing import Dict, Any, List
 
 from neuro_simulator.agents.tools.base import BaseTool
-from neuro_simulator.services.stream import live_stream_manager
 from neuro_simulator.utils import console
 
 logger = logging.getLogger(__name__)
@@ -12,9 +11,9 @@ logger = logging.getLogger(__name__)
 class ModelZoomTool(BaseTool):
     """A tool to make the client-side avatar zoom in."""
 
-    def __init__(self, **kwargs):
-        # The base class might pass memory_manager, so we accept it but don't use it.
-        pass
+    def __init__(self, memory_manager=None, output_manager=None):
+        # Accept memory_manager and output_manager for consistency with other tools
+        self.output_manager = output_manager
 
     @property
     def name(self) -> str:
@@ -30,11 +29,14 @@ class ModelZoomTool(BaseTool):
 
     async def execute(self, **kwargs: Any) -> Dict[str, Any]:
         """
-        Sends a WebSocket command to the client to trigger the avatar zoom animation.
+        Sends a model zoom command through the output manager.
         """
         logger.debug(f"Executing {self.name} tool.")
         try:
-            await live_stream_manager.event_queue.put({"type": "model_zoom"})
+            # Send model action through output manager
+            if self.output_manager:
+                await self.output_manager.send_model_output("zoom")
+
             console.box_it_up(
                 ["Command: model_zoom"],
                 title="Executed Model Tool",

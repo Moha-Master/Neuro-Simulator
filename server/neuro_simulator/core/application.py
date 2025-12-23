@@ -18,6 +18,7 @@ from starlette.websockets import WebSocketState
 from .config import config_manager, AppSettings
 from ..core.agent_factory import create_agent
 from ..core.chatbot_factory import create_chatbot
+from ..services.stream.stream_manager import StreamManager
 from ..agents.chatbot.core import Chatbot
 
 # --- API Routers ---
@@ -30,7 +31,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 # --- Services and Utilities ---
 from ..services.audio import synthesize_audio_segment
-from ..services.stream import live_stream_manager
+from ..services.stream.stream_manager import StreamManager
 from ..utils.logging import configure_server_logging, server_log_queue, agent_log_queue
 from ..utils.process import process_manager
 from ..utils.queue import (
@@ -57,6 +58,9 @@ app = FastAPI(
     version="2.0.0",
     description="Backend for the Neuro-Sama digital being simulator.",
 )
+
+# Initialize stream manager
+stream_manager = StreamManager()
 
 app.add_middleware(
     CORSMiddleware,
@@ -152,233 +156,22 @@ async def redirect_dashboard_to_trailing_slash():
 
 
 async def broadcast_events_task():
-    """Broadcasts events from the live_stream_manager's queue to all clients."""
+    """Broadcasts events from the stream_manager's queue to all clients."""
     while True:
         try:
-            event = await live_stream_manager.event_queue.get()
+            event = await stream_manager.event_queue.get()
             await connection_manager.broadcast(event)
-            live_stream_manager.event_queue.task_done()
+            stream_manager.event_queue.task_done()
         except asyncio.CancelledError:
             break
         except Exception as e:
             logger.error(f"Error in broadcast_events_task: {e}", exc_info=True)
 
 
-async def fetch_and_process_audience_chats():
-    """Generates a batch of audience chat messages using the new ChatbotAgent."""
-    chatbot = await create_chatbot()
-    if not chatbot:
-        logger.warning("Chatbot is not available or configured, skipping chat generation.")
-        return
-    try:
-        # Get context for the chatbot
-        current_neuro_speech = app_state.neuro_last_speech
-        recent_history = get_recent_audience_chats_for_chatbot(limit=10)
-
-        # Generate messages
-        generated_messages = await chatbot.generate_chat_messages(
-            neuro_speech=current_neuro_speech, recent_history=recent_history
-        )
-
-        if not generated_messages:
-            return
-
-        # Process and broadcast generated messages
-        for chat in generated_messages:
-            add_to_audience_buffer(chat)
-            add_to_neuro_input_queue(chat)
-            broadcast_message = {
-                "type": "chat_message",
-                **chat,
-                "is_user_message": False,
-            }
-            await connection_manager.broadcast(broadcast_message)
-            # Stagger the messages slightly to feel more natural
-            await asyncio.sleep(random.uniform(0.2, 0.8))
-
-    except Exception as e:
-        logger.error(
-            f"Error in new fetch_and_process_audience_chats: {e}", exc_info=True
-        )
 
 
-async def generate_audience_chat_task():
-    """Periodically triggers the audience chat generation task."""
-    while True:
-        try:
-            assert config_manager.settings is not None
-            # Wait until the live phase starts
-            # await app_state.live_phase_started_event.wait()
-
-            asyncio.create_task(fetch_and_process_audience_chats())
-
-            # Use the interval from the new chatbot config
-            await asyncio.sleep(config_manager.settings.chatbot.generation_interval_sec)
-        except asyncio.CancelledError:
-            break
-        except Exception as e:
-            logger.error(f"Error in generate_audience_chat_task: {e}", exc_info=True)
-            await asyncio.sleep(10)  # Avoid fast-looping on persistent errors
 
 
-async def neuro_response_cycle():
-    """The core response loop for the agent."""
-    assert config_manager.settings is not None
-    await app_state.live_phase_started_event.wait()
-    agent = await create_agent()
-
-    while True:
-        try:
-            selected_chats = []
-            # Superchat logic
-            if app_state.superchat_queue and (
-                time.time() - app_state.last_superchat_time > 10
-            ):
-                sc = app_state.superchat_queue.popleft()
-                app_state.last_superchat_time = time.time()
-                await connection_manager.broadcast(
-                    {"type": "processing_superchat", "data": sc}
-                )
-
-                # For BuiltinAgent and any other future agents
-                selected_chats = [{"username": sc["username"], "text": sc["text"]}]
-
-                # Clear the regular input queue to prevent immediate follow-up with normal chats
-                get_all_neuro_input_chats()
-            else:
-                if app_state.is_first_response_for_stream:
-                    add_to_neuro_input_queue(
-                        {
-                            "username": "System",
-                            "text": config_manager.settings.neuro.initial_greeting,
-                        }
-                    )
-                    app_state.is_first_response_for_stream = False
-                elif is_neuro_input_queue_empty():
-                    await asyncio.sleep(1)
-                    continue
-
-                current_queue_snapshot = get_all_neuro_input_chats()
-                if not current_queue_snapshot:
-                    continue
-                sample_size = min(
-                    config_manager.settings.neuro.input_chat_sample_size,
-                    len(current_queue_snapshot),
-                )
-                selected_chats = random.sample(current_queue_snapshot, sample_size)
-
-            if not selected_chats:
-                continue
-
-            response_result = await asyncio.wait_for(
-                agent.process_and_respond(selected_chats), timeout=20.0
-            )
-
-            response_texts = response_result.get("final_responses", [])
-            if not response_texts:
-                continue
-
-            # Push updated agent context to admin clients immediately after processing
-            updated_context = await agent.get_message_history()
-            await connection_manager.broadcast_to_admins(
-                {
-                    "type": "agent_context",
-                    "action": "update",
-                    "messages": updated_context,
-                }
-            )
-
-            response_text = " ".join(response_texts)
-            async with app_state.neuro_last_speech_lock:
-                app_state.neuro_last_speech = response_text
-
-            sentences = response_texts
-
-            tts_id = config_manager.settings.neuro.tts_provider_id
-            if not tts_id:
-                logger.warning(
-                    "TTS Provider ID is not set for the agent. Skipping speech synthesis."
-                )
-                continue
-
-            num_responses = len(sentences)
-            for i, sentence in enumerate(sentences):
-                try:
-                    # Synthesize audio for each sentence individually
-                    synthesis_result = await synthesize_audio_segment(
-                        sentence, tts_provider_id=tts_id
-                    )
-
-                    # Handle TTS timeout
-                    if (
-                        isinstance(synthesis_result, tuple)
-                        and synthesis_result[0] == "timeout"
-                    ):
-                        logger.warning(
-                            "TTS synthesis timed out for a sentence. Broadcasting TTS error."
-                        )
-                        await connection_manager.broadcast({"type": "neuro_error_signal"})
-                        continue  # Move to the next sentence
-
-                    # Handle other synthesis errors
-                    if isinstance(synthesis_result, Exception):
-                        raise synthesis_result
-
-                    speech_package = {
-                        "segment_id": 0,  # Each sentence is its own single-segment message
-                        "text": sentence,
-                        "audio_base64": synthesis_result[0],
-                        "duration": synthesis_result[1],
-                    }
-
-                    # Process this single sentence as a complete speech event
-                    live_stream_manager.set_neuro_speaking_status(True)
-                    await connection_manager.broadcast(
-                        {"type": "neuro_speech_segment", **speech_package, "is_end": False}
-                    )
-                    await asyncio.sleep(speech_package["duration"])
-                    await connection_manager.broadcast(
-                        {"type": "neuro_speech_segment", "is_end": True}
-                    )
-                    live_stream_manager.set_neuro_speaking_status(False)
-
-                    # If there are more sentences to follow, apply the cooldown
-                    if i < num_responses - 1:
-                        cooldown_range = (
-                            config_manager.settings.neuro.post_speech_cooldown_sec
-                        )
-                        delay = 1.0  # Fallback default
-                        if isinstance(cooldown_range, list):
-                            if len(cooldown_range) == 1:
-                                delay = cooldown_range[0]
-                            elif len(cooldown_range) >= 2:
-                                min_delay = min(cooldown_range[0], cooldown_range[1])
-                                max_delay = max(cooldown_range[0], cooldown_range[1])
-                                delay = random.uniform(min_delay, max_delay)
-
-                        await asyncio.sleep(delay)
-
-                except Exception as e:
-                    logger.error(
-                        f"Error processing sentence '{sentence}': {e}", exc_info=True
-                    )
-                    # In case of an error with one sentence, signal it and try the next one
-                    await connection_manager.broadcast({"type": "neuro_error_signal"})
-                    live_stream_manager.set_neuro_speaking_status(
-                        False
-                    )  # Ensure status is reset
-                    continue
-
-        except asyncio.TimeoutError:
-            logger.warning("Agent response timed out, skipping this cycle.")
-            await asyncio.sleep(5)
-        except asyncio.CancelledError:
-            live_stream_manager.set_neuro_speaking_status(False)
-            break
-        except Exception as e:
-            logger.error(f"Critical error in neuro_response_cycle: {e}", exc_info=True)
-            live_stream_manager.set_neuro_speaking_status(False)
-            await asyncio.sleep(10)
 
 
 # --- Application Lifecycle Events ---
@@ -405,15 +198,11 @@ async def startup_event():
             app_state.missing_providers.append("TTS Providers")
 
         if not settings.neuro.neuro_llm_provider_id:
-            app_state.unassigned_providers.append("Neuro Actor LLM")
-        if not settings.neuro.neuro_memory_llm_provider_id:
-            app_state.unassigned_providers.append("Neuro Memory LLM")
+            app_state.unassigned_providers.append("Neuro LLM")
         if not settings.neuro.tts_provider_id:
             app_state.unassigned_providers.append("Neuro TTS")
         if not settings.chatbot.chatbot_llm_provider_id:
-            app_state.unassigned_providers.append("Chatbot Actor LLM")
-        if not settings.chatbot.chatbot_memory_llm_provider_id:
-            app_state.unassigned_providers.append("Chatbot Memory LLM")
+            app_state.unassigned_providers.append("Chatbot LLM")
 
         app_state.using_default_password = (
             settings.server.panel_password == "your-secret-api-token-here"
@@ -545,7 +334,7 @@ async def startup_event():
 
     # 4. Register callbacks
     async def metadata_callback(settings: AppSettings):
-        await live_stream_manager.broadcast_stream_metadata()
+        await stream_manager.broadcast_stream_metadata()
 
     config_manager.register_update_callback(metadata_callback)
 
@@ -561,10 +350,10 @@ async def startup_event():
 
 
 @app.on_event("shutdown")
-def shutdown_event():
+async def shutdown_event():
     """Actions to perform on application shutdown."""
     if process_manager.is_running:
-        process_manager.stop_live_processes()
+        await process_manager.stop_live_processes()
     logger.info("FastAPI application has shut down.")
 
 
@@ -573,60 +362,9 @@ def shutdown_event():
 
 @app.websocket("/ws/stream")
 async def websocket_stream_endpoint(websocket: WebSocket):
-    assert config_manager.settings is not None
-    await connection_manager.connect(websocket)
-    try:
-        await connection_manager.send_personal_message(
-            live_stream_manager.get_initial_state_for_client(), websocket
-        )
-        await connection_manager.send_personal_message(
-            {
-                "type": "update_stream_metadata",
-                **config_manager.settings.stream.model_dump(),
-            },
-            websocket,
-        )
-
-        initial_chats = get_recent_audience_chats(
-            config_manager.settings.server.initial_chat_backlog_limit
-        )
-        for chat in initial_chats:
-            await connection_manager.send_personal_message(
-                {"type": "chat_message", **chat, "is_user_message": False}, websocket
-            )
-            await asyncio.sleep(0.01)
-
-        while True:
-            raw_data = await websocket.receive_text()
-            data = json.loads(raw_data)
-            if data.get("type") == "user_message":
-                user_message = {
-                    "username": data.get("username", "User"),
-                    "text": data.get("text", "").strip(),
-                }
-                if user_message["text"]:
-                    add_to_audience_buffer(user_message)
-                    add_to_neuro_input_queue(user_message)
-                    await connection_manager.broadcast(
-                        {
-                            "type": "chat_message",
-                            **user_message,
-                            "is_user_message": True,
-                        }
-                    )
-            elif data.get("type") == "superchat":
-                sc_message = {
-                    "username": data.get("username", "User"),
-                    "text": data.get("text", "").strip(),
-                    "sc_type": data.get("sc_type", "bits"),
-                }
-                if sc_message["text"]:
-                    app_state.superchat_queue.append(sc_message)
-
-    except (WebSocketDisconnect, ConnectionResetError):
-        pass
-    finally:
-        connection_manager.disconnect(websocket)
+    from ..services.stream.websocket_handler import StreamWebSocketHandler
+    handler = StreamWebSocketHandler(stream_manager)
+    await handler.handle_websocket(websocket)
 
 
 @app.websocket("/ws/admin")
@@ -861,10 +599,8 @@ async def handle_admin_ws_message(websocket: WebSocket, data: dict):
 
             # 3. Check all required LLM provider assignments
             required_llm_fields = {
-                "Neuro Actor": settings.neuro.neuro_llm_provider_id,
-                "Neuro Memory": settings.neuro.neuro_memory_llm_provider_id,
-                "Chatbot Actor": settings.chatbot.chatbot_llm_provider_id,
-                "Chatbot Memory": settings.chatbot.chatbot_memory_llm_provider_id,
+                "Neuro": settings.neuro.neuro_llm_provider_id,
+                "Chatbot": settings.chatbot.chatbot_llm_provider_id,
             }
 
             for name, provider_id in required_llm_fields.items():
@@ -884,23 +620,16 @@ async def handle_admin_ws_message(websocket: WebSocket, data: dict):
                     f"Agent (Neuro) is configured with TTS provider ID '{tts_provider_id}', but no such provider is defined in the TTS Providers list."
                 )
 
-            logger.info("Start stream action received. Resetting agent and chatbot memory...")
-            agent = await create_agent()
-            await agent.reset_memory()
-            chatbot = await create_chatbot()
-            if chatbot:
-                await chatbot.reset_memory()
-                if isinstance(chatbot, Chatbot):
-                    await chatbot.initialize_runtime_components()
+            logger.info("Start stream action received. Starting stream via StreamManager...")
 
-            if not process_manager.is_running:
-                process_manager.start_live_processes()
+            # Start the stream using StreamManager
+            await stream_manager.start_stream()
             response["payload"] = {"status": "success", "message": "Stream started"}
             # Broadcast stream status update
             status = {
-                "is_running": process_manager.is_running,
+                "is_running": stream_manager.is_running,
                 "backend_status": "running"
-                if process_manager.is_running
+                if stream_manager.is_running
                 else "stopped",
             }
             await connection_manager.broadcast_to_admins(
@@ -908,14 +637,13 @@ async def handle_admin_ws_message(websocket: WebSocket, data: dict):
             )
 
         elif action == "stop_stream":
-            if process_manager.is_running:
-                await process_manager.stop_live_processes()
+            await stream_manager.stop_stream()
             response["payload"] = {"status": "success", "message": "Stream stopped"}
             # Broadcast stream status update
             status = {
-                "is_running": process_manager.is_running,
+                "is_running": stream_manager.is_running,
                 "backend_status": "running"
-                if process_manager.is_running
+                if stream_manager.is_running
                 else "stopped",
             }
             await connection_manager.broadcast_to_admins(
@@ -923,69 +651,17 @@ async def handle_admin_ws_message(websocket: WebSocket, data: dict):
             )
 
         elif action == "restart_stream":
-            # 1. Stop the stream
-            if process_manager.is_running:
-                await process_manager.stop_live_processes()
-            
-            await asyncio.sleep(1) # Give tasks a moment to cancel
+            # Stop and restart the stream using StreamManager
+            await stream_manager.stop_stream()
+            await asyncio.sleep(1)  # Give tasks a moment to cancel
+            await stream_manager.start_stream()
 
-            # 2. Start the stream (with full validation and memory reset)
-            # --- Pre-flight validation checks ---
-            settings = config_manager.settings
-
-            # 1. Check if provider lists are defined
-            if not settings.llm_providers:
-                raise ValueError("No LLM Providers have been defined. Please add one in the settings.")
-            if not settings.tts_providers:
-                raise ValueError("No TTS Providers have been defined. Please add one in the settings.")
-
-            # 2. Create sets of defined provider IDs for efficient lookup
-            defined_llm_ids = {p.provider_id for p in settings.llm_providers}
-            defined_tts_ids = {p.provider_id for p in settings.tts_providers}
-
-            # 3. Check all required LLM provider assignments
-            required_llm_fields = {
-                "Neuro Actor": settings.neuro.neuro_llm_provider_id,
-                "Neuro Memory": settings.neuro.neuro_memory_llm_provider_id,
-                "Chatbot Actor": settings.chatbot.chatbot_llm_provider_id,
-                "Chatbot Memory": settings.chatbot.chatbot_memory_llm_provider_id,
-            }
-
-            for name, provider_id in required_llm_fields.items():
-                if not provider_id:
-                    raise ValueError(f"{name} does not have an LLM Provider configured.")
-                if provider_id not in defined_llm_ids:
-                    raise ValueError(
-                        f"'{name}' is configured with provider ID '{provider_id}', but no such provider is defined in the LLM Providers list."
-                    )
-            
-            # 4. Check TTS assignment
-            tts_provider_id = settings.neuro.tts_provider_id
-            if not tts_provider_id:
-                raise ValueError("Agent (Neuro) does not have a TTS Provider configured.")
-            if tts_provider_id not in defined_tts_ids:
-                raise ValueError(
-                    f"Agent (Neuro) is configured with TTS provider ID '{tts_provider_id}', but no such provider is defined in the TTS Providers list."
-                )
-
-            logger.info("Restart stream action received. Resetting agent and chatbot memory...")
-            agent = await create_agent()
-            await agent.reset_memory()
-            chatbot = await create_chatbot()
-            if chatbot:
-                await chatbot.reset_memory()
-                if isinstance(chatbot, Chatbot):
-                    await chatbot.initialize_runtime_components()
-
-            if not process_manager.is_running:
-                process_manager.start_live_processes()
-            
             response["payload"] = {"status": "success", "message": "Stream restarted"}
             # Broadcast stream status update
             status = {
-                "is_running": process_manager.is_running,
+                "is_running": stream_manager.is_running,
                 "backend_status": "running"
-                if process_manager.is_running
+                if stream_manager.is_running
                 else "stopped",
             }
             await connection_manager.broadcast_to_admins(

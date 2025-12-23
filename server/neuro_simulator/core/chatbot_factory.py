@@ -23,16 +23,31 @@ def _reset_chatbot_on_config_update(new_settings: AppSettings):
 config_manager.register_update_callback(_reset_chatbot_on_config_update)
 
 
-async def create_chatbot(force_recreate: bool = False) -> Optional[BaseAgent]:
+async def create_chatbot(force_recreate: bool = False, output_callback=None) -> Optional[BaseAgent]:
     """
     Factory function to create and initialize the Chatbot agent instance.
-    Returns a cached instance unless the configuration has changed.
+    Returns a cached instance unless the configuration has changed or output_callback is specified.
     Returns None if the chatbot is not configured.
 
     Args:
         force_recreate: If True, forces the recreation of the agent instance.
+        output_callback: Optional callback for agent outputs. When specified, always creates a new instance.
     """
     global _chatbot_instance
+
+    # If output_callback is provided, always create a new instance to ensure it has the callback
+    if output_callback is not None:
+        logger.debug("Creating new Chatbot agent instance with output callback...")
+        try:
+            # Directly instantiate and initialize the Chatbot agent with callback
+            agent = Chatbot(output_callback=output_callback)
+            await agent.initialize()
+            logger.debug("New Chatbot agent instance with callback created successfully.")
+            return agent
+        except Exception as e:
+            logger.critical(f"Failed to create and initialize Chatbot agent with callback: {e}", exc_info=True)
+            # We don't re-raise here because a missing chatbot might be a valid state
+            return None
 
     if force_recreate:
         logger.info("Forcing recreation of Chatbot instance.")
@@ -44,7 +59,7 @@ async def create_chatbot(force_recreate: bool = False) -> Optional[BaseAgent]:
     logger.debug("Creating new Chatbot agent instance...")
 
     try:
-        # Directly instantiate and initialize the Chatbot agent
+        # Directly instantiate and initialize the Chatbot agent without callback (for legacy use)
         agent = Chatbot()
         await agent.initialize()
         _chatbot_instance = agent
