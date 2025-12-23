@@ -1,0 +1,41 @@
+general:
+  # 中枢服务器设置
+  server_settings:
+    host: "127.0.0.1"  # 服务器主机地址
+    port: 8000  # 服务器端口
+  llm_services:
+  #   - id: openai_default
+  #     name: "OpenAI Default"
+  #     type: "openai"
+  #     key: "your-openai-api-key-here"
+  #     url: "https://api.openai.com/v1"
+  #     model: "gpt-4o"
+  #   - id: modelscope_default
+  #     name: "ModelScope Default"
+  #     type: "openai"
+  #     key: "your-modelscope-api-key-here"
+  #     url: "https://api-inference.modelscope.cn/v1"
+  #     model: "Qwen/Qwen3-32B"
+
+  tts_services:
+  #   - id: azure_default
+  #     name: "Azure Default"
+  #     type: "azure"
+  #     key: "your-azure-tts-key-here"
+  #     region: "your-azure-region-here"
+  #     timeout: 10.0
+  #   - id: azure_backup
+  #     name: "Azure Backup"
+  #     type: "azure"
+  #     key: "your-backup-azure-tts-key-here"
+  #     region: "your-backup-azure-region-here"
+  #     timeout: 10.0
+
+neuro_sama:
+  llm_service_id: ""  # 使用的 LLM 服务 ID（从 general.llm_services 中选择）
+  tts_service_id: ""   # 使用的 TTS 服务 ID（从 general.tts_services 中选择）
+  server_settings:
+    host: "127.0.0.1"  # 服务器主机地址
+    port: 8001  # 服务器端口
+
+stream: {}

@@ -118,10 +118,7 @@ gen/
 .env
 .env.*
 !.env.example
-config.yaml
 
 # Personal scripts and temporary files (adjust as needed)
 /sum.sh
 /project_code_archive.md
-# 取消下面这行的注释来忽略你的开发脚本
-#/run_dev.bat

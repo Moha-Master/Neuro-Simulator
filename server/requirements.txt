@@ -1,12 +1,4 @@
 fastapi
 uvicorn
-google-genai
-azure-cognitiveservices-speech
-httpx
-
 openai
-pyyaml
 pydantic
-jinja2
-python-multipart
-mutagen

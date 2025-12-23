@@ -1,58 +1,36 @@
+/**
+ * router/index.ts
+ *
+ * Automatic routes for `./src/pages/*.vue`
+ */
+
+// Composables
 import { createRouter, createWebHistory } from 'vue-router'
-import HomeView from '../views/HomeView.vue'
-import { useConnectionStore } from '@/stores/connection'
+import { setupLayouts } from 'virtual:generated-layouts'
+import { routes } from 'vue-router/auto-routes'
 
 const router = createRouter({
   history: createWebHistory(import.meta.env.BASE_URL),
-  routes: [
-    {
-      path: '/',
-      name: 'connection',
-      component: HomeView
-    },
-    {
-      path: '/control',
-      name: 'control',
-      component: () => import('../views/ControlView.vue'),
-      meta: { requiresAuth: true }
-    },
-    {
-      path: '/config',
-      name: 'config',
-      component: () => import('../views/ConfigView.vue'),
-      meta: { requiresAuth: true }
-    },
-    {
-      path: '/logs',
-      name: 'logs',
-      component: () => import('../views/LogsView.vue'),
-      meta: { requiresAuth: true }
-    },
-    {
-      path: '/agent',
-      name: 'agent',
-      component: () => import('../views/AgentView.vue'),
-      meta: { requiresAuth: true }
-    },
-    {
-      path: '/chatbot',
-      name: 'chatbot',
-      component: () => import('../views/ChatBotView.vue'),
-      meta: { requiresAuth: true }
-    }
-  ]
+  routes: setupLayouts(routes),
 })
 
-router.beforeEach((to, from, next) => {
-  // Pinia store must be instantiated within the guard
-  const connectionStore = useConnectionStore();
-  const requiresAuth = to.matched.some(record => record.meta.requiresAuth);
-
-  if (requiresAuth && !connectionStore.isConnected) {
-    next({ name: 'connection' });
+// Workaround for https://github.com/vitejs/vite/issues/11804
+router.onError((err, to) => {
+  if (err?.message?.includes?.('Failed to fetch dynamically imported module')) {
+    if (localStorage.getItem('vuetify:dynamic-reload')) {
+      console.error('Dynamic import error, reloading page did not fix it', err)
+    } else {
+      console.log('Reloading page to fix dynamic import error')
+      localStorage.setItem('vuetify:dynamic-reload', 'true')
+      location.assign(to.fullPath)
+    }
   } else {
-    next();
+    console.error(err)
   }
-});
+})
+
+router.isReady().then(() => {
+  localStorage.removeItem('vuetify:dynamic-reload')
+})
 
 export default router

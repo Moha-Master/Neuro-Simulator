@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "neuro_simulator"
-version = "0.6.11"
+version = "0.7.0"
 description = "Neuro Simulator Server"
 readme = "README.md"
 authors = [{ name = "Moha-Master", email = "hongkongreporter@outlook.com" }]
@@ -42,7 +42,8 @@ Repository = "https://github.com/Moha-Master/neuro-simulator"
 Issues = "https://github.com/Moha-Master/neuro-simulator/issues"
 
 [project.scripts]
-neuro = "neuro_simulator.cli:main"
+neuro = "neuro_simulator.neuro_sama.main:main"
+neuro-manager = "neuro_simulator.vedal_studio.main:main"
 
 [project.optional-dependencies]
 dev = [

@@ -1,7 +1,0 @@
-@font-face {
-  font-family: 'First Coffee';
-  /* The path is relative to the public directory at runtime */
-  src: url('/first-coffee.woff2') format('woff2');
-  font-weight: 600;
-  font-style: normal;
-}
