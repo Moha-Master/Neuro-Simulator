@@ -5,8 +5,8 @@
       <v-card-subtitle>Manage system settings for all modules</v-card-subtitle>
       <v-card-text>
         <div class="d-flex justify-end mb-4">
-          <v-btn 
-            color="primary" 
+          <v-btn
+            color="primary"
             @click="loadConfig"
             :disabled="isLoading"
             class="mr-2"
@@ -14,8 +14,8 @@
             <v-icon left>mdi-refresh</v-icon>
             Refresh
           </v-btn>
-          <v-btn 
-            color="success" 
+          <v-btn
+            color="success"
             @click="saveConfig"
             :disabled="isLoading || !config"
           >
@@ -24,8 +24,8 @@
           </v-btn>
         </div>
 
-        <v-alert 
-          v-if="saveStatus" 
+        <v-alert
+          v-if="saveStatus"
           :type="saveStatusType"
           variant="tonal"
           class="mb-4"
@@ -33,26 +33,48 @@
           {{ saveStatus }}
         </v-alert>
 
-        <v-progress-linear 
-          v-if="isLoading" 
-          indeterminate 
+        <v-progress-linear
+          v-if="isLoading"
+          indeterminate
           class="mb-4"
         ></v-progress-linear>
 
         <div v-if="!isLoading && config">
-          <v-textarea
-            v-model="configText"
-            label="Configuration (JSON)"
-            rows="20"
-            auto-grow
-            spellcheck="false"
-            class="font-mono"
-          ></v-textarea>
+          <!-- Dynamic tabs for config sections -->
+          <v-tabs v-model="currentTab" show-arrows class="mb-4">
+            <v-tab
+              v-for="(value, sectionName) in config"
+              :key="sectionName"
+              :value="sectionName"
+            >
+              {{ formatTitle(sectionName) }}
+            </v-tab>
+          </v-tabs>
+
+          <v-window v-model="currentTab" class="pa-2">
+            <v-window-item
+              v-for="(sectionData, sectionName) in config"
+              :key="sectionName"
+              :value="sectionName"
+            >
+              <!-- Render each section using the ConfigSectionRenderer component -->
+              <div v-for="(itemValue, itemName) in sectionData" :key="`${sectionName}.${itemName}`" class="mb-3">
+                <ConfigSectionRenderer
+                  :key="`${sectionName}.${itemName}`"
+                  :item-key="itemName"
+                  :value="itemValue"
+                  :parent-key="sectionName"
+                  :config-map="config"
+                  @update-value="updateSectionValue(sectionName, itemName, $event)"
+                />
+              </div>
+            </v-window-item>
+          </v-window>
         </div>
 
-        <v-alert 
-          v-if="!isLoading && !config" 
-          type="warning" 
+        <v-alert
+          v-if="!isLoading && !config"
+          type="warning"
           variant="tonal"
         >
           No configuration loaded. Click "Refresh" to load configuration.
@@ -65,13 +87,19 @@
 <script lang="ts" setup>
 import { ref, onMounted } from 'vue'
 import { useConnectionStore } from '@/stores/connection'
+import ConfigSectionRenderer from '@/components/ConfigSectionRenderer.vue'
 
 const connectionStore = useConnectionStore()
 const config = ref<any>(null)
-const configText = ref<string>('')
+const currentTab = ref<string | null>(null)
 const isLoading = ref<boolean>(true)
 const saveStatus = ref<string>('')
 const saveStatusType = ref<'success' | 'error'>('success')
+
+// Format section title (capitalize first letter)
+const formatTitle = (title: string) => {
+  return title.charAt(0).toUpperCase() + title.slice(1)
+}
 
 // Load config from backend
 const loadConfig = async () => {
@@ -86,7 +114,13 @@ const loadConfig = async () => {
     isLoading.value = true
     const configResponse = await connectionStore.sendAdminWsMessage('get_config')
     config.value = configResponse.config || configResponse
-    configText.value = JSON.stringify(config.value, null, 2)
+
+    // Set first tab as active
+    const sectionNames = Object.keys(config.value || {})
+    if (sectionNames.length > 0) {
+      currentTab.value = sectionNames[0]
+    }
+
     saveStatus.value = 'Configuration loaded successfully'
     saveStatusType.value = 'success'
   } catch (error) {
@@ -98,27 +132,28 @@ const loadConfig = async () => {
   }
 }
 
+// Update a specific value in a section
+const updateSectionValue = (sectionName: string, itemName: string, value: any) => {
+  if (config.value && config.value[sectionName]) {
+    config.value[sectionName][itemName] = value
+  }
+}
+
 // Save config to backend
 const saveConfig = async () => {
-  if (!configText.value) return
-  
+  if (!config.value) return
+
   try {
-    // Parse the JSON to validate it
-    const newConfig = JSON.parse(configText.value)
-    
-    // Update the config object
-    config.value = newConfig
-    
     // Send to backend
-    const response = await connectionStore.sendAdminWsMessage('save_config', { config: newConfig })
+    const response = await connectionStore.sendAdminWsMessage('save_config', { config: config.value })
     saveStatus.value = response.message || 'Configuration saved successfully'
     saveStatusType.value = 'success'
-    
+
     // Reload config after successful save to show latest content
     await loadConfig()
   } catch (error) {
     console.error('Failed to save config:', error)
-    saveStatus.value = 'Failed to save configuration: ' + (error instanceof Error ? error.message : 'Invalid JSON format')
+    saveStatus.value = 'Failed to save configuration: ' + (error instanceof Error ? error.message : 'Invalid configuration format')
     saveStatusType.value = 'error'
   }
 }
