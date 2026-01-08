@@ -1,0 +1,19 @@
+{
+  "general": {
+    "server_settings": {
+      "host": "127.0.0.1",
+      "port": 8000
+    },
+    "llm_services": null,
+    "tts_services": null
+  },
+  "neuro_sama": {
+    "llm_service_id": "",
+    "tts_service_id": "",
+    "server_settings": {
+      "host": "127.0.0.1",
+      "port": 8001
+    }
+  },
+  "stream": {}
+}

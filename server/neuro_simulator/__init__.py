@@ -1,0 +1,3 @@
+"""
+Neuro Simulator package.
+"""

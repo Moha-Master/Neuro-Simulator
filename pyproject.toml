@@ -29,7 +29,6 @@ dependencies = [
     "azure-cognitiveservices-speech",
     "httpx[socks]",
     "openai",
-    "pyyaml",
     "pydantic",
     "jinja2",
     "python-multipart",
@@ -43,7 +42,7 @@ Issues = "https://github.com/Moha-Master/neuro-simulator/issues"
 
 [project.scripts]
 neuro = "neuro_simulator.neuro_sama.main:main"
-neuro-manager = "neuro_simulator.vedal_studio.main:main"
+vedal = "neuro_simulator.vedal_studio.main:main"
 
 [project.optional-dependencies]
 dev = [

@@ -18,14 +18,29 @@ class Config:
         # Extract Neuro Sama specific config
         neuro_sama_config = global_config.get("neuro_sama", {})
 
+        # Check if neuro_sama config exists
+        if not neuro_sama_config:
+            raise ValueError("Missing required configuration section: neuro_sama. Please run Vedal Studio to generate and fill the configuration.")
+
         # Get service IDs
         llm_service_id = neuro_sama_config.get("llm_service_id", "")
         tts_service_id = neuro_sama_config.get("tts_service_id", "")
 
+        # Check if service IDs are provided
         if not llm_service_id:
-            raise ValueError("Missing required configuration: neuro_sama.llm_service_id")
+            raise ValueError("Missing required configuration: neuro_sama.llm_service_id. Please run Vedal Studio to generate and fill the configuration.")
         if not tts_service_id:
-            raise ValueError("Missing required configuration: neuro_sama.tts_service_id")
+            raise ValueError("Missing required configuration: neuro_sama.tts_service_id. Please run Vedal Studio to generate and fill the configuration.")
+
+        # Check server settings
+        server_config = neuro_sama_config.get("server_settings", {})
+        if not server_config:
+            raise ValueError("Missing required configuration: neuro_sama.server_settings. Please run Vedal Studio to generate and fill the configuration.")
+
+        if "host" not in server_config or not server_config["host"]:
+            raise ValueError("Missing required configuration: neuro_sama.server_settings.host. Please run Vedal Studio to generate and fill the configuration.")
+        if "port" not in server_config:
+            raise ValueError("Missing required configuration: neuro_sama.server_settings.port. Please run Vedal Studio to generate and fill the configuration.")
 
         # Find the specified LLM service
         llm_service = None

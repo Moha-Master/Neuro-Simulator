@@ -242,10 +242,10 @@ async def websocket_admin_endpoint(websocket: WebSocket):
                         return
 
                 working_path = Path(working_dir)
-                config_file = working_path.parent / "config.yaml"
+                config_file = working_path.parent / "config.json"
                 if config_file.exists():
                     with open(config_file, 'r', encoding='utf-8') as f:
-                        global_config = yaml.safe_load(f)
+                        global_config = json.load(f)
 
                     # 更新配置
                     # 通过 websocket 对象访问应用状态

@@ -23,9 +23,32 @@ def create_app(working_dir: str):
     app.include_router(router)
 
     # 挂载静态文件（dashboard）到根路径，但让 API 路由优先
-    dashboard_path = Path(__file__).parent.parent.parent / "dashboard" / "dist"
+    # 尝试多种路径来查找dashboard文件，以支持不同的安装方式
+    import neuro_simulator
+    from pathlib import Path
+    import sys
+
+    # 首先尝试从包目录获取dashboard路径（适用于正常安装）
+    package_dir = Path(neuro_simulator.__file__).parent
+    dashboard_path = package_dir / "dashboard"
+
+    # 如果在包目录下没找到，尝试在site-packages中查找（适用于-e安装）
+    if not dashboard_path.exists():
+        # 遍历sys.path查找包含neuro_simulator的site-packages路径
+        for path in sys.path:
+            if 'site-packages' in path:
+                site_pkg_path = Path(path) / 'neuro_simulator' / 'dashboard'
+                if site_pkg_path.exists():
+                    dashboard_path = site_pkg_path
+                    break
+
+    # 备用路径：从当前文件位置查找
+    if not dashboard_path.exists():
+        dashboard_path = Path(__file__).parent.parent.parent / "dashboard" / "dist"
+
     if dashboard_path.exists():
         # 使用 html=True 选项，让 Vue Router 的 history 模式正常工作
+        # 将dashboard挂载到根路径，但API路由会优先匹配
         app.mount("/", StaticFiles(directory=str(dashboard_path), html=True), name="dashboard")
     else:
         print(f"Warning: Dashboard directory not found at {dashboard_path}")
@@ -145,7 +168,7 @@ def main():
     app = create_app(working_dir)
 
     print(f"Vedal Studio running on http://{config_host}:{port}")
-    print(f"Dashboard available at http://{config_host}:{port}/dashboard")
+    print(f"Dashboard available at http://{config_host}:{port}/")
     print("Press Ctrl+C to stop.")
 
     import uvicorn
