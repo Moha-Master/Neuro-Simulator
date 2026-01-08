@@ -112,7 +112,7 @@ const loadConfig = async () => {
 
   try {
     isLoading.value = true
-    const configResponse = await connectionStore.sendAdminWsMessage('get_config')
+    const configResponse = await connectionStore.sendVedalWsMessage('get_config')
     config.value = configResponse.config || configResponse
 
     // Set first tab as active
@@ -145,7 +145,7 @@ const saveConfig = async () => {
 
   try {
     // Send to backend
-    const response = await connectionStore.sendAdminWsMessage('save_config', { config: config.value })
+    const response = await connectionStore.sendVedalWsMessage('save_config', { config: config.value })
     saveStatus.value = response.message || 'Configuration saved successfully'
     saveStatusType.value = 'success'
 

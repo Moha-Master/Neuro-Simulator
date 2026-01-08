@@ -38,24 +38,20 @@
                   <h4 class="text-h7">Connection Details:</h4>
                   <v-list>
                     <v-list-item>
-                      <v-list-item-title>WebSocket Status</v-list-item-title>
+                      <v-list-item-title>Vedal Studio Connection</v-list-item-title>
                       <v-list-item-subtitle>
-                        <v-chip :color="connectionStore.isConnected ? 'success' : 'error'" size="small">
-                          {{ connectionStore.isConnected ? 'Connected' : 'Disconnected' }}
+                        <v-chip :color="vedalStudioColor" size="small">
+                          {{ vedalStudioStatus }}
                         </v-chip>
                       </v-list-item-subtitle>
                     </v-list-item>
                     <v-list-item>
-                      <v-list-item-title>Server</v-list-item-title>
-                      <v-list-item-subtitle>ws://{{ windowLocation.hostname }}:8000/ws/admin</v-list-item-subtitle>
-                    </v-list-item>
-                    <v-list-item>
-                      <v-list-item-title>Reconnection Attempts</v-list-item-title>
-                      <v-list-item-subtitle>{{ connectionStore.reconnectAttempts }}</v-list-item-subtitle>
-                    </v-list-item>
-                    <v-list-item>
-                      <v-list-item-title>Reconnection Delay</v-list-item-title>
-                      <v-list-item-subtitle>5 seconds</v-list-item-subtitle>
+                      <v-list-item-title>Neuro Sama Connection</v-list-item-title>
+                      <v-list-item-subtitle>
+                        <v-chip :color="neuroSamaColor" size="small">
+                          {{ neuroSamaStatus }}
+                        </v-chip>
+                      </v-list-item-subtitle>
                     </v-list-item>
                   </v-list>
                 </div>
@@ -69,7 +65,7 @@
 </template>
 
 <script lang="ts" setup>
-import { ref, onMounted, onUnmounted } from 'vue'
+import { ref, onMounted, onUnmounted, onBeforeUnmount, computed } from 'vue'
 import { useConnectionStore } from '@/stores/connection'
 
 const connectionStore = useConnectionStore()
@@ -90,12 +86,19 @@ connectionStore.$subscribe((mutation, state) => {
 
 // Initialize connection on component mount
 onMounted(() => {
-  connectionStore.connect()
+  connectionStore.connectToVedal()
 })
 
 // Clean up on component unmount
-onUnmounted(() => {
+onBeforeUnmount(() => {
   // Don't disconnect when component unmounts, as other components might need the connection
   // connectionStore.disconnect()
 })
+
+// Computed properties for connection status
+const vedalStudioStatus = computed(() => connectionStore.isConnected ? 'Connected' : 'Disconnected')
+const vedalStudioColor = computed(() => connectionStore.isConnected ? 'success' : 'error')
+
+const neuroSamaStatus = computed(() => connectionStore.isNeuroSamaConnected ? 'Connected' : 'Disconnected')
+const neuroSamaColor = computed(() => connectionStore.isNeuroSamaConnected ? 'success' : 'error')
 </script>

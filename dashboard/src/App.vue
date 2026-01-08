@@ -15,6 +15,12 @@
           </template>
           <v-list-item-title>Configuration</v-list-item-title>
         </v-list-item>
+        <v-list-item to="/neuro-sama" :active="$route.path === '/neuro-sama'">
+          <template #prepend>
+            <v-icon>mdi-brain</v-icon>
+          </template>
+          <v-list-item-title>Neuro Sama</v-list-item-title>
+        </v-list-item>
       </v-list>
     </v-navigation-drawer>
 
@@ -59,6 +65,6 @@ const currentRoute = computed(() => route.path)
 // Connect to WebSocket on app initialization
 onMounted(() => {
   console.log('App mounted, connecting to WebSocket...')
-  connectionStore.connect()
+  connectionStore.connectToVedal()
 })
 </script>
