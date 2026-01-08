@@ -19,12 +19,12 @@
                 {{ getItemTitle(item, index) }}
               </v-expansion-panel-title>
               <v-expansion-panel-text>
-                <div v-for="(subValue, subKey) in item" :key="`${itemKey}-${index}-${subKey}`" class="mb-2">
+                <div v-for="(subValue, subKey) in item" :key="`${itemKey}-${index}-${String(subKey)}`" class="mb-2">
                   <v-text-field
-                    :label="formatTitle(subKey)"
+                    :label="formatTitle(String(subKey))"
                     :model-value="subValue"
-                    @update:model-value="updateArrayItemValue(index, subKey, $event)"
-                    :disabled="subKey === 'id'"
+                    @update:model-value="updateArrayItemValue(index, String(subKey), $event)"
+                    :disabled="String(subKey) === 'id'"
                     variant="outlined"
                     hide-details="auto"
                   ></v-text-field>
@@ -78,12 +78,12 @@
           {{ formatTitle(itemKey) }}
         </v-card-title>
         <v-card-text class="py-2">
-          <div v-for="(subValue, subKey) in value" :key="`${itemKey}.${subKey}`" class="mb-2">
+          <div v-for="(subValue, subKey) in value" :key="`${itemKey}.${String(subKey)}`" class="mb-2">
             <v-text-field
-              :label="formatTitle(subKey)"
+              :label="formatTitle(String(subKey))"
               :model-value="subValue"
-              @update:model-value="updateObjectValue(subKey, $event)"
-              :disabled="subKey === 'id'"
+              @update:model-value="updateObjectValue(String(subKey), $event)"
+              :disabled="String(subKey) === 'id'"
               variant="outlined"
               hide-details="auto"
             ></v-text-field>
@@ -130,7 +130,7 @@ const props = defineProps<Props>()
 
 // Define emits
 const emit = defineEmits<{
-  'update-value': [key: string, value: any]
+  'update-value': [value: any]
 }>()
 
 // Format title (capitalize first letter)

@@ -47,7 +47,7 @@
               :key="sectionName"
               :value="sectionName"
             >
-              {{ formatTitle(sectionName) }}
+              {{ formatTitle(String(sectionName)) }}
             </v-tab>
           </v-tabs>
 
@@ -58,14 +58,14 @@
               :value="sectionName"
             >
               <!-- Render each section using the ConfigSectionRenderer component -->
-              <div v-for="(itemValue, itemName) in sectionData" :key="`${sectionName}.${itemName}`" class="mb-3">
+              <div v-for="(itemValue, itemName) in sectionData" :key="`${sectionName}.${String(itemName)}`" class="mb-3">
                 <ConfigSectionRenderer
-                  :key="`${sectionName}.${itemName}`"
-                  :item-key="itemName"
+                  :key="`${sectionName}.${String(itemName)}`"
+                  :item-key="String(itemName)"
                   :value="itemValue"
-                  :parent-key="sectionName"
+                  :parent-key="String(sectionName)"
                   :config-map="config"
-                  @update-value="updateSectionValue(sectionName, itemName, $event)"
+                  @update-value="updateSectionValue(String(sectionName), String(itemName), $event)"
                 />
               </div>
             </v-window-item>
@@ -118,7 +118,7 @@ const loadConfig = async () => {
     // Set first tab as active
     const sectionNames = Object.keys(config.value || {})
     if (sectionNames.length > 0) {
-      currentTab.value = sectionNames[0]
+      currentTab.value = sectionNames[0] || null
     }
 
     saveStatus.value = 'Configuration loaded successfully'
