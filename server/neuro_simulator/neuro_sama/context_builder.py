@@ -11,9 +11,9 @@ from .memory_manager import MemoryManager
 class ContextBuilder:
     """Builds dynamic context for the LLM based on memory and input."""
 
-    def __init__(self, config):
+    def __init__(self, config, on_memory_change_callback=None):
         self.config = config
-        self.memory_manager = MemoryManager(config)
+        self.memory_manager = MemoryManager(config, on_memory_change_callback)
         self.tool_manager = ToolManager(memory_manager=self.memory_manager)
 
     def format_core_memory(self) -> str:
@@ -81,8 +81,8 @@ class ContextBuilder:
             )
         return "\n".join(lines)
 
-    def build_context(self, user_messages: List[Dict[str, str]]) -> str:
-        """Build the complete context for the LLM."""
+    def build_system_prompt(self) -> str:
+        """Build the system prompt for the LLM."""
         # Load the prompt template
         with open(self.config.PROMPT_PATH, 'r', encoding='utf-8') as f:
             prompt_template = f.read()
@@ -91,16 +91,19 @@ class ContextBuilder:
         formatted_core_memory = self.format_core_memory()
         formatted_init_memory = self.format_init_memory()
         formatted_temp_memory = self.format_temp_memory()
-        formatted_user_messages = self.format_user_messages(user_messages)
         formatted_tool_descriptions = self.format_tool_descriptions()
 
-        # Build the complete context
-        context = prompt_template.format(
+        # Build the system prompt (without current context)
+        system_prompt = prompt_template.format(
             tool_descriptions=formatted_tool_descriptions,
             init_memory=formatted_init_memory,
             core_memory=formatted_core_memory,
             temp_memory=formatted_temp_memory,
-            current_context=formatted_user_messages
         )
 
-        return context
+        return system_prompt
+
+    def build_context(self, user_messages: List[Dict[str, str]]) -> str:
+        """Build the current context for the LLM (just the user messages)."""
+        formatted_user_messages = self.format_user_messages(user_messages)
+        return formatted_user_messages

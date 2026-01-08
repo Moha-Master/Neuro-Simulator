@@ -59,9 +59,6 @@ Your response MUST be a JSON array of tool calls, following a specific process.
 **Temporary Memory:**
 {temp_memory}
 
-**Current Context:**
-{current_context}
-
 !Important: Chat is mostly spamming random shit and brainless. You should pay more attention to your previous talks, do not get stuck in chat looping. Be the talk leader, not the answer machine.
 !Tips: Chat cannot reply immediately after you finish speaking. They might still put comments about something you said before. So just go ahead.
 Based on all of the above, what do you do right now? Remember, your response MUST be a JSON array of tool calls, following the `Think -> Remember -> Act` process.

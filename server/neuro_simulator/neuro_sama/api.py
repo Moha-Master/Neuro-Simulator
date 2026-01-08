@@ -18,8 +18,29 @@ from .json_stream_parser import StreamingJSONParser
 
 router = APIRouter()
 
+# Global set to store admin WebSocket connections
+admin_connections: set = set()
+
+
+async def send_to_all_admin_connections(message: str):
+    """Send a message to all admin connections, removing disconnected connections."""
+    disconnected_connections = set()
+    for admin_ws in admin_connections:
+        try:
+            await admin_ws.send_text(message)
+        except Exception as e:
+            print(f"Error sending message to admin connection: {e}")
+            disconnected_connections.add(admin_ws)
+
+    # Remove disconnected connections
+    for ws in disconnected_connections:
+        admin_connections.discard(ws)
+
 # Global variable to track if the module is currently processing
 is_processing = False
+
+# Global variable to track admin WebSocket connections for context updates
+admin_connections = set()
 
 
 def parse_json_response(response_text: str) -> List[Dict[str, Any]]:
@@ -96,8 +117,22 @@ async def handle_websocket_communication(websocket: WebSocket, client: AsyncOpen
     """Handle the input/output communication via WebSocket."""
     global is_processing
 
-    # Initialize context builder
-    context_builder = ContextBuilder(config)
+    # Initialize context builder with memory change callback
+    def on_memory_change(init_memory, core_memory, temp_memory):
+        # Push memory update to all admin connections
+        memory_update_msg = json.dumps({
+            "type": "memory_update",
+            "payload": {
+                "init_memory": init_memory,
+                "core_memory": core_memory,
+                "temp_memory": temp_memory
+            }
+        })
+
+        # Send to all admin connections
+        asyncio.create_task(send_to_all_admin_connections(memory_update_msg))
+
+    context_builder = ContextBuilder(config, on_memory_change_callback=on_memory_change)
 
     # Initialize streaming JSON parser
     json_parser = StreamingJSONParser()
@@ -138,12 +173,27 @@ async def handle_websocket_communication(websocket: WebSocket, client: AsyncOpen
                     recent_messages.pop(0)
 
                 # Build the context using the context builder
-                context = context_builder.build_context(recent_messages)
+                # Build system prompt and user context separately
+                system_prompt = context_builder.build_system_prompt()
+                content = context_builder.build_context(recent_messages)
 
                 # Prepare messages for the API call
                 messages = [
-                    {"role": "system", "content": context},
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": content},
                 ]
+
+                # Push context update to all admin connections
+                context_update_msg = json.dumps({
+                    "type": "context_update",
+                    "payload": {
+                        "system_prompt": system_prompt,
+                        "current_context": content
+                    }
+                })
+
+                # Send to all admin connections
+                await send_to_all_admin_connections(context_update_msg)
 
                 # Call the OpenAI API to get a response
                 response = await client.chat.completions.create(
@@ -200,6 +250,8 @@ async def handle_websocket_communication(websocket: WebSocket, client: AsyncOpen
             pass  # If we can't send the error, just continue
 
 
+
+
 @router.websocket("/ws/chat")
 async def websocket_chat_endpoint(websocket: WebSocket):
     """WebSocket endpoint for chat functionality."""
@@ -214,6 +266,32 @@ async def websocket_chat_endpoint(websocket: WebSocket):
 async def websocket_admin_endpoint(websocket: WebSocket):
     """Management WebSocket endpoint for configuration updates and module control."""
     await websocket.accept()
+    # Add this connection to the admin connections set
+    admin_connections.add(websocket)
+
+    try:
+        # Send initial memory update when connection is established
+        # 获取配置和上下文构建器
+        config = websocket.app.state.config
+        context_builder = ContextBuilder(config)
+
+        # 获取各种记忆
+        init_memory = context_builder.memory_manager.get_init_memory()
+        core_memory = context_builder.memory_manager.get_core_memory_blocks()
+        temp_memory = context_builder.memory_manager.get_temp_memory()
+
+        # 发送初始记忆更新
+        await websocket.send_text(json.dumps({
+            "type": "memory_update",
+            "payload": {
+                "init_memory": init_memory,
+                "core_memory": core_memory,
+                "temp_memory": temp_memory
+            }
+        }))
+    except Exception as e:
+        print(f"Error sending initial memory update: {e}")
+
     try:
         while True:
             data = await websocket.receive_text()
@@ -266,6 +344,111 @@ async def websocket_admin_endpoint(websocket: WebSocket):
                         "request_id": message.get("request_id"),
                         "payload": {"status": "error", "message": "Config file not found"}
                     }))
+            elif action == "get_context":
+                # 获取当前上下文信息
+                try:
+                    # 获取配置和上下文构建器
+                    config = websocket.app.state.config
+                    context_builder = ContextBuilder(config)
+
+                    # 获取最近的消息历史（如果没有存储在全局状态中，我们暂时返回空列表）
+                    recent_messages = getattr(websocket.app.state, 'recent_messages', [])
+
+                    # 构建系统提示和当前上下文
+                    system_prompt = context_builder.build_system_prompt()
+                    current_context = context_builder.build_context(recent_messages)
+
+                    # 发送上下文更新
+                    await websocket.send_text(json.dumps({
+                        "type": "context_update",
+                        "payload": {
+                            "system_prompt": system_prompt,
+                            "current_context": current_context
+                        }
+                    }))
+                except Exception as e:
+                    await websocket.send_text(json.dumps({
+                        "type": "response",
+                        "request_id": message.get("request_id"),
+                        "payload": {"status": "error", "message": f"Failed to get context: {str(e)}"}
+                    }))
+            elif action == "get_memory":
+                # 获取所有记忆信息
+                try:
+                    # 获取配置和上下文构建器
+                    config = websocket.app.state.config
+                    context_builder = ContextBuilder(config)
+
+                    # 获取各种记忆
+                    init_memory = context_builder.memory_manager.get_init_memory()
+                    core_memory = context_builder.memory_manager.get_core_memory_blocks()
+                    temp_memory = context_builder.memory_manager.get_temp_memory()
+
+                    # 发送记忆更新
+                    await websocket.send_text(json.dumps({
+                        "type": "memory_update",
+                        "payload": {
+                            "init_memory": init_memory,
+                            "core_memory": core_memory,
+                            "temp_memory": temp_memory
+                        }
+                    }))
+                except Exception as e:
+                    await websocket.send_text(json.dumps({
+                        "type": "response",
+                        "request_id": message.get("request_id"),
+                        "payload": {"status": "error", "message": f"Failed to get memory: {str(e)}"}
+                    }))
+            elif action == "update_memory":
+                # 更新记忆信息
+                try:
+                    memory_data = payload.get("memory", {})
+                    init_memory = memory_data.get("init_memory")
+                    core_memory = memory_data.get("core_memory")
+                    temp_memory = memory_data.get("temp_memory")
+
+                    # 获取配置和上下文构建器
+                    config = websocket.app.state.config
+                    context_builder = ContextBuilder(config)
+
+                    # 更新各种记忆
+                    if init_memory is not None:
+                        context_builder.memory_manager.update_init_memory(init_memory)
+
+                    if core_memory is not None:
+                        # 更新核心记忆
+                        # 使用MemoryManager的内部方法来保存核心记忆
+                        context_builder.memory_manager._save_core_memory_blocks(core_memory)
+
+                    if temp_memory is not None:
+                        context_builder.memory_manager._save_temp_memory(temp_memory)
+
+                    # 发送成功响应
+                    await websocket.send_text(json.dumps({
+                        "type": "response",
+                        "request_id": message.get("request_id"),
+                        "payload": {"status": "success", "message": "Memory updated successfully"}
+                    }))
+
+                    # 同时推送更新的记忆内容给所有连接
+                    memory_update_msg = json.dumps({
+                        "type": "memory_update",
+                        "payload": {
+                            "init_memory": init_memory or context_builder.memory_manager.get_init_memory(),
+                            "core_memory": core_memory or context_builder.memory_manager.get_core_memory_blocks(),
+                            "temp_memory": temp_memory or context_builder.memory_manager.get_temp_memory()
+                        }
+                    })
+
+                    # Send to all admin connections
+                    await send_to_all_admin_connections(memory_update_msg)
+
+                except Exception as e:
+                    await websocket.send_text(json.dumps({
+                        "type": "response",
+                        "request_id": message.get("request_id"),
+                        "payload": {"status": "error", "message": f"Failed to update memory: {str(e)}"}
+                    }))
             else:
                 await websocket.send_text(json.dumps({
                     "type": "response",
@@ -274,5 +457,9 @@ async def websocket_admin_endpoint(websocket: WebSocket):
                 }))
     except WebSocketDisconnect:
         print("Admin WebSocket disconnected")
+        # Remove this connection from the admin connections set
+        admin_connections.discard(websocket)
     except Exception as e:
         print(f"Admin WebSocket error: {e}")
+        # Remove this connection from the admin connections set
+        admin_connections.discard(websocket)

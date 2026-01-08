@@ -4,6 +4,7 @@ import json
 import os
 from pathlib import Path
 import yaml
+import httpx
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from .config import ConfigManager
@@ -17,10 +18,8 @@ app_state = {
 }
 
 
-# API 端点
-@router.get("/api/system/health")
-async def health_check():
-    return {"status": "healthy", "message": "Vedal Studio is running"}
+
+
 
 
 # WebSocket 端点
