@@ -162,25 +162,15 @@ async def handle_websocket_communication(websocket: WebSocket, client: AsyncOpen
                 user_message = data.get("content", "")
                 user_name = data.get("user", "user")
 
-                # Add the user message to recent messages
-                recent_messages.append({
-                    "user": user_name,
-                    "content": user_message
-                })
-
-                # Limit recent messages to prevent it from growing indefinitely
-                if len(recent_messages) > 20:  # Keep last 20 messages
-                    recent_messages.pop(0)
-
                 # Build the context using the context builder
-                # Build system prompt and user context separately
+                # Build system prompt separately
                 system_prompt = context_builder.build_system_prompt()
-                content = context_builder.build_context(recent_messages)
 
-                # Prepare messages for the API call
+                # Prepare messages for the API call - use only the current user message
+                content = f"{user_name}: {user_message}"  # This is the single user input
                 messages = [
                     {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": content},
+                    {"role": "user", "content": content},  # Use only the current user input
                 ]
 
                 # Push context update to all admin connections
@@ -188,7 +178,7 @@ async def handle_websocket_communication(websocket: WebSocket, client: AsyncOpen
                     "type": "context_update",
                     "payload": {
                         "system_prompt": system_prompt,
-                        "current_context": content
+                        "current_context": content  # This is the single user input being sent to the LLM
                     }
                 })
 
@@ -351,12 +341,11 @@ async def websocket_admin_endpoint(websocket: WebSocket):
                     config = websocket.app.state.config
                     context_builder = ContextBuilder(config)
 
-                    # 获取最近的消息历史（如果没有存储在全局状态中，我们暂时返回空列表）
-                    recent_messages = getattr(websocket.app.state, 'recent_messages', [])
-
-                    # 构建系统提示和当前上下文
+                    # 构建系统提示
                     system_prompt = context_builder.build_system_prompt()
-                    current_context = context_builder.build_context(recent_messages)
+
+                    # 返回空的当前上下文，因为没有当前用户输入
+                    current_context = "No current user input - waiting for user message"
 
                     # 发送上下文更新
                     await websocket.send_text(json.dumps({

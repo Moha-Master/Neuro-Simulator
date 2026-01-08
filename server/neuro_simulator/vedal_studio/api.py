@@ -7,7 +7,7 @@ import yaml
 import httpx
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
-from .config import ConfigManager
+from .config import ConfigManager, WorkingDirManager
 
 router = APIRouter()
 
@@ -83,6 +83,24 @@ async def websocket_endpoint(websocket: WebSocket):
                     "request_id": message.get("request_id"),
                     "payload": {"status": "success", "message": "Reload modules command sent to all modules"}
                 }))
+            elif action == "reset_data":
+                # 重置数据到默认模板
+                try:
+                    # 使用工作目录管理器重置数据
+                    working_dir_manager = WorkingDirManager(app_state['config_manager'].working_dir)
+                    working_dir_manager.reset_data_to_templates()
+
+                    await websocket.send_text(json.dumps({
+                        "type": "response",
+                        "request_id": message.get("request_id"),
+                        "payload": {"status": "success", "message": "Data reset to default templates successfully"}
+                    }))
+                except Exception as e:
+                    await websocket.send_text(json.dumps({
+                        "type": "response",
+                        "request_id": message.get("request_id"),
+                        "payload": {"status": "error", "message": f"Failed to reset data: {str(e)}"}
+                    }))
             else:
                 await websocket.send_text(json.dumps({
                     "type": "response",

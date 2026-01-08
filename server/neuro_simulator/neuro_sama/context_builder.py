@@ -41,7 +41,16 @@ class ContextBuilder:
         if not init_memory:
             return "Not set."
 
-        return "\n".join(f"{key}: {value}" for key, value in init_memory.items())
+        formatted_parts = []
+        for key, value_obj in init_memory.items():
+            if isinstance(value_obj, dict) and 'value' in value_obj:
+                # New format: { "key": { "value": actual_value } }
+                formatted_parts.append(f"{key}: {value_obj['value']}")
+            else:
+                # Old format or other format: { "key": value }
+                formatted_parts.append(f"{key}: {value_obj}")
+
+        return "\n".join(formatted_parts)
 
     def format_temp_memory(self) -> str:
         """Format temporary memory for the prompt."""

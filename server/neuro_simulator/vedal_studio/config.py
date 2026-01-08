@@ -183,3 +183,35 @@ class WorkingDirManager:
             config_path = self.working_dir / "config.json"
             with open(config_path, 'w', encoding='utf-8') as f:
                 json.dump(default_config, f, ensure_ascii=False, indent=2)
+
+    def reset_data_to_templates(self):
+        """重置工作目录数据到默认模板，保留config.json."""
+        import shutil
+
+        # 确保目标工作目录存在
+        self.working_dir.mkdir(parents=True, exist_ok=True)
+
+        # 获取模板目录路径
+        template_dir = Path(__file__).parent.parent / "working_dir"
+
+        if not template_dir.exists():
+            raise FileNotFoundError(f"Template directory does not exist: {template_dir}")
+
+        # 遍历模板目录中的所有文件和子目录
+        for item in template_dir.iterdir():
+            source_path = item
+
+            # 跳过config.json文件
+            if item.name == 'config.json':
+                continue
+
+            dest_path = self.working_dir / item.name
+
+            # 如果目标是目录，则复制整个目录树
+            if source_path.is_dir():
+                if dest_path.exists():
+                    shutil.rmtree(dest_path)
+                shutil.copytree(source_path, dest_path)
+            else:
+                # 如果目标是文件，则直接复制
+                shutil.copy2(source_path, dest_path)

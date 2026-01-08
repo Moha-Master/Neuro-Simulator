@@ -22,6 +22,15 @@
             <v-icon left>mdi-content-save</v-icon>
             Save Configuration
           </v-btn>
+          <v-btn
+            color="error"
+            @click="resetData"
+            :disabled="isLoading"
+            class="ml-2"
+          >
+            <v-icon left>mdi-restart</v-icon>
+            Reset Data
+          </v-btn>
         </div>
 
         <v-alert
@@ -155,6 +164,35 @@ const saveConfig = async () => {
     console.error('Failed to save config:', error)
     saveStatus.value = 'Failed to save configuration: ' + (error instanceof Error ? error.message : 'Invalid configuration format')
     saveStatusType.value = 'error'
+  }
+}
+
+// Reset data to default templates
+const resetData = async () => {
+  if (!connectionStore.isConnected) {
+    saveStatus.value = 'Not connected to Vedal Studio'
+    saveStatusType.value = 'error'
+    return
+  }
+
+  if (!confirm('Are you sure you want to reset all data to default templates? This will overwrite all working directory files except config.json.')) {
+    return
+  }
+
+  try {
+    isLoading.value = true
+    const response = await connectionStore.sendVedalWsMessage('reset_data', {})
+    saveStatus.value = response.message || 'Data reset successfully'
+    saveStatusType.value = 'success'
+
+    // Reload config after reset
+    await loadConfig()
+  } catch (error) {
+    console.error('Failed to reset data:', error)
+    saveStatus.value = 'Failed to reset data: ' + (error instanceof Error ? error.message : 'Unknown error')
+    saveStatusType.value = 'error'
+  } finally {
+    isLoading.value = false
   }
 }
 
