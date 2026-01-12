@@ -88,15 +88,21 @@ async def execute_tool_and_get_output_pack(context_builder, tool_call: Dict[str,
         if tool_name == "speak":
             spoken_text = result.get("spoken_text", "")
             if spoken_text:
-                # Synthesize audio with TTS
+                # Check if audio synthesis is disabled in input data
+                audio_enabled = input_data.get("audio", True)  # Default to True if not specified
+
+                # Synthesize audio with TTS if enabled
                 audio_base64 = ""
                 duration = 0.0
-                try:
-                    from .tts import synthesize_audio_segment
-                    audio_base64, duration = await synthesize_audio_segment(spoken_text, context_builder.config)
-                except Exception as e:
-                    print(f"TTS synthesis failed: {e}")
-                    # Continue with empty audio as fallback
+                if audio_enabled:
+                    try:
+                        from .tts import synthesize_audio_segment
+                        audio_base64, duration = await synthesize_audio_segment(spoken_text, context_builder.config)
+                    except Exception as e:
+                        print(f"TTS synthesis failed: {e}")
+                        # Continue with empty audio as fallback
+                else:
+                    print("Audio synthesis disabled, skipping TTS")
 
                 # Create an output pack for speak
                 from .output_manager import OutputManager
@@ -159,18 +165,18 @@ async def handle_websocket_communication(websocket: WebSocket, client: AsyncOpen
             is_processing = True
 
             try:
-                user_message = data.get("content", "")
-                user_name = data.get("user", "user")
+                module_message = data.get("content", "")
+                module_name = data.get("module", "system")
 
                 # Build the context using the context builder
                 # Build system prompt separately
                 system_prompt = context_builder.build_system_prompt()
 
-                # Prepare messages for the API call - use only the current user message
-                content = f"{user_name}: {user_message}"  # This is the single user input
+                # Prepare messages for the API call - use only the current module message
+                content = f"{module_name}: {module_message}"  # This is the single module input
                 messages = [
                     {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": content},  # Use only the current user input
+                    {"role": "user", "content": content},  # Use only the current module input
                 ]
 
                 # Push context update to all admin connections

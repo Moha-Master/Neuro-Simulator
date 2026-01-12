@@ -18,6 +18,17 @@ export const useConnectionStore = defineStore('connection', {
     neuroSamaWsUrl: '',
     neuroSamaReconnectTimer: null as number | null, // Store timer ID
 
+    // Neuro Sama Chat connection
+    isNeuroSamaChatConnected: false,
+    neuroSamaChatWs: null as WebSocket | null,
+    neuroSamaChatReconnectAttempts: 0,
+    neuroSamaChatReconnectDelay: 5000, // 5 seconds
+    neuroSamaChatWsUrl: '',
+    neuroSamaChatReconnectTimer: null as number | null, // Store timer ID,
+
+    // Callback for chat messages
+    onChatMessage: null as ((data: any) => void) | null,
+
     // Configuration
     config: null as any,
   }),
@@ -158,6 +169,9 @@ export const useConnectionStore = defineStore('connection', {
         }
 
         console.log('Neuro Sama connection established successfully')
+
+        // Now also connect to the chat endpoint
+        this.connectToNeuroSamaChat()
       }
 
       this.neuroSamaWs.onclose = (event) => {
@@ -176,6 +190,88 @@ export const useConnectionStore = defineStore('connection', {
 
         // Schedule reconnection on error
         this.scheduleNeuroSamaReconnect()
+      }
+    },
+
+    // Connect to Neuro Sama Chat
+    connectToNeuroSamaChat() {
+      // Construct the chat WebSocket URL from the admin URL
+      if (!this.neuroSamaWsUrl) {
+        console.error('Neuro Sama WebSocket URL not available for chat connection')
+        return
+      }
+
+      // Replace /ws/admin with /ws/chat
+      this.neuroSamaChatWsUrl = this.neuroSamaWsUrl.replace('/ws/admin', '/ws/chat')
+
+      console.log(`Attempting to connect to Neuro Sama chat at ${this.neuroSamaChatWsUrl} (attempt ${this.neuroSamaChatReconnectAttempts + 1})`)
+
+      // Clear any existing reconnect timer
+      if (this.neuroSamaChatReconnectTimer) {
+        clearTimeout(this.neuroSamaChatReconnectTimer)
+        this.neuroSamaChatReconnectTimer = null
+      }
+
+      // Close existing connection if present
+      if (this.neuroSamaChatWs) {
+        console.log('Closing existing Neuro Sama chat WebSocket connection')
+        this.neuroSamaChatWs.close()
+      }
+
+      // Create WebSocket connection to Neuro Sama Chat
+      this.neuroSamaChatWs = new WebSocket(this.neuroSamaChatWsUrl)
+
+      // Set up connection timeout to ensure it doesn't hang indefinitely
+      const connectionTimeout = setTimeout(() => {
+        if (this.neuroSamaChatWs && this.neuroSamaChatWs.readyState === WebSocket.CONNECTING) {
+          console.log('Neuro Sama chat connection attempt timed out')
+          this.neuroSamaChatWs.close() // Close the hanging connection
+          this.scheduleNeuroSamaChatReconnect() // Schedule a new connection attempt
+        }
+      }, this.neuroSamaChatReconnectDelay) // Use the same delay as reconnection delay
+
+      this.neuroSamaChatWs.onopen = () => {
+        clearTimeout(connectionTimeout) // Clear timeout on successful connection
+        this.isNeuroSamaChatConnected = true
+        this.neuroSamaChatReconnectAttempts = 0 // Reset attempts on successful connection
+
+        // Clear reconnect timer on successful connection
+        if (this.neuroSamaChatReconnectTimer) {
+          clearTimeout(this.neuroSamaChatReconnectTimer)
+          this.neuroSamaChatReconnectTimer = null
+        }
+      }
+
+      // Add event listener for chat messages
+      this.neuroSamaChatWs.onmessage = (event) => {
+        // Forward chat messages to any registered handler
+        // This will be handled by the component that uses this store
+        try {
+          const data = JSON.parse(event.data);
+          if (this.onChatMessage) {
+            this.onChatMessage(data);
+          }
+        } catch (error) {
+          console.error('Error parsing chat message:', error);
+        }
+      }
+
+      this.neuroSamaChatWs.onclose = (event) => {
+        clearTimeout(connectionTimeout) // Clear timeout on close
+        console.log('Disconnected from Neuro Sama chat WebSocket:', event.code, event.reason)
+        this.isNeuroSamaChatConnected = false
+
+        // Schedule reconnection
+        this.scheduleNeuroSamaChatReconnect()
+      }
+
+      this.neuroSamaChatWs.onerror = (error) => {
+        clearTimeout(connectionTimeout) // Clear timeout on error
+        console.error('Neuro Sama chat WebSocket error:', error)
+        this.isNeuroSamaChatConnected = false
+
+        // Schedule reconnection on error
+        this.scheduleNeuroSamaChatReconnect()
       }
     },
 
@@ -213,6 +309,23 @@ export const useConnectionStore = defineStore('connection', {
       }, this.neuroSamaReconnectDelay)
     },
 
+    scheduleNeuroSamaChatReconnect() {
+      console.log(`Scheduling Neuro Sama chat reconnection in ${this.neuroSamaChatReconnectDelay}ms (attempt ${this.neuroSamaChatReconnectAttempts + 1})`)
+
+      // Clear any existing timer
+      if (this.neuroSamaChatReconnectTimer) {
+        clearTimeout(this.neuroSamaChatReconnectTimer)
+        this.neuroSamaChatReconnectTimer = null
+      }
+
+      // Schedule reconnection after delay
+      this.neuroSamaChatReconnectTimer = window.setTimeout(() => {
+        console.log(`Executing Neuro Sama chat reconnection attempt #${this.neuroSamaChatReconnectAttempts + 1}`)
+        this.neuroSamaChatReconnectAttempts++
+        this.connectToNeuroSamaChat() // Try to connect again
+      }, this.neuroSamaChatReconnectDelay)
+    },
+
     disconnect() {
       // Clear any reconnect timers
       if (this.vedalReconnectTimer) {
@@ -223,6 +336,11 @@ export const useConnectionStore = defineStore('connection', {
       if (this.neuroSamaReconnectTimer) {
         clearTimeout(this.neuroSamaReconnectTimer)
         this.neuroSamaReconnectTimer = null
+      }
+
+      if (this.neuroSamaChatReconnectTimer) {
+        clearTimeout(this.neuroSamaChatReconnectTimer)
+        this.neuroSamaChatReconnectTimer = null
       }
 
       // Close the WebSocket connections
@@ -236,8 +354,14 @@ export const useConnectionStore = defineStore('connection', {
         this.neuroSamaWs = null
       }
 
+      if (this.neuroSamaChatWs) {
+        this.neuroSamaChatWs.close()
+        this.neuroSamaChatWs = null
+      }
+
       this.isConnected = false
       this.isNeuroSamaConnected = false
+      this.isNeuroSamaChatConnected = false
       console.log('Disconnected from all WebSocket connections')
     },
 
@@ -328,6 +452,23 @@ export const useConnectionStore = defineStore('connection', {
           this.neuroSamaWs?.removeEventListener('message', responseHandler)
           reject(new Error('Request timeout'))
         }, 10000) // 10 second timeout
+      })
+    },
+
+    // Method to send chat messages via the persistent chat WebSocket connection
+    async sendNeuroSamaChatMessage(message: any): Promise<void> {
+      return new Promise((resolve, reject) => {
+        if (!this.isNeuroSamaChatConnected || !this.neuroSamaChatWs) {
+          reject(new Error('Not connected to Neuro Sama chat WebSocket'))
+          return
+        }
+
+        // Send message
+        this.neuroSamaChatWs.send(JSON.stringify(message))
+
+        // Resolve immediately since responses will be handled by the component
+        // The loading state will be managed by the component based on completion messages
+        resolve()
       })
     }
   }

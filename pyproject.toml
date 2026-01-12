@@ -43,8 +43,8 @@ Issues = "https://github.com/Moha-Master/neuro-simulator/issues"
 [project.scripts]
 neuro = "neuro_simulator.neuro_sama.main:main"
 vedal = "neuro_simulator.vedal_studio.main:main"
-neuro-test = "neuro_simulator.neuro_sama.test_client"
-vedal-test = "neuro_simulator.vedal_studio.test_client"
+neuro-test = "neuro_simulator.neuro_sama.test_client:main"
+vedal-test = "neuro_simulator.vedal_studio.test_client:main"
 
 [project.optional-dependencies]
 dev = [

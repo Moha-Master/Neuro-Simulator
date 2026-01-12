@@ -16,9 +16,10 @@ async def test_websocket():
 
         # Test messages with live stream context
         test_messages = [
-            {"content": "LIVE CONTEXT: Neuro is currently live streaming on Twitch. Chat user 'test_user' says: Hello, Neuro Sama!", "user": "system"},
-            {"content": "LIVE CONTEXT: Neuro is currently live streaming on Twitch. Chat user 'another_user' says: How are you today?", "user": "system"},
-            {"content": "LIVE CONTEXT: Neuro is currently live streaming on Twitch. Chat user 'curious_user' says: Tell me about yourself.", "user": "system"}
+            {"content": "LIVE CONTEXT: Neuro is currently live streaming on Twitch. Chat user 'test_user' says: Hello, Neuro Sama!", "module": "stream_system"},
+            {"content": "LIVE CONTEXT: Neuro is currently live streaming on Twitch. Chat user 'another_user' says: How are you today?", "module": "stream_system"},
+            {"content": "LIVE CONTEXT: Neuro is currently live streaming on Twitch. Chat user 'curious_user' says: Tell me about yourself.", "module": "stream_system", "audio": False},  # Test audio disabled
+            {"content": "PRIVATE DM CONTEXT: User 'vedal987' sends a private message: Hey Neuro, how are you doing?", "module": "dm_system", "audio": False}  # Test private DM scenario
         ]
 
         for msg in test_messages:
@@ -120,7 +121,12 @@ async def test_websocket():
     print("All tests completed, connections closed.")
 
 
-if __name__ == "__main__":
+def main():
+    """Main entry point for the test client."""
     print("Starting Neuro Sama module test client...")
     print("Make sure the Neuro Sama module is running on ws://localhost:8001/ws")
     asyncio.run(test_websocket())
+
+
+if __name__ == "__main__":
+    main()

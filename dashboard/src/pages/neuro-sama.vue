@@ -23,6 +23,9 @@
           <v-tab value="memory">
             Memory
           </v-tab>
+          <v-tab value="chat">
+            Chat
+          </v-tab>
         </v-tabs>
 
         <v-window v-model="currentTab" class="pa-2">
@@ -380,6 +383,105 @@
               </v-btn>
             </div>
           </v-window-item>
+
+          <v-window-item value="chat">
+            <v-card variant="outlined" class="mb-4">
+              <v-card-title class="text-subtitle-1 py-2">
+                <v-icon class="mr-2">mdi-message-text</v-icon>
+                Private Chat
+              </v-card-title>
+              <v-card-text class="py-4">
+                <v-row>
+                  <v-col cols="12">
+                    <v-textarea
+                      label="Context"
+                      v-model="chatContext"
+                      variant="outlined"
+                      hide-details="auto"
+                      :readonly="!canEditMemory"
+                      rows="3"
+                      class="mb-4"
+                    ></v-textarea>
+                  </v-col>
+                </v-row>
+
+                <v-row>
+                  <v-col cols="12" md="4">
+                    <v-text-field
+                      label="Username"
+                      v-model="chatUsername"
+                      variant="outlined"
+                      hide-details="auto"
+                      :readonly="!canEditMemory"
+                    ></v-text-field>
+                  </v-col>
+                  <v-col cols="12" md="4">
+                    <v-text-field
+                      label="User Message"
+                      v-model="chatUserMessage"
+                      variant="outlined"
+                      hide-details="auto"
+                      :readonly="!canEditMemory"
+                    ></v-text-field>
+                  </v-col>
+                  <v-col cols="12" md="4">
+                    <v-switch
+                      v-model="enableAudio"
+                      label="Enable Audio"
+                      color="primary"
+                      hide-details
+                      :disabled="!canEditMemory"
+                    ></v-switch>
+                  </v-col>
+                </v-row>
+
+                <v-row class="mt-4">
+                  <v-col cols="12">
+                    <v-btn
+                      color="primary"
+                      @click="sendChatMessage"
+                      :disabled="isLoading || !canEditMemory"
+                      class="mr-4"
+                    >
+                      <v-icon left>mdi-send</v-icon>
+                      Send
+                    </v-btn>
+                  </v-col>
+                </v-row>
+
+                <v-row class="mt-4">
+                  <v-col cols="12">
+                    <v-card variant="tonal" class="pa-4">
+                      <v-card-title class="text-subtitle-1 py-2">
+                        <v-icon class="mr-2">mdi-account-voice</v-icon>
+                        Neuro's Response
+                      </v-card-title>
+                      <v-card-text class="py-2">
+                        <pre class="font-mono">{{ neuroResponse }}</pre>
+
+                        <!-- Audio status information integrated into the response card -->
+                        <div v-if="neuroAudioQueue.length > 0" class="mt-2 caption">
+                          <span v-if="currentPlayingAudio">🔊 Playing audio {{ getCurrentPlayingIndex() + 1 }} of {{ neuroAudioQueue.length }}</span>
+                          <span v-else>🎵 {{ neuroAudioQueue.length }} audio{{ neuroAudioQueue.length > 1 ? 's' : '' }} queued (auto-playing)</span>
+                        </div>
+
+                        <!-- Hidden audio element for background playback -->
+                        <audio
+                          v-if="currentPlayingAudio && getCurrentPlayingAudio()"
+                          :id="`audio_${currentPlayingAudio}`"
+                          :src="`data:audio/wav;base64,${getCurrentPlayingAudio()?.audio}`"
+                          autoplay
+                          @ended="finishCurrentAudio"
+                          @error="finishCurrentAudio"
+                          style="display: none;"
+                        ></audio>
+                      </v-card-text>
+                    </v-card>
+                  </v-col>
+                </v-row>
+              </v-card-text>
+            </v-card>
+          </v-window-item>
         </v-window>
       </v-card-text>
     </v-card>
@@ -399,6 +501,16 @@ const coreMemory = ref('')
 const tempMemory = ref('')
 const isLoading = ref(false)
 const canEditMemory = computed(() => connectionStore.isNeuroSamaConnected)
+
+// Chat tab related data
+const chatContext = ref('PRIVATE DM CONTEXT: User is having a private conversation with Neuro.')
+const chatUsername = ref('vedal987')
+const chatUserMessage = ref('')
+const neuroResponse = ref('')
+// Audio queue system for sequential playback
+const neuroAudioQueue = ref<Array<{id: string, audio: string, duration: number}>>([])
+const currentPlayingAudio = ref<string | null>(null) // Track currently playing audio ID
+const enableAudio = ref(false) // Audio toggle switch
 
 // Computed property to extract core memory blocks
 const coreMemoryBlocks = computed(() => {
@@ -813,8 +925,8 @@ const saveMemory = async () => {
   }
 }
 
-// Handle incoming messages from Neuro Sama
-const handleMessage = (event: MessageEvent) => {
+// Handle incoming messages from Neuro Sama WebSocket (MessageEvent)
+const handleMessageEvent = (event: MessageEvent) => {
   try {
     const data = JSON.parse(event.data)
 
@@ -830,6 +942,25 @@ const handleMessage = (event: MessageEvent) => {
       tempMemory.value = JSON.stringify(data.payload.temp_memory || [], null, 2)
       // Reset loading state after receiving data
       isLoading.value = false
+    } else if (data.type === 'speak') {
+      // Handle speak responses for context/memory tabs
+      const text = data.payload.text || ''
+      const audioBase64 = data.payload.audio_base64 || ''
+
+      // For context/memory tabs, we don't accumulate responses
+      if (audioBase64) {
+        // Could handle audio for context/memory here if needed
+      }
+
+      // Don't reset loading state here as multiple responses may come
+    } else if (data.type === 'completion') {
+      // Handle completion messages - this signals the end of a response sequence
+      // Reset loading state after receiving completion
+      isLoading.value = false
+    } else if (data.type === 'info' || data.type === 'error') {
+      // Handle info or error messages
+      // Reset loading state after receiving response
+      isLoading.value = false
     }
   } catch (error) {
     console.error('Error parsing Neuro Sama message:', error)
@@ -838,21 +969,159 @@ const handleMessage = (event: MessageEvent) => {
   }
 }
 
+// Handle incoming messages from Neuro Sama chat (already parsed data)
+const handleChatMessage = (data: any) => {
+  if (data.type === 'speak') {
+    // Handle speak responses for chat tab - accumulate responses
+    const text = data.payload.text || ''
+    const audioBase64 = data.payload.audio_base64 || ''
+    const duration = data.payload.duration || 0
+
+    // Append to existing response instead of replacing
+    neuroResponse.value = neuroResponse.value ? `${neuroResponse.value}\n${text}` : text
+
+    // Add audio to queue if available and audio is enabled
+    if (audioBase64 && enableAudio.value) {
+      const audioItem = {
+        id: `audio_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`, // Unique ID
+        audio: audioBase64,
+        duration: duration
+      }
+      neuroAudioQueue.value = [...neuroAudioQueue.value, audioItem]
+
+      // If no audio is currently playing, start playing
+      if (!currentPlayingAudio.value) {
+        playNextAudio()
+      }
+    }
+
+    // Don't reset loading state here as multiple responses may come
+  } else if (data.type === 'completion') {
+    // Handle completion messages - this signals the end of a response sequence
+    // Reset loading state after receiving completion
+    isLoading.value = false
+  } else if (data.type === 'info' || data.type === 'error') {
+    // Handle info or error messages
+    // Reset loading state after receiving response
+    isLoading.value = false
+  }
+}
+
+// Function to play next audio in the queue
+const playNextAudio = () => {
+  if (neuroAudioQueue.value.length > 0) {
+    // Get the first audio in the queue
+    const nextAudio = neuroAudioQueue.value[0]
+    if (nextAudio) {
+      currentPlayingAudio.value = nextAudio.id
+      // The audio will auto-play due to the autoplay attribute in the template
+    }
+  } else {
+    // No more audio in queue
+    currentPlayingAudio.value = null
+  }
+}
+
+// Function to finish current audio and move to next
+const finishCurrentAudio = () => {
+  // Remove the first item from the queue
+  if (neuroAudioQueue.value.length > 0) {
+    neuroAudioQueue.value.shift()
+  }
+
+  // Reset current playing audio
+  currentPlayingAudio.value = null
+
+  // Play next audio if available
+  setTimeout(() => {
+    if (neuroAudioQueue.value.length > 0) {
+      playNextAudio()
+    }
+  }, 100) // Small delay before playing next
+}
+
+// Helper function to get the currently playing audio object
+const getCurrentPlayingAudio = () => {
+  if (!currentPlayingAudio.value) return null;
+  return neuroAudioQueue.value.find(item => item.id === currentPlayingAudio.value) || null;
+}
+
+// Helper function to get the index of the currently playing audio
+const getCurrentPlayingIndex = () => {
+  if (!currentPlayingAudio.value) return -1;
+  return neuroAudioQueue.value.findIndex(item => item.id === currentPlayingAudio.value);
+}
+
+// Send chat message to Neuro Sama
+const sendChatMessage = async () => {
+  if (!connectionStore.isNeuroSamaConnected) {
+    alert('Not connected to Neuro Sama')
+    return
+  }
+
+  try {
+    isLoading.value = true
+
+    // Clear previous response when starting a new chat
+    neuroResponse.value = ''
+    neuroAudioQueue.value = [] // Clear audio queue
+    currentPlayingAudio.value = null // Reset playing state
+
+    // Combine context, username and user message
+    const fullContent = `${chatContext.value}\n${chatUsername.value}: ${chatUserMessage.value}`
+
+    // Send message to Neuro Sama with module and audio settings
+    const message = {
+      content: fullContent,
+      module: 'system_dm',  // Fixed module name as specified
+      audio: enableAudio.value  // Use the audio toggle switch value
+    }
+
+    // Send the message via the Neuro Sama chat WebSocket connection
+    await connectionStore.sendNeuroSamaChatMessage(message)
+
+  } catch (error) {
+    console.error('Failed to send chat message:', error)
+    alert('Failed to send message: ' + (error instanceof Error ? error.message : 'Unknown error'))
+  } finally {
+    // Loading state will be reset when completion message is received
+  }
+}
+
 onMounted(() => {
   // Add event listener for Neuro Sama WebSocket messages
   if (connectionStore.neuroSamaWs) {
-    connectionStore.neuroSamaWs.addEventListener('message', handleMessage)
+    connectionStore.neuroSamaWs.addEventListener('message', handleMessageEvent)
   }
+
+  // Set up chat message callback
+  connectionStore.onChatMessage = handleChatMessage;
 
   // Load initial data
   loadData()
 })
 
 onUnmounted(() => {
-  // Remove event listener
+  // Remove event listeners
   if (connectionStore.neuroSamaWs) {
-    connectionStore.neuroSamaWs.removeEventListener('message', handleMessage)
+    connectionStore.neuroSamaWs.removeEventListener('message', handleMessageEvent)
   }
+
+  // Clear chat message callback
+  connectionStore.onChatMessage = null;
+
+  // Stop any playing audio
+  if (currentPlayingAudio.value) {
+    const audioElement = document.getElementById(`audio_${currentPlayingAudio.value}`) as HTMLAudioElement
+    if (audioElement) {
+      audioElement.pause()
+      audioElement.currentTime = 0
+    }
+  }
+
+  // Clear audio queue
+  neuroAudioQueue.value = []
+  currentPlayingAudio.value = null
 })
 </script>
 
