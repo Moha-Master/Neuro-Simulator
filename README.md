@@ -6,6 +6,8 @@
 
 ## 虽然还是有不少点子，但是近段时间有点忙，暂缓开发💩
 
+## 以及由于把main当debug分支用的坏习惯，当前main搞了一半，只有release可完整运行
+
 Neuro Simulator 是一个模拟 Neuro-sama 直播的项目。  
 它通过使用自带的有记忆 Agent，~~也可调用 Letta（一个为 LLM 添加自主记忆功能的项目）~~，以及相同构造的 Chatbot Agent 作为虚拟观众，模拟一场 Neuro-sama 的 Just Chatting 直播。  
 它能生成实时的虚拟聊天内容，并通过 TTS 合成语音，提供沉浸式的 Twitch vedal987 频道观看体验。  
