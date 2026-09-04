@@ -33,6 +33,9 @@ dependencies = [
     "jinja2",
     "python-multipart",
     "mutagen",
+    "PyYAML",
+    "aiosqlite",
+    "mcp>=2.1.1",
 ]
 
 [project.urls]
@@ -42,9 +45,7 @@ Issues = "https://github.com/Moha-Master/neuro-simulator/issues"
 
 [project.scripts]
 neuro = "neuro_simulator.neuro_sama.main:main"
-vedal = "neuro_simulator.vedal_studio.main:main"
-neuro-test = "neuro_simulator.neuro_sama.test_client:main"
-vedal-test = "neuro_simulator.vedal_studio.test_client:main"
+vedal = "neuro_simulator.vedal.main:main"
 
 [project.optional-dependencies]
 dev = [
@@ -54,6 +55,7 @@ dev = [
     "flake8",
 ]
 
+# 前端构建 hook：dashboard 恢复构建；client 部分仍保持禁用（待 client 重写后恢复）
 [tool.hatch.build.hooks.custom]
 path = "hatch_build.py"
 

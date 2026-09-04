@@ -12,10 +12,13 @@ export {}
 declare module 'vue' {
   export interface GlobalComponents {
     AppFooter: typeof import('./components/AppFooter.vue')['default']
-    ConfigSectionRenderer: typeof import('./components/ConfigSectionRenderer.vue')['default']
-    HelloWorld: typeof import('./components/HelloWorld.vue')['default']
-    IdReferenceSelector: typeof import('./components/IdReferenceSelector.vue')['default']
+    ChatInput: typeof import('./components/chat/ChatInput.vue')['default']
+    ChatMessage: typeof import('./components/chat/ChatMessage.vue')['default']
+    ChatSidebar: typeof import('./components/chat/ChatSidebar.vue')['default']
+    ModuleOffline: typeof import('./components/ModuleOffline.vue')['default']
     RouterLink: typeof import('vue-router')['RouterLink']
     RouterView: typeof import('vue-router')['RouterView']
+    ThinkingBlock: typeof import('./components/chat/ThinkingBlock.vue')['default']
+    ToolCallBlock: typeof import('./components/chat/ToolCallBlock.vue')['default']
   }
 }

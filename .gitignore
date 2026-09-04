@@ -112,13 +112,22 @@ target/
 gen/
 
 # ---------------------------------------------------------------------------
-# --- Project Specific & Sensitive Info -------------------------------------
+# --- Project Specific & Sensitive Info --------------------------------------
 # ---------------------------------------------------------------------------
 # Secrets and environment variables (DO NOT COMMIT)
 .env
 .env.*
 !.env.example
 
+# neuro-simulator 工作目录数据（当 --dir 指向仓库内路径时）
+config.yaml
+*.db
+*.db-wal
+*.db-shm
+
 # Personal scripts and temporary files (adjust as needed)
 /sum.sh
 /project_code_archive.md
+
+AGENTS.md
+.playwright-cli/

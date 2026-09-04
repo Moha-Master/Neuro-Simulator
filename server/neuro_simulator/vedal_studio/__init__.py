@@ -1,3 +1,0 @@
-"""
-Vedal Studio module.
-"""

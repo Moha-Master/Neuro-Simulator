@@ -1,202 +1,160 @@
 <template>
   <v-container>
     <v-card>
-      <v-card-title>System Configuration</v-card-title>
-      <v-card-subtitle>Manage system settings for all modules</v-card-subtitle>
+      <v-card-title>Configuration Management</v-card-title>
+      <v-card-subtitle>
+        Edit config.yaml in plain text — one text box per schema (server / neuro_sama / vedal / ...)
+      </v-card-subtitle>
       <v-card-text>
+        <!-- 顶部：刷新 -->
         <div class="d-flex justify-end mb-4">
-          <v-btn
-            color="primary"
-            @click="loadConfig"
-            :disabled="isLoading"
-            class="mr-2"
-          >
+          <v-btn color="primary" @click="loadConfig" :disabled="isLoading">
             <v-icon left>mdi-refresh</v-icon>
-            Refresh
-          </v-btn>
-          <v-btn
-            color="success"
-            @click="saveConfig"
-            :disabled="isLoading || !config"
-          >
-            <v-icon left>mdi-content-save</v-icon>
-            Save Configuration
-          </v-btn>
-          <v-btn
-            color="error"
-            @click="resetData"
-            :disabled="isLoading"
-            class="ml-2"
-          >
-            <v-icon left>mdi-restart</v-icon>
-            Reset Data
+            刷新
           </v-btn>
         </div>
 
-        <v-alert
-          v-if="saveStatus"
-          :type="saveStatusType"
-          variant="tonal"
-          class="mb-4"
-        >
-          {{ saveStatus }}
-        </v-alert>
+        <v-alert v-if="status" :type="statusType" variant="tonal" class="mb-4">{{ status }}</v-alert>
+        <v-progress-linear v-if="isLoading" indeterminate class="mb-4"></v-progress-linear>
 
-        <v-progress-linear
-          v-if="isLoading"
-          indeterminate
-          class="mb-4"
-        ></v-progress-linear>
-
-        <div v-if="!isLoading && config">
-          <!-- Dynamic tabs for config sections -->
-          <v-tabs v-model="currentTab" show-arrows class="mb-4">
-            <v-tab
-              v-for="(value, sectionName) in config"
-              :key="sectionName"
-              :value="sectionName"
-            >
-              {{ formatTitle(String(sectionName)) }}
+        <div v-if="!isLoading && schemas">
+          <v-tabs v-model="currentTab" show-arrows class="mb-2">
+            <v-tab v-for="name in schemaNames" :key="name" :value="name">
+              {{ name }}
             </v-tab>
           </v-tabs>
-
           <v-window v-model="currentTab" class="pa-2">
-            <v-window-item
-              v-for="(sectionData, sectionName) in config"
-              :key="sectionName"
-              :value="sectionName"
-            >
-              <!-- Render each section using the ConfigSectionRenderer component -->
-              <div v-for="(itemValue, itemName) in sectionData" :key="`${sectionName}.${String(itemName)}`" class="mb-3">
-                <ConfigSectionRenderer
-                  :key="`${sectionName}.${String(itemName)}`"
-                  :item-key="String(itemName)"
-                  :value="itemValue"
-                  :parent-key="String(sectionName)"
-                  :config-map="config"
-                  @update-value="updateSectionValue(String(sectionName), String(itemName), $event)"
-                />
-              </div>
+            <v-window-item v-for="name in schemaNames" :key="name" :value="name">
+              <v-textarea
+                v-model="schemas[name]"
+                variant="outlined"
+                auto-grow
+                no-resize
+                rows="14"
+                density="compact"
+                class="font-mono"
+              ></v-textarea>
             </v-window-item>
           </v-window>
         </div>
 
-        <v-alert
-          v-if="!isLoading && !config"
-          type="warning"
-          variant="tonal"
-        >
-          No configuration loaded. Click "Refresh" to load configuration.
+        <v-alert v-if="!isLoading && !schemas" type="warning" variant="tonal">
+          No configuration loaded. Click "刷新" to load configuration.
         </v-alert>
+
+        <!-- 底部：保存并重载 / 放弃更改 / 重载所有 -->
+        <div class="d-flex justify-end mt-4">
+          <v-btn color="success" @click="saveAndReload" :disabled="isLoading || !schemas">
+            <v-icon left>mdi-content-save</v-icon>
+            保存并重载
+          </v-btn>
+          <v-btn color="warning" @click="discardChanges" :disabled="isLoading" class="mx-2">
+            <v-icon left>mdi-undo</v-icon>
+            放弃更改
+          </v-btn>
+          <v-btn color="error" @click="reloadAll" :disabled="isLoading">
+            <v-icon left>mdi-restart</v-icon>
+            重载所有
+          </v-btn>
+        </div>
       </v-card-text>
     </v-card>
   </v-container>
 </template>
 
 <script lang="ts" setup>
-import { ref, onMounted } from 'vue'
-import { useConnectionStore } from '@/stores/connection'
-import ConfigSectionRenderer from '@/components/ConfigSectionRenderer.vue'
+import { ref, onMounted, computed } from 'vue'
+import { api, ApiError } from '@/stores/connection'
 
-const connectionStore = useConnectionStore()
-const config = ref<any>(null)
+interface SaveResult {
+  status: string
+  changed_schemas: string[]
+  reloads: Record<string, { status: string; detail?: string }>
+}
+
+const schemas = ref<Record<string, string> | null>(null)
 const currentTab = ref<string | null>(null)
-const isLoading = ref<boolean>(true)
-const saveStatus = ref<string>('')
-const saveStatusType = ref<'success' | 'error'>('success')
+const isLoading = ref(false)
+const status = ref('')
+const statusType = ref<'success' | 'error' | 'info'>('info')
 
-// Format section title (capitalize first letter)
-const formatTitle = (title: string) => {
-  return title.charAt(0).toUpperCase() + title.slice(1)
+const schemaNames = computed(() => (schemas.value ? Object.keys(schemas.value) : []))
+
+const showError = (msg: string) => {
+  status.value = msg
+  statusType.value = 'error'
 }
 
-// Load config from backend
+const showSuccess = (msg: string) => {
+  status.value = msg
+  statusType.value = 'success'
+}
+
+// 获取配置文件内容（各 schema 的 YAML 原文）
 const loadConfig = async () => {
-  if (!connectionStore.isConnected) {
-    saveStatus.value = 'Not connected to Vedal Studio'
-    saveStatusType.value = 'error'
-    isLoading.value = false
-    return
-  }
-
   try {
     isLoading.value = true
-    const configResponse = await connectionStore.sendVedalWsMessage('get_config')
-    config.value = configResponse.config || configResponse
+    const data = await api<{ schemas: Record<string, string> }>('/manage/config')
+    schemas.value = data.schemas
+    currentTab.value = schemaNames.value[0] || null
+    showSuccess('Configuration loaded')
+  } catch (e) {
+    showError('加载配置失败: ' + (e instanceof Error ? e.message : 'Unknown error'))
+  } finally {
+    isLoading.value = false
+  }
+}
 
-    // Set first tab as active
-    const sectionNames = Object.keys(config.value || {})
-    if (sectionNames.length > 0) {
-      currentTab.value = sectionNames[0] || null
+// 保存并重载：提交全部 schema 原文，后端按实际变动的 schema 向对应模块（含 vedal 自身）发 reload
+const saveAndReload = async () => {
+  if (!schemas.value) return
+  try {
+    isLoading.value = true
+    const data = await api<SaveResult>('/manage/config', {
+      method: 'PUT',
+      body: JSON.stringify({ schemas: schemas.value }),
+    })
+    const changed = data.changed_schemas
+    if (changed.length === 0) {
+      showSuccess('保存成功：无变动的 schema，未触发重载')
+    } else {
+      const reloadInfo = Object.entries(data.reloads)
+        .map(([m, r]) => `${m}=${r.status}${r.detail ? ` (${r.detail})` : ''}`)
+        .join(', ')
+      showSuccess(`保存成功：变动 schema [${changed.join(', ')}]；重载结果: ${reloadInfo || 'none'}`)
     }
-
-    saveStatus.value = 'Configuration loaded successfully'
-    saveStatusType.value = 'success'
-  } catch (error) {
-    console.error('Failed to load config:', error)
-    saveStatus.value = 'Failed to load configuration: ' + (error instanceof Error ? error.message : 'Unknown error')
-    saveStatusType.value = 'error'
+    await loadConfig()
+  } catch (e) {
+    showError('保存失败: ' + (e instanceof ApiError ? e.message : e instanceof Error ? e.message : 'Unknown error'))
   } finally {
     isLoading.value = false
   }
 }
 
-// Update a specific value in a section
-const updateSectionValue = (sectionName: string, itemName: string, value: any) => {
-  if (config.value && config.value[sectionName]) {
-    config.value[sectionName][itemName] = value
-  }
+// 放弃更改：重新获取配置文件内容并重置文本框
+const discardChanges = async () => {
+  if (!confirm('放弃所有未保存的更改？')) return
+  await loadConfig()
+  status.value = '已放弃更改，文本框已重置为服务器当前内容'
+  statusType.value = 'info'
 }
 
-// Save config to backend
-const saveConfig = async () => {
-  if (!config.value) return
-
-  try {
-    // Send to backend
-    const response = await connectionStore.sendVedalWsMessage('save_config', { config: config.value })
-    saveStatus.value = response.message || 'Configuration saved successfully'
-    saveStatusType.value = 'success'
-
-    // Reload config after successful save to show latest content
-    await loadConfig()
-  } catch (error) {
-    console.error('Failed to save config:', error)
-    saveStatus.value = 'Failed to save configuration: ' + (error instanceof Error ? error.message : 'Invalid configuration format')
-    saveStatusType.value = 'error'
-  }
-}
-
-// Reset data to default templates
-const resetData = async () => {
-  if (!connectionStore.isConnected) {
-    saveStatus.value = 'Not connected to Vedal Studio'
-    saveStatusType.value = 'error'
-    return
-  }
-
-  if (!confirm('Are you sure you want to reset all data to default templates? This will overwrite all working directory files except config.json.')) {
-    return
-  }
-
+// 重载所有：向所有模块和 vedal 自身执行 reload
+const reloadAll = async () => {
   try {
     isLoading.value = true
-    const response = await connectionStore.sendVedalWsMessage('reset_data', {})
-    saveStatus.value = response.message || 'Data reset successfully'
-    saveStatusType.value = 'success'
-
-    // Reload config after reset
-    await loadConfig()
-  } catch (error) {
-    console.error('Failed to reset data:', error)
-    saveStatus.value = 'Failed to reset data: ' + (error instanceof Error ? error.message : 'Unknown error')
-    saveStatusType.value = 'error'
+    const data = await api<SaveResult>('/manage/config/reload-all', { method: 'POST' })
+    const reloadInfo = Object.entries(data.reloads)
+      .map(([m, r]) => `${m}=${r.status}${r.detail ? ` (${r.detail})` : ''}`)
+      .join(', ')
+    showSuccess(`重载完成: ${reloadInfo || 'none'}`)
+  } catch (e) {
+    showError('重载失败: ' + (e instanceof Error ? e.message : 'Unknown error'))
   } finally {
     isLoading.value = false
   }
 }
 
-// Initialize on component mount
 onMounted(() => {
   loadConfig()
 })

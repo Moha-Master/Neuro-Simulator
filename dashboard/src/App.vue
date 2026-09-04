@@ -15,12 +15,31 @@
           </template>
           <v-list-item-title>Configuration</v-list-item-title>
         </v-list-item>
-        <v-list-item to="/neuro-sama" :active="$route.path === '/neuro-sama'">
-          <template #prepend>
-            <v-icon>mdi-brain</v-icon>
+        <v-list-group v-model="neuroOpen" value="neuro-sama">
+          <template #activator="{ props }">
+            <v-list-item
+              v-bind="props"
+              :active="$route.path.startsWith('/neuro-sama')"
+            >
+              <template #prepend>
+                <v-icon>mdi-brain</v-icon>
+              </template>
+              <v-list-item-title>Neuro Sama</v-list-item-title>
+            </v-list-item>
           </template>
-          <v-list-item-title>Neuro Sama</v-list-item-title>
-        </v-list-item>
+          <v-list-item to="/neuro-sama" :active="$route.path === '/neuro-sama'">
+            <template #prepend>
+              <v-icon>mdi-message-processing</v-icon>
+            </template>
+            <v-list-item-title>Chat</v-list-item-title>
+          </v-list-item>
+          <v-list-item to="/neuro-sama-memory" :active="$route.path === '/neuro-sama-memory'">
+            <template #prepend>
+              <v-icon>mdi-database</v-icon>
+            </template>
+            <v-list-item-title>Memory</v-list-item-title>
+          </v-list-item>
+        </v-list-group>
       </v-list>
     </v-navigation-drawer>
 
@@ -29,14 +48,14 @@
       <v-app-bar-nav-icon @click="drawer = !drawer"></v-app-bar-nav-icon>
       <v-app-bar-title>Vedal Studio Dashboard</v-app-bar-title>
 
-      <!-- Connection status indicator -->
+      <!-- Connection status indicator (dashboard <-> vedal only) -->
       <template #append>
         <v-badge
-          :color="connectionStore.isConnected ? 'success' : 'error'"
+          :color="connectionStore.isVedalConnected ? 'success' : 'error'"
           :model-value="true"
           dot
         >
-          <v-icon>{{ connectionStore.isConnected ? 'mdi-connection' : 'mdi-connection-off' }}</v-icon>
+          <v-icon>{{ connectionStore.isVedalConnected ? 'mdi-connection' : 'mdi-connection-off' }}</v-icon>
         </v-badge>
       </template>
     </v-app-bar>
@@ -51,7 +70,7 @@
 </template>
 
 <script lang="ts" setup>
-import { ref, computed, onMounted } from 'vue'
+import { ref, onMounted, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { useConnectionStore } from '@/stores/connection'
 
@@ -59,12 +78,18 @@ const drawer = ref(false)
 const route = useRoute()
 const connectionStore = useConnectionStore()
 
-// Computed property to get current route
-const currentRoute = computed(() => route.path)
-
-// Connect to WebSocket on app initialization
+// Check vedal health on app initialization (dashboard only talks to vedal)
 onMounted(() => {
-  console.log('App mounted, connecting to WebSocket...')
-  connectionStore.connectToVedal()
+  console.log('App mounted, checking vedal health...')
+  connectionStore.checkHealth()
 })
+
+// Neuro Sama 侧边栏分组：进入其路由时自动展开（仍可手动收起）
+const neuroOpen = ref(route.path.startsWith('/neuro-sama'))
+watch(
+  () => route.path,
+  (p) => {
+    if (p.startsWith('/neuro-sama')) neuroOpen.value = true
+  },
+)
 </script>

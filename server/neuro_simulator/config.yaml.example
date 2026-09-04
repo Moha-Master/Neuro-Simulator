@@ -1,0 +1,47 @@
+# neuro-simulator 全局配置（首次启动自动复制为工作目录下的 config.yaml）
+# 工作目录默认 ~/.config/neuro-simulator，可用 neuro --dir 覆盖。
+#
+# 结构约定：按模块分 schema。server 为全局共用（预留，暂无内容），
+# 每个独立模块一个顶层 schema（如 neuro_sama、vedal），未来模块照此新增。
+
+# ===== server（全局共用，预留） =====
+server: {}
+
+# ===== neuro_sama =====
+neuro_sama:
+  # --- LLM API ---
+  api_base_url: "https://your-endpoint.example.com/v1"
+  api_key: "your_api_key"
+  model: "your-model-name"
+  # 随请求体额外下发的自定义字段（原样合入 OpenAI 请求体）
+  extra_body:
+    thinking:
+      type: disabled
+  # --- Agent ---
+  system_prompt_base: "You are Neuro-Sama, an AI Vtuber streaming on Twitch."
+  max_steps: 10                # 单次回复的 tool loop 最大轮数
+  max_context_messages: 60     # 单会话历史消息上限（按“轮”为单位裁剪）
+  tool_timeout: 30.0           # 单个工具调用超时（秒）
+  # --- 记忆 ---
+  memory_char_limit: 4000      # 记忆区总字符上限
+  # --- 服务 ---
+  host: "127.0.0.1"
+  port: 8000
+  # 特殊情况（如模块跑在其它机器/反向代理后面）下，供 vedal 代理访问的完整 URL；
+  # 留空则默认用 http://{host}:{port}
+  external_url: ""
+  # --- MCP servers（按需填写） ---
+  # stdio 示例：
+  # - name: filesystem
+  #   command: npx
+  #   args: ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
+  # streamable HTTP 示例：
+  # - name: myhttp
+  #   url: "http://127.0.0.1:9000/mcp"
+  mcp_servers: []
+
+# ===== vedal（全局管理模块，托管 dashboard） =====
+vedal:
+  host: "127.0.0.1"
+  port: 8100
+  external_url: ""
