@@ -39,9 +39,10 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/Moha-Master/neuro-simulator"
-Repository = "https://github.com/Moha-Master/neuro-simulator"
-Issues = "https://github.com/Moha-Master/neuro-simulator/issues"
+Homepage = "https://github.com/Moha-Master/Neuro-Simulator"
+Repository = "https://github.com/Moha-Master/Neuro-Simulator.git"
+GitHub = "https://github.com/Moha-Master/Neuro-Simulator"
+Issues = "https://github.com/Moha-Master/Neuro-Simulator/issues"
 
 [project.scripts]
 neuro = "neuro_simulator.neuro_sama.main:main"
