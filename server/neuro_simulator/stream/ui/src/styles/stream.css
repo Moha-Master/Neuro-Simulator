@@ -1,0 +1,200 @@
+/* Neuro-Sama 直播画面样式。
+   规格移植自旧 client/src/styles/stream.css（针对同一立绘文件标定），
+   布局从 JS ResizeObserver 改为纯 CSS：16:9 letterbox + 容器查询单位（cqi）。 */
+
+:root {
+  --neuro-shadow-color: #32003c;
+  color-scheme: dark;
+}
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+html,
+body {
+  width: 100%;
+  height: 100%;
+  background: #000;
+  overflow: hidden;
+}
+
+body {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+
+/* ===== 舞台：16:9，随视口最大化（letterbox 由 flex 居中自然形成黑边） ===== */
+#stage {
+  position: relative;
+  aspect-ratio: 16 / 9;
+  width: min(100vw, calc(100vh * 16 / 9));
+  background: #000;
+  overflow: hidden;
+  container-type: size;
+  container-name: stage;
+}
+
+/* ===== 背景双缓冲 ===== */
+.bg-layer {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  background-position: center;
+  background-size: cover;
+  background-repeat: no-repeat;
+  opacity: 0;
+  transition: opacity 0.6s ease-in-out;
+}
+.bg-layer.visible {
+  opacity: 1;
+}
+.bg-layer.dim {
+  filter: brightness(0.35) saturate(0.8);
+}
+
+/* ===== 开播视频层 ===== */
+.media-layer {
+  position: absolute;
+  inset: 0;
+  z-index: 10;
+  background: #000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.media-layer.hidden {
+  display: none;
+}
+#startup-video {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+
+/* ===== starting soon ===== */
+.starting-soon {
+  position: absolute;
+  inset: 0;
+  z-index: 12;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 2cqi;
+  pointer-events: none;
+}
+.starting-soon.hidden {
+  display: none;
+}
+.starting-soon__title {
+  font-family: "First Coffee", cursive;
+  font-size: 14cqi;
+  color: #fff;
+  text-shadow:
+    0 0 8px var(--neuro-shadow-color),
+    0 0 8px var(--neuro-shadow-color);
+}
+.starting-soon__sub {
+  font-family: "First Coffee", cursive;
+  font-size: 4cqi;
+  letter-spacing: 0.15em;
+  color: #e6b3ff;
+  animation: soon-pulse 1.6s ease-in-out infinite;
+}
+@keyframes soon-pulse {
+  0%,
+  100% {
+    opacity: 0.55;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
+/* ===== 立绘 =====
+   left 70% + margin-left -50%自身宽（=旧 translateX(-50%) 居中法，
+   腾出 transform 属性给 spin/zoom 动画）；bottom 由 JS 动作控制。 */
+#neuro-avatar {
+  position: absolute;
+  left: 70%;
+  margin-left: -25%; /* 舞台容器 width 50% → -25% 即回移自身一半 */
+  width: 50%;
+  z-index: 15;
+  visibility: hidden;
+  bottom: -207%; /* hidden 位（旧规格） */
+  pointer-events: none;
+}
+#neuro-avatar img {
+  width: 100%;
+  display: block;
+}
+
+/* ===== 字幕 ===== */
+#neuro-caption {
+  position: absolute;
+  bottom: 5%;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 90%;
+  padding: 10px 20px;
+  border-radius: 10px;
+  text-align: center;
+  z-index: 20;
+  pointer-events: none;
+  color: white;
+  opacity: 0;
+  transition: opacity 0.3s ease;
+  text-shadow:
+    0 0 4px var(--neuro-shadow-color),
+    0 0 4px var(--neuro-shadow-color),
+    0 0 4px var(--neuro-shadow-color);
+  font-family: "First Coffee", "Noto Sans SC", cursive, sans-serif;
+  font-weight: normal;
+  font-size: 3cqi;
+  line-height: 1.25;
+}
+#neuro-caption.show {
+  opacity: 1;
+}
+
+/* ===== 预留层 ===== */
+#twitch-chat-overlay {
+  position: absolute;
+  top: 5%;
+  left: 3%;
+  width: 26%;
+  max-height: 55%;
+  z-index: 18;
+  overflow: hidden;
+  pointer-events: none;
+  color: #fff;
+  font-size: 1.8cqi;
+}
+#highlight-message-overlay {
+  position: absolute;
+  left: 50%;
+  bottom: 30%;
+  transform: translateX(-50%);
+  max-width: 70%;
+  z-index: 19;
+  padding: 2cqi 4cqi;
+  border-radius: 1.5cqi;
+  background: rgba(20, 8, 32, 0.85);
+  border: 2px solid #b366ff;
+  color: #fff;
+  text-align: center;
+  font-family: "First Coffee", cursive;
+  font-size: 4cqi;
+  text-shadow: 0 0 4px var(--neuro-shadow-color);
+  pointer-events: none;
+}
+.hidden {
+  display: none;
+}
+

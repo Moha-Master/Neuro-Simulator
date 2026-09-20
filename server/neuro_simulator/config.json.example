@@ -1,0 +1,44 @@
+{
+  "server": {
+    "llm_services": {},
+    "tts_services": {}
+  },
+  "neuro_sama": {
+    "model": "",
+    "tts": "null",
+    "system_prompt_base": "You are Neuro-Sama, an AI Vtuber streaming on Twitch.",
+    "max_steps": 10,
+    "max_context_messages": 60,
+    "tool_timeout": 30.0,
+    "memory_char_limit": 4000,
+    "mcp_servers": [],
+    "host": "127.0.0.1",
+    "port": 8000,
+    "external_url": ""
+  },
+  "vedal": {
+    "host": "127.0.0.1",
+    "port": 8100,
+    "external_url": ""
+  },
+  "stream": {
+    "host": "127.0.0.1",
+    "port": 8200,
+    "external_url": "",
+    "neuro_url": "",
+    "channel": "stream",
+    "scene_context": "You are streaming on Twitch now.",
+    "messages_per_round": 10,
+    "round_gap_ms": 1500,
+    "empty_queue_behavior": "placeholder",
+    "placeholder_message": "No new messages. Say something to your viewers!",
+    "chatbot": {
+      "enabled": true,
+      "model": "",
+      "system_prompt": "You are a simulator for Twitch chatters watching an AI Vtuber stream. Generate {count} short, realistic Twitch viewer comments based on Neuro's status. Each comment should be on a new line in the format 'username: message'. Use typical Twitch slang, emotes (e.g. Pog, LUL, Kappa), or short reactions.",
+      "interval_s": 10.0,
+      "count": 3,
+      "neuro_sleep_timeout_s": 45.0
+    }
+  }
+}

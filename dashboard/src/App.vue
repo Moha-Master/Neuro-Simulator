@@ -40,6 +40,31 @@
             <v-list-item-title>Memory</v-list-item-title>
           </v-list-item>
         </v-list-group>
+        <v-list-group v-model="streamOpen" value="stream">
+          <template #activator="{ props }">
+            <v-list-item
+              v-bind="props"
+              :active="$route.path.startsWith('/stream')"
+            >
+              <template #prepend>
+                <v-icon>mdi-broadcast</v-icon>
+              </template>
+              <v-list-item-title>Stream</v-list-item-title>
+            </v-list-item>
+          </template>
+          <v-list-item to="/stream" :active="$route.path === '/stream'">
+            <template #prepend>
+              <v-icon>mdi-record-circle-outline</v-icon>
+            </template>
+            <v-list-item-title>Control</v-list-item-title>
+          </v-list-item>
+          <v-list-item to="/stream-view" :active="$route.path === '/stream-view'">
+            <template #prepend>
+              <v-icon>mdi-television-classic</v-icon>
+            </template>
+            <v-list-item-title>View</v-list-item-title>
+          </v-list-item>
+        </v-list-group>
       </v-list>
     </v-navigation-drawer>
 
@@ -90,6 +115,15 @@ watch(
   () => route.path,
   (p) => {
     if (p.startsWith('/neuro-sama')) neuroOpen.value = true
+  },
+)
+
+// Stream 侧边栏分组：同上（注意 /stream-view 也以 /stream 开头）
+const streamOpen = ref(route.path.startsWith('/stream'))
+watch(
+  () => route.path,
+  (p) => {
+    if (p.startsWith('/stream')) streamOpen.value = true
   },
 )
 </script>

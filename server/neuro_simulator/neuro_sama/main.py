@@ -30,8 +30,12 @@ def main() -> None:
 
     cfg = init_config(cli_dir=args.dir)
     print(f"[neuro-sama] workdir: {cfg.WORKDIR}")
-    if not cfg.API_KEY or cfg.API_KEY == "your_api_key":
-        print(f"[neuro-sama] WARNING: api_key 仍是占位符，请编辑 {cfg.WORKDIR / 'config.yaml'} 填写真实 key。")
+    svc = cfg.neuro_llm()
+    if cfg.NEURO_MODEL_REF and (svc is None or not svc.api_key or not svc.model):
+        print(f"[neuro-sama] WARNING: 模型服务 {cfg.NEURO_MODEL_REF!r} 未完整定义，"
+              f"请在 dashboard Configuration 页填写 server.llm_services。")
+    elif not cfg.NEURO_MODEL_REF:
+        print("[neuro-sama] WARNING: neuro_sama.model 未配置（对话将直接报错）。")
 
     try:
         pidfile.write_pid_file(cfg.WORKDIR, MODULE)

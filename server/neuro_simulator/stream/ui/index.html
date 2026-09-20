@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Neuro-Sama</title>
+  </head>
+  <body>
+    <!-- 直播画面舞台：16:9 letterbox，纯 CSS 缩放（容器查询单位驱动内部元素尺寸） -->
+    <div id="stage">
+      <!-- 背景双缓冲（crossfade 用） -->
+      <div class="bg-layer" id="bg-a"></div>
+      <div class="bg-layer" id="bg-b"></div>
+
+      <!-- 开播视频层 -->
+      <div class="media-layer hidden" id="media-layer">
+        <video id="startup-video" playsinline preload="auto"></video>
+      </div>
+
+      <!-- starting soon 待机元素 -->
+      <div class="starting-soon hidden" id="starting-soon">
+        <div class="starting-soon__title">Neuro-Sama</div>
+        <div class="starting-soon__sub" id="starting-soon-countdown">STARTING SOON...</div>
+      </div>
+
+      <!-- 立绘层 -->
+      <div id="neuro-avatar">
+        <img alt="" />
+      </div>
+
+      <!-- 预留：Twitch 风格聊天覆盖层（直播管理器接入前恒隐藏） -->
+      <div id="twitch-chat-overlay" class="hidden"></div>
+      <!-- 预留：highlight 消息层 -->
+      <div id="highlight-message-overlay" class="hidden"></div>
+
+      <!-- 字幕（TTS 时长驱动的伪流式逐词显示） -->
+      <div id="neuro-caption"></div>
+    </div>
+
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

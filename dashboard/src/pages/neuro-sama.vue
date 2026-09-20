@@ -82,7 +82,7 @@
 </template>
 
 <script lang="ts" setup>
-import { ref, watch, nextTick } from 'vue'
+import { ref, watch, nextTick, onMounted, onUnmounted } from 'vue'
 import ChatSidebar from '@/components/chat/ChatSidebar.vue'
 import ChatMessage from '@/components/chat/ChatMessage.vue'
 import ChatInput from '@/components/chat/ChatInput.vue'
@@ -159,6 +159,25 @@ watch(
     else chat.reset()
   },
 )
+
+let pollTimer: ReturnType<typeof setInterval> | null = null
+
+onMounted(() => {
+  pollTimer = setInterval(async () => {
+    // 未在本地生成且选中了会话时，定期增量同步消息与会话列表（如后台直播推入）
+    if (!chat.isStreaming.value && chat.activeConversationId.value && chat.activeChannel.value) {
+      await chat.loadMessages(chat.activeChannel.value, chat.activeConversationId.value)
+      await conversations.loadSessions()
+    }
+  }, 2500)
+})
+
+onUnmounted(() => {
+  if (pollTimer) {
+    clearInterval(pollTimer)
+    pollTimer = null
+  }
+})
 </script>
 
 <style scoped>

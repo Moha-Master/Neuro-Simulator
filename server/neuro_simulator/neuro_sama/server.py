@@ -3,6 +3,10 @@
 多渠道多会话：请求携带 channel + conversation_id（缺省时服务端生成并随 start 事件回传），
 历史与记忆持久化在 <workdir>/neuro-sama/data.db（见 storage.py）。
 
+本模块是纯 Agent 服务：只处理输入并流出响应（含句级 TTS 的 speech 事件），
+不感知直播——直播循环、观众消息队列、场景与 /ui 画面宿主属于 stream 模块，
+由 stream 作为 /chat 的调用方消费响应流。
+
 /manage 管理接口（由 vedal 模块代理给 dashboard 使用；配置管理在 vedal 统一处理）：
 - POST /manage/reload：配置热重载（由 vedal 在配置保存/重载指令时调用）
 - GET/DELETE /manage/sessions...  会话管理
@@ -19,7 +23,9 @@ from fastapi.responses import StreamingResponse
 from openai import AsyncOpenAI
 from pydantic import BaseModel
 
+from ..broadcaster import EventBroadcaster
 from ..config import get_config
+from . import tts
 from .agent import NeuroAgent
 from .mcp_client import MCPManager
 from .memory import MemoryError, MemoryStore
@@ -52,6 +58,12 @@ def _terminal(event: str, data: dict) -> None:
         mark = "ok" if data["ok"] else "ERROR"
         result = data["result"] if len(data["result"]) <= 300 else data["result"][:300] + "…"
         print(f"{_ORANGE}    {mark}: {result} ({data['duration_ms']}ms){_RESET}", flush=True)
+    elif event == "speech":
+        audio = "🔊" if data.get("audio") else "🔇"
+        print(
+            f"\n{_DIM}[speech#{data['index']} {audio} {data['duration']:.2f}s] {data['text'][:60]}{_RESET}",
+            flush=True,
+        )
     elif event == "usage":
         print(
             f"{_DIM}[step {data['step']} tokens in={data['input_tokens']} out={data['output_tokens']}]{_RESET}",
@@ -102,15 +114,24 @@ async def _hot_reload(app: FastAPI) -> None:
     agent: NeuroAgent = app.state.agent
     memory: MemoryStore = app.state.memory
 
-    # 1) LLM 客户端（endpoint/model/key/extra_body 变化时重建）
+    # 1) LLM 客户端（引用的服务变化时重建；引用悬空时客户端置空，chat 时明确报错）
     old_client = agent.client
-    agent.client = AsyncOpenAI(base_url=cfg.API_BASE_URL, api_key=cfg.API_KEY)
-    await old_client.close()
+    svc = cfg.neuro_llm()
+    agent.client = (
+        AsyncOpenAI(base_url=svc.base_url, api_key=svc.api_key, timeout=svc.timeout)
+        if svc
+        else None
+    )
+    if old_client is not None:
+        await old_client.close()
 
     # 2) 记忆上限
     memory.char_limit = cfg.MEMORY_CHAR_LIMIT
 
-    # 3) MCP：配置变化时重建（内置工具随 registry 一起重建）
+    # 3) TTS：解除 azure 失败锁存，允许配置修复后重新探测
+    tts.reset_latch()
+
+    # 4) MCP：配置变化时重建（内置工具随 registry 一起重建）
     if cfg.MCP_SERVERS != app.state.mcp.servers:
         new_registry = ToolRegistry()
         for tool in build_builtin_tools(memory):
@@ -123,7 +144,7 @@ async def _hot_reload(app: FastAPI) -> None:
         app.state.mcp = new_mcp
 
     print(
-        f"[neuro-sama] hot reload: model={cfg.MODEL} host={cfg.HOST}:{cfg.PORT} "
+        f"[neuro-sama] hot reload: model={(svc.model if svc else cfg.NEURO_MODEL_REF) or cfg.NEURO_MODEL_REF or None!r} host={cfg.HOST}:{cfg.PORT} "
         f"tools={agent.registry.names()}",
         flush=True,
     )
@@ -147,20 +168,27 @@ def create_app() -> FastAPI:
         for line in await mcp.start(registry):
             print(line, flush=True)
 
-        client = AsyncOpenAI(base_url=cfg.API_BASE_URL, api_key=cfg.API_KEY)
+        svc = cfg.neuro_llm()
+        client = (
+            AsyncOpenAI(base_url=svc.base_url, api_key=svc.api_key, timeout=svc.timeout)
+            if svc
+            else None
+        )
         agent = NeuroAgent(client, registry, storage, memory)
         app.state.agent = agent
         app.state.memory = memory
         app.state.storage = storage
         app.state.mcp = mcp
         app.state.active_streams: dict[str, asyncio.Event] = {}
+        app.state.broadcaster = EventBroadcaster()
         print(
-            f"[neuro-sama] ready: model={cfg.MODEL} base_url={cfg.API_BASE_URL} "
-            f"db={cfg.DB_PATH} tools={registry.names()}",
+            f"[neuro-sama] ready: model_ref={cfg.NEURO_MODEL_REF!r} "
+            f"model={svc.model if svc else None} db={cfg.DB_PATH} tools={registry.names()}",
             flush=True,
         )
         yield
-        await client.close()
+        if client is not None:
+            await client.close()
         await mcp.close()
         await storage.close()
 
@@ -170,12 +198,17 @@ def create_app() -> FastAPI:
 
     @app.get("/health")
     async def health():
+        cfg = get_config()
+        svc = cfg.neuro_llm()
         return {
             "status": "ok",
             "module": "neuro_sama",
-            "model": get_config().MODEL,
+            "model": svc.model if svc else None,
+            "model_service": cfg.NEURO_MODEL_REF or None,
+            "model_service_ok": svc is not None,
             "tools": app.state.agent.registry.names(),
             "memory_entries": app.state.memory.count,
+            "tts": tts.tts_state(),
         }
 
     # ---------- 对话 ----------
@@ -203,7 +236,14 @@ def create_app() -> FastAPI:
 
         async def gen():
             try:
-                yield _sse("start", {"channel": channel, "conversation_id": conversation_id, "model": cfg.MODEL})
+                svc = cfg.neuro_llm()
+                start_ev = {
+                    "channel": channel,
+                    "conversation_id": conversation_id,
+                    "model": svc.model if svc else None,
+                }
+                yield _sse("start", start_ev)
+                app.state.broadcaster.publish({"type": "start", "stream_key": stream_key, **start_ev})
                 async for ev in agent.run(channel, conversation_id, message, cancel_event=cancel_event):
                     _terminal(ev["type"], ev)
                     if ev["type"] == "done":
@@ -215,6 +255,7 @@ def create_app() -> FastAPI:
                                 "char_limit": memory.char_limit,
                             },
                         }
+                    app.state.broadcaster.publish({"stream_key": stream_key, "channel": channel, "conversation_id": conversation_id, **ev})
                     yield _sse(ev["type"], ev)
             finally:
                 app.state.active_streams.pop(stream_key, None)
@@ -226,6 +267,21 @@ def create_app() -> FastAPI:
         )
 
     # ---------- /manage：热重载 + 会话/对话记录管理（配置管理由 vedal 统一处理） ----------
+
+    @app.get("/manage/events")
+    async def manage_events():
+        """SSE 事件广播：供 Dashboard Chat 页面实时拉取在途会话的生成状态。"""
+        async def event_generator():
+            active = list(app.state.active_streams.keys())
+            yield _sse("snapshot", {"active": active})
+            async for ev in app.state.broadcaster.subscribe():
+                yield _sse(ev.get("type", "message"), ev)
+
+        return StreamingResponse(
+            event_generator(),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
 
     @app.post("/manage/reload")
     async def manage_reload():

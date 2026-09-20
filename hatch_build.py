@@ -8,37 +8,29 @@ from hatchling.builders.hooks.plugin.interface import BuildHookInterface  # type
 
 
 class CustomBuildHook(BuildHookInterface):
+    # 需要随包构建的前端：(名称, 目录)。产物路径由 pyproject force-include/exclude 决定。
+    # 注：旧 client/（仿 Twitch 整页）已被 stream 模块的 /ui 内嵌前端取代，不再构建。
+    FRONTENDS = [
+        ("dashboard", "dashboard"),
+        ("stream ui", "server/neuro_simulator/stream/ui"),
+    ]
+
     def initialize(self, version, build_data):
         super().initialize(version, build_data)
 
-        stderr.write(">>> Building dashboard frontend\n")
-
-        dashboard_dir = os.path.join(self.root, 'dashboard')
-        if not os.path.isdir(dashboard_dir):
-            stderr.write(f">>> Frontend directory not found at {dashboard_dir}\n")
-            return
-
         npm = shutil.which("npm")
         if npm is None:
-            raise RuntimeError(
-                "NodeJS `npm` is required for building dashboard but it was not found"
-            )
+            raise RuntimeError("NodeJS `npm` is required for building frontends but it was not found")
 
-        stderr.write("### npm ci\n")
-        subprocess.run([npm, "ci"], check=True, cwd=dashboard_dir)
-
-        stderr.write("\n### npm run build\n")
-        subprocess.run([npm, "run", "build"], check=True, cwd=dashboard_dir)
+        for name, rel_dir in self.FRONTENDS:
+            frontend_dir = os.path.join(self.root, rel_dir)
+            if not os.path.isdir(frontend_dir):
+                stderr.write(f">>> Frontend directory not found at {frontend_dir}\n")
+                continue
+            stderr.write(f">>> Building {name} frontend\n")
+            stderr.write("### npm ci\n")
+            subprocess.run([npm, "ci"], check=True, cwd=frontend_dir)
+            stderr.write("\n### npm run build-only\n")
+            subprocess.run([npm, "run", "build-only"], check=True, cwd=frontend_dir)
 
         stderr.write("\n>>> Done\n")
-
-        # 注：client 前端构建暂时禁用（client 重写后恢复）
-        # stderr.write(">>> Building client frontend\n")
-        # client_dir = os.path.join(self.root, 'client')
-        # if not os.path.isdir(client_dir):
-        #     stderr.write(f">>> Frontend directory not found at {client_dir}\n")
-        #     return
-        # stderr.write("### npm ci\n")
-        # subprocess.run([npm, "ci"], check=True, cwd=client_dir)
-        # stderr.write("\n### npm run build\n")
-        # subprocess.run([npm, "run", "build"], check=True, cwd=client_dir)

@@ -2,15 +2,15 @@
 
 与 dashboard 的通信协议（同域 HTTP，dashboard 由本模块静态托管）：
 - GET  /health                    健康检查（dashboard 只检查 vedal；vedal 顺带探测各模块）
-- GET  /manage/config             取 config.yaml 各 schema 的 YAML 原文
-- PUT  /manage/config             保存各 schema 原文 -> 校验 -> 写盘 -> 按变动 schema 热重载对应模块
+- GET  /manage/config             取 config.json 结构化内容 + 服务反查表
+- PUT  /manage/config             提交结构化 config -> 悬空引用清理 -> 校验 -> 写盘 -> 按变动 schema 热重载
 - POST /manage/config/reload-all  向所有模块和 vedal 自身执行 reload
 - GET  /manage/modules            各模块状态（url/可达性/PID/是否由 vedal 托管）
 - POST /manage/module_run/<module_name>    以子进程方式启动模块（python -m neuro_simulator.<module>.main --dir <workdir>）
 - POST /manage/module_stop/<module_name>   停止模块（托管进程直接发信号；外部实例经 <workdir>/<module>.pid 定位）
 - POST /manage/module_restart/<module_name> 重启
 - /manage/<module>/<path...>      代理到目标模块的 /<path...>（完整路径转发；
-                                    模块名 = config.yaml 中的 schema 名；
+                                    模块名 = config.json 中的 schema 名；
                                     模块 URL = external_url 或 http://{host}:{port}；
                                     响应为 text/event-stream 时逐块流式透传，
                                     其余照旧缓冲后整体返回）
@@ -23,6 +23,7 @@
 
 import asyncio
 import importlib.util
+import json
 import os
 import signal
 import subprocess
@@ -33,14 +34,21 @@ from pathlib import Path
 from typing import Any, Optional
 
 import httpx
-import yaml
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import Response, StreamingResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.staticfiles import StaticFiles
 
 from .. import pidfile
-from ..config import SERVER_SCHEMA, CONFIG_FILENAME, get_config, parse_module_fields
+from ..config import (
+    CONFIG_FILENAME,
+    SERVER_SCHEMA,
+    get_config,
+    service_usage,
+    sweep_dangling_refs,
+    validate_config,
+)
+from ..config import module_url as _module_url
 
 # ---------- 模块子进程托管 ----------
 
@@ -194,20 +202,13 @@ async def _run_module(module_name: str) -> dict[str, Any]:
 
 
 def _module_names() -> list[str]:
-    """config.yaml 中的模块名列表（除全局 server schema 外的一切顶层 schema）。"""
+    """config.json 中的模块名列表（除全局 server schema 外的一切顶层 schema）。"""
     return [name for name in get_config().data if name != SERVER_SCHEMA]
 
 
 def module_url(name: str) -> Optional[str]:
-    """模块访问 URL：external_url 优先，否则 http://{host}:{port}；未配置返回 None。"""
-    ns = get_config().module(name)
-    ext = str(ns.get("external_url") or "").strip()
-    if ext:
-        return ext.rstrip("/")
-    host, port = ns.get("host"), ns.get("port")
-    if host and port is not None:
-        return f"http://{host}:{port}"
-    return None
+    """模块访问 URL（实现在共享 config.module_url：external_url 优先，其次 host/port）。"""
+    return _module_url(get_config(), name)
 
 
 class SPAStaticFiles(StaticFiles):
@@ -282,61 +283,54 @@ def create_app() -> FastAPI:
 
     @app.get("/manage/config")
     async def manage_get_config():
-        """各 schema 的 YAML 原文（按文件内顺序）。"""
+        """结构化配置 + 服务反查表（每个服务 id 被哪些配置字段引用）。"""
         cfg = get_config()
-        return {
-            "schemas": {
-                name: yaml.safe_dump(schema, allow_unicode=True, sort_keys=False)
-                for name, schema in cfg.data.items()
-            }
-        }
+        return {"config": cfg.data, "usage": service_usage(cfg.data)}
 
     @app.put("/manage/config")
     async def manage_save_config(request: Request):
-        """保存各 schema 原文：校验 -> 写盘 -> 按实际变动的 schema 热重载对应模块（含 vedal 自身）。"""
+        """保存结构化配置：悬空引用自动清空 -> 校验 -> 写盘 -> 按变动 schema 热重载。
+
+        删除服务导致的引用悬空在此处兜底清理（dashboard 已在删除时先行确认并
+        清空，这里防手动编辑/并发覆盖）；返回 cleared_references 供前端提示。
+        """
         payload = await request.json()
-        schemas_in: dict[str, str] = payload.get("schemas") or {}
-        cfg = get_config()
-        old_schemas = cfg.data
+        new_config = payload.get("config")
+        if not isinstance(new_config, dict):
+            raise HTTPException(status_code=400, detail="body 必须是 {\"config\": {...}}")
 
-        missing = set(old_schemas) - set(schemas_in)
-        if missing:
-            raise HTTPException(status_code=400, detail=f"缺少 schema: {sorted(missing)}")
-
-        new_schemas: dict[str, Any] = {}
-        for name, text in schemas_in.items():
-            try:
-                parsed = yaml.safe_load(text or "")
-            except yaml.YAMLError as e:
-                raise HTTPException(status_code=400, detail=f"schema {name}: YAML 解析失败: {e}")
-            if parsed is None:
-                parsed = {}
-            if not isinstance(parsed, dict):
-                raise HTTPException(status_code=400, detail=f"schema {name}: 必须是 key: value 映射")
-            new_schemas[name] = parsed
-
+        cleared = sweep_dangling_refs(new_config)
         try:
-            parse_module_fields(new_schemas)
+            validate_config(new_config)
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
 
+        cfg = get_config()
+        old_schemas = cfg.data
         changed = [
             name
-            for name in list(old_schemas) + [n for n in new_schemas if n not in old_schemas]
-            if old_schemas.get(name) != new_schemas.get(name)
+            for name in list(old_schemas) + [n for n in new_config if n not in old_schemas]
+            if old_schemas.get(name) != new_config.get(name)
         ]
         if changed:
             path = cfg.WORKDIR / CONFIG_FILENAME
-            path.write_text(yaml.safe_dump(new_schemas, allow_unicode=True, sort_keys=False), encoding="utf-8")
+            path.write_text(
+                json.dumps(new_config, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
             # 文件已是新真源：无条件刷新 vedal 自身内存配置（此前仅改模块 schema 时
-            # vedal 不刷新，导致代理 module_url 打旧地址、GET /manage/config 返回旧文本）
+            # vedal 不刷新，导致代理 module_url 打旧地址、GET /manage/config 返回旧内容）
             cfg.reload()
 
-        # server 是全局共用 schema：变动时影响所有模块；其余 schema 对应各自模块
+        # server 是全局共用 schema（服务注册表在此）：变动时影响所有引用它的模块
         targets: set[str] = set()
         for name in changed:
             if name == SERVER_SCHEMA:
-                targets.update(_module_names())
+                # 仅重载当前可达的模块（未运行的模块跳过，避免 ConnectError）
+                for m in _module_names():
+                    url = module_url(m)
+                    if url and await _is_reachable(url):
+                        targets.add(m)
                 targets.add("vedal")
             else:
                 targets.add(name)
@@ -344,14 +338,22 @@ def create_app() -> FastAPI:
             targets.add("vedal")
 
         reloads = await _reload_modules(targets) if changed else {}
-        print(f"[vedal] config saved: changed={changed} reloads={reloads}", flush=True)
-        return {"status": "ok", "changed_schemas": changed, "reloads": reloads}
+        print(f"[vedal] config saved: changed={changed} cleared={cleared} reloads={reloads}", flush=True)
+        return {
+            "status": "ok",
+            "changed_schemas": changed,
+            "reloads": reloads,
+            "cleared_references": cleared,
+        }
 
     @app.post("/manage/config/reload-all")
     async def manage_reload_all():
-        """向所有模块和 vedal 自身执行 reload。"""
-        targets = set(_module_names())
-        targets.add("vedal")
+        """向所有**可达**的模块和 vedal 自身执行 reload。"""
+        targets = {"vedal"}
+        for m in _module_names():
+            url = module_url(m)
+            if url and await _is_reachable(url):
+                targets.add(m)
         reloads = await _reload_modules(targets)
         print(f"[vedal] reload-all: {reloads}", flush=True)
         return {"status": "ok", "reloads": reloads}

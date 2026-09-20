@@ -1,0 +1,19 @@
+{
+  "name": "neuro-sama-stream-ui",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Neuro-Sama stream display (OBS browser source), served at /ui by the neuro_sama module",
+  "scripts": {
+    "dev": "vite",
+    "build": "run-p type-check \"build-only {@}\" --",
+    "build-only": "vite build",
+    "preview": "vite preview",
+    "type-check": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "npm-run-all2": "^8.0.4",
+    "typescript": "~5.9.2",
+    "vite": "^7.1.5"
+  }
+}
