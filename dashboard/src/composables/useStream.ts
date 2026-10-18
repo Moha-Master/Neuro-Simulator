@@ -97,12 +97,20 @@ export function useStream() {
     lastMsgId = 0
   }
 
-  async function postMessage(username: string, content: string): Promise<boolean> {
+  async function postMessage(
+    username: string,
+    content: string,
+    priority?: { type: 'bits' | 'points'; value: number },
+  ): Promise<boolean> {
     error.value = ''
     try {
       await api(`/manage/${MODULE}/queue/message`, {
         method: 'POST',
-        body: JSON.stringify({ username, content }),
+        body: JSON.stringify({
+          username,
+          content,
+          ...(priority ? { type: priority.type, value: priority.value } : {}),
+        }),
       })
       void pollQueue()
       return true

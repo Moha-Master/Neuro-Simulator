@@ -40,15 +40,22 @@ class ChatbotManager:
         self._loop_task: Optional[asyncio.Task] = None
         self._queue_row: Optional[int] = None
         self._on_new_message: Optional[Callable[[], None]] = None
+        self._on_message: Optional[Callable[[int, str, str], None]] = None
         self._last_neuro_said: Optional[str] = None
         self._tts_finish_time: float = 0.0
         self._history: list[dict] = []
         self._warned_ref: str | None = None
 
-    def start_session(self, queue_row: int, on_new_message_cb: Callable[[], None]) -> None:
+    def start_session(
+        self,
+        queue_row: int,
+        on_new_message_cb: Callable[[], None],
+        on_message_cb: Optional[Callable[[int, str, str], None]] = None,
+    ) -> None:
         self.stop_session()
         self._queue_row = queue_row
         self._on_new_message = on_new_message_cb
+        self._on_message = on_message_cb
         self._last_neuro_said = None
         self._tts_finish_time = 0.0
         self._history = []
@@ -61,6 +68,7 @@ class ChatbotManager:
         self._loop_task = None
         self._queue_row = None
         self._on_new_message = None
+        self._on_message = None
 
     def update_neuro_speech(self, text: str, duration: float) -> None:
         if text and text.strip():
@@ -134,7 +142,11 @@ class ChatbotManager:
                     parsed = self._parse_output(raw_output, cb_st.count)
                     if parsed and self._queue_row is not None:
                         for uname, msg in parsed:
-                            await self.storage.append_message(self._queue_row, uname, msg)
+                            msg_id = await self.storage.append_message(
+                                self._queue_row, uname, msg
+                            )
+                            if self._on_message:
+                                self._on_message(msg_id, uname, msg)
                         if self._on_new_message:
                             self._on_new_message()
 

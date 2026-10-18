@@ -5,7 +5,8 @@
 import "./styles/stream.css";
 
 import { loadFonts } from "./core/assets";
-import { report, StreamFeed, type FeedEvent, type Snapshot } from "./core/feed";
+import { ChatOverlay, HighlightOverlay } from "./core/chat";
+import { report, StreamFeed, type ChatMsg, type FeedEvent, type Snapshot } from "./core/feed";
 import { SceneManager } from "./core/scene";
 import { CaptionPlayer } from "./core/speech";
 import { abortIntro, playIntro, registerScenes, SCENE_ROOM, SCENE_STARTING_SOON } from "./scenes";
@@ -16,6 +17,8 @@ async function boot(): Promise<void> {
   const mgr = new SceneManager();
   registerScenes(mgr);
   const player = new CaptionPlayer();
+  const chat = new ChatOverlay();
+  const highlight = new HighlightOverlay();
   await mgr.set(SCENE_STARTING_SOON); // 默认待机，snapshot/state 事件会校正
 
   let introPlaying = false;
@@ -42,6 +45,10 @@ async function boot(): Promise<void> {
 
   feed.on("snapshot", (ev: FeedEvent) => {
     const snap = ev as unknown as Snapshot;
+    // 聊天层：重连时用 snapshot 的最近记录整体恢复；无场次则清空
+    if (snap.chat?.length) chat.replace(snap.chat);
+    else chat.clear();
+    if (snap.state === "offline") highlight.clear();
     if (snap.scene === "intro" && snap.state === "starting") {
       // 中途连上：按已过时长续播开场序列（视频 seek 到断点；已过片尾则只升起立绘）
       void runIntro(Number(snap.intro_elapsed ?? 0));
@@ -66,6 +73,8 @@ async function boot(): Promise<void> {
   feed.on("session_begin", () => {
     abortIntro();
     player.clear();
+    chat.clear();
+    highlight.clear();
   });
   feed.on("state", (ev: FeedEvent) => {
     const s = String(ev.state ?? "");
@@ -75,6 +84,8 @@ async function boot(): Promise<void> {
     } else if (s === "offline") {
       abortIntro();
       player.clear();
+      chat.clear();
+      highlight.clear();
       void setScene(SCENE_STARTING_SOON);
     }
   });
@@ -100,11 +111,23 @@ async function boot(): Promise<void> {
   feed.on("session_end", () => {
     abortIntro();
     player.clear();
+    chat.clear();
+    highlight.clear();
     void setScene(SCENE_STARTING_SOON);
+  });
+  feed.on("chat_message", (ev: FeedEvent) => {
+    chat.append(ev as unknown as ChatMsg);
+  });
+  feed.on("priority_message", (ev: FeedEvent) => {
+    const msg = ev as unknown as ChatMsg;
+    chat.append(msg); // 与旧 client 一致：优先消息也占一条普通聊天行
+    highlight.show(msg);
   });
 
   // 调试/E2E 句柄：控制台或自动化可直接驱动渲染管线（不影响运行逻辑）
-  (window as unknown as Record<string, unknown>).__ns = { mgr, player, feed, runIntro, setScene };
+  (window as unknown as Record<string, unknown>).__ns = {
+    mgr, player, feed, chat, highlight, runIntro, setScene,
+  };
 }
 
 void boot();

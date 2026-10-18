@@ -4,6 +4,7 @@ export interface StreamSession {
   channel: string
   conversation_id: string
   cursor: number
+  priority_cursor: number
 }
 
 export interface PersistedSession {
@@ -22,6 +23,7 @@ export interface StreamStatus {
   state: string
   session: StreamSession | null
   queue_depth_unconsumed: number | null
+  priority_queue_depth_unconsumed: number | null
   persisted: PersistedSession | null
 }
 
@@ -30,6 +32,10 @@ export interface QueueMessage {
   username: string
   content: string
   created_at: string
+  /** bits / points；null = 普通观众消息 */
+  priority_type: string | null
+  /** 货币量（bits / points 数）；普通消息为 0 */
+  value: number
 }
 
 export interface SessionRow {

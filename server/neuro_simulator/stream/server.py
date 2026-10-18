@@ -3,10 +3,11 @@
 端点：
 - GET  /health / GET /stream/status / GET /stream/sessions   状态与场次史
 - POST /stream/start|pause|resume|stop                        直播循环控制
-- GET  /queue/messages、POST /queue/message                   当前场次队列（尾读/入列）
+- GET  /queue/messages、POST /queue/message                   当前场次队列（尾读/入列；
+                                                               可选 type/value 进优先轨）
 - GET  /queues/{queue_id}/messages                            历史场次队列（按 queue_id 读）
 - POST /scene                                                 手动切场景（→ 广播 scene_set）
-- GET  /ui/events（SSE）：snapshot + 循环/控制事件只读镜像
+- GET  /ui/events（SSE）：snapshot（含最近聊天） + 循环/控制/聊天事件只读镜像
 - POST /ui/report：UI 上行回报（intro_done → 开播闸门）
 - /ui：直播画面静态托管（Vite 构建产物）
 
@@ -34,6 +35,10 @@ from .storage import Storage
 class MessagePayload(BaseModel):
     username: str = "viewer"
     content: str
+    # 优先消息（可选）：type ∈ {"bits","points"}；value 为货币量（bits/points 数）。
+    # 不传 type = 普通观众消息。
+    type: str | None = None
+    value: int = 0
 
 
 class ScenePayload(BaseModel):
@@ -99,14 +104,19 @@ def create_app() -> FastAPI:
         active = await storage.get_active_session()
         recent = (await storage.list_sessions(limit=1)) or None
         depth = None
+        priority_depth = None
         if lp.session:
             depth = await storage.queue_depth_after(lp.session["queue_row"], lp.session["cursor"])
+            priority_depth = await storage.priority_depth_after(
+                lp.session["queue_row"], lp.session["priority_cursor"]
+            )
         return {
             "state": lp.state,
             "session": lp.session and {k: lp.session[k] for k in (
-                "session_id", "queue_id", "channel", "conversation_id", "cursor"
+                "session_id", "queue_id", "channel", "conversation_id", "cursor", "priority_cursor"
             )},
             "queue_depth_unconsumed": depth,
+            "priority_queue_depth_unconsumed": priority_depth,
             "persisted": active or (recent[0] if recent else None),
         }
 
@@ -201,10 +211,27 @@ def create_app() -> FastAPI:
         content = payload.content.strip()
         if not content:
             raise HTTPException(status_code=400, detail="content must not be empty")
-        storage: Storage = app.state.storage
-        msg_id = await storage.append_message(lp.session["queue_row"], username, content)
-        lp.on_new_message()  # 静默等待模式下的唤醒触发器
-        return {"status": "ok", "id": msg_id}
+        priority_type = (payload.type or "").strip().lower() or None
+        if priority_type is not None and priority_type not in ("bits", "points"):
+            raise HTTPException(
+                status_code=400, detail='type 只能是 "bits" 或 "points"（留空 = 普通消息）'
+            )
+        value = int(payload.value)
+        if value < 0:
+            raise HTTPException(status_code=400, detail="value must be >= 0")
+        try:
+            msg_id = await lp.append_message(
+                username, content, priority_type=priority_type, value=value
+            )
+        except StreamConflict as e:
+            raise HTTPException(status_code=409, detail=str(e)) from e
+        return {
+            "status": "ok",
+            "id": msg_id,
+            "priority": priority_type is not None,
+            "type": priority_type,
+            "value": value,
+        }
 
     @app.get("/queues/{queue_id}/messages")
     async def queue_messages_by_id(queue_id: str, after_id: int = 0, limit: int = 200):
@@ -232,12 +259,17 @@ def create_app() -> FastAPI:
 
         async def gen():
             try:
+                session_info = None
+                if lp.session:
+                    session_info = {
+                        k: lp.session[k] for k in (
+                            "session_id", "queue_id", "channel", "conversation_id"
+                        )
+                    }
                 snapshot = {
                     "state": lp.state,
                     "scene": lp.last_scene,
-                    "session": lp.session and {k: lp.session[k] for k in (
-                        "session_id", "queue_id", "channel", "conversation_id"
-                    )},
+                    "session": session_info,
                 }
                 # 中途连接的续播依据：intro 已过时长 / 当前轮 speech 时间线
                 ie = lp.intro_elapsed()
@@ -246,6 +278,12 @@ def create_app() -> FastAPI:
                 turn = lp.turn_snapshot()
                 if turn["speech"]:
                     snapshot["turn"] = turn
+                # 聊天层恢复：最近 N 条（含优先消息，带 type/value 供样式区分）
+                if lp.session:
+                    storage: Storage = app.state.storage
+                    snapshot["chat"] = await storage.recent_messages(
+                        lp.session["queue_row"], 30
+                    )
                 yield _sse("snapshot", snapshot)
                 while True:
                     try:

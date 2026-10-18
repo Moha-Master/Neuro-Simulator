@@ -4,6 +4,9 @@
 
 :root {
   --neuro-shadow-color: #32003c;
+  /* 优先消息弹窗配色（旧 client 规格：bits=紫 / points=粉） */
+  --sc-pink-bg-color: #f68795;
+  --sc-purple-bg-color: #b97ad5;
   color-scheme: dark;
 }
 
@@ -163,37 +166,116 @@ body {
   opacity: 1;
 }
 
-/* ===== 预留层 ===== */
+/* ===== Twitch 风格聊天覆盖层 =====
+   规格移植自旧 client/src/styles/stream.css #twitch-chat-overlay：
+   左上 25%×50%、透明底、Comic Sans + Noto Sans SC、白字黑描边、自动滚底。 */
 #twitch-chat-overlay {
   position: absolute;
-  top: 5%;
-  left: 3%;
-  width: 26%;
-  max-height: 55%;
-  z-index: 18;
+  top: 0;
+  left: 0;
+  width: 25%;
+  height: 50%;
+  padding: 1cqi;
+  z-index: 5; /* 旧 client 同层：开播视频(10)盖住聊天层，播完才露出 */
   overflow: hidden;
   pointer-events: none;
+  user-select: none;
   color: #fff;
-  font-size: 1.8cqi;
+  font-family: "Comic Sans MS", "Noto Sans SC", cursive, sans-serif;
+  font-size: 1.5cqi;
+  scroll-behavior: auto;
 }
+#twitch-chat-overlay * {
+  pointer-events: none;
+  user-select: none;
+}
+#twitch-chat-overlay .chat-line__message {
+  padding: 2px 0;
+  margin: 0;
+  line-height: 1.35;
+  word-wrap: break-word;
+  text-shadow:
+    -1px -1px 0 #00000080,
+    1px -1px 0 #00000080,
+    -1px 1px 0 #00000080,
+    1px 1px 0 #00000080,
+    2px 2px 0 rgba(0, 0, 0, 0.5);
+  font-size: 1.5cqi;
+}
+#twitch-chat-overlay .chat-line__username {
+  font-weight: 700;
+  margin-right: 0.15rem;
+  font-size: 1.5cqi;
+}
+#twitch-chat-overlay .text-fragment {
+  font-weight: 700;
+  color: #fff;
+  font-size: 1.5cqi;
+}
+
+/* ===== 优先消息弹窗（Super Chat 风格） =====
+   旧 client 时序：从上方滑入 1s → 停留 8s → 滑出 1s。
+   背景图自带圆角（sc_purple=bits / sc_pink=points）。 */
 #highlight-message-overlay {
   position: absolute;
-  left: 50%;
-  bottom: 30%;
-  transform: translateX(-50%);
-  max-width: 70%;
-  z-index: 19;
-  padding: 2cqi 4cqi;
-  border-radius: 1.5cqi;
-  background: rgba(20, 8, 32, 0.85);
-  border: 2px solid #b366ff;
-  color: #fff;
-  text-align: center;
-  font-family: "First Coffee", cursive;
-  font-size: 4cqi;
-  text-shadow: 0 0 4px var(--neuro-shadow-color);
+  top: 0;
+  left: 41%;
+  width: 24cqi;
+  z-index: 25; /* 旧 client 的 100：高于字幕/立绘，弹窗不会被遮 */
+  transform: translateX(-50%) translateY(-220%);
+  transition: transform 1s;
   pointer-events: none;
 }
+#highlight-message-overlay.is-visible {
+  transform: translateX(-50%) translateY(0);
+  transition-timing-function: cubic-bezier(0.25, 1, 0.5, 1);
+}
+.sc-background-image {
+  width: 100%;
+  height: auto;
+  display: block;
+}
+.sc-content {
+  position: absolute;
+  inset: 0;
+  color: #fff;
+  font-family: "Causten", "Noto Sans SC", sans-serif;
+}
+.sc-user {
+  position: absolute;
+  top: 20%;
+  left: 40%;
+  transform: translateX(-50%);
+  max-width: 75%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 2cqi;
+  text-align: left;
+  text-shadow: 0 0 3px rgba(0, 0, 0, 0.25);
+}
+/* 动态头部文本：当前两张背景图仍烘焙着 HIGHLIGHTED MESSAGE (500 BITS)，
+   先隐藏避免重叠；等图片去掉静态文字后把 visibility 改为 visible 即可。 */
+.sc-label {
+  position: absolute;
+  top: 32%;
+  left: 20%;
+  font-size: 1.6cqi;
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+  visibility: hidden;
+}
+.sc-message {
+  position: absolute;
+  top: 60%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  width: 90%;
+  font-size: 2cqi;
+  text-align: center;
+  overflow-wrap: break-word;
+}
+
 .hidden {
   display: none;
 }

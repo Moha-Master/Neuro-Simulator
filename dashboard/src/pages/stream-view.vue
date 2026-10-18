@@ -40,9 +40,26 @@
           <div v-if="!st.messages.value.length" class="queue-empty">
             {{ st.queueActive.value ? '队列为空——发送消息开始与 Neuro 对话' : '开始直播后队列可用' }}
           </div>
-          <div v-for="m in st.messages.value" :key="m.id" class="queue-item">
-            <span class="queue-item__user">{{ m.username }}</span>
-            <span class="queue-item__time">{{ m.created_at.slice(11, 16) }}</span>
+          <div
+            v-for="m in st.messages.value"
+            :key="m.id"
+            class="queue-item"
+            :class="{ 'queue-item--priority': m.priority_type }"
+          >
+            <div class="d-flex align-center">
+              <span class="queue-item__user">{{ m.username }}</span>
+              <v-chip
+                v-if="m.priority_type"
+                size="x-small"
+                :color="m.priority_type === 'bits' ? 'deep-purple' : 'pink'"
+                variant="flat"
+                class="ml-2"
+              >
+                {{ m.value }} {{ m.priority_type }}
+              </v-chip>
+              <v-spacer />
+              <span class="queue-item__time">{{ m.created_at.slice(11, 16) }}</span>
+            </div>
             <div class="queue-item__content">{{ m.content }}</div>
           </div>
         </div>
@@ -58,6 +75,38 @@
             class="mb-2"
             :disabled="!st.queueActive.value"
           />
+          <div class="d-flex align-center gap-2 mb-2">
+            <v-switch
+              v-model="priority"
+              label="优先消息"
+              density="compact"
+              hide-details
+              color="deep-purple"
+              :disabled="!st.queueActive.value"
+            />
+            <template v-if="priority">
+              <v-select
+                v-model="priorityType"
+                :items="PRIORITY_TYPES"
+                item-title="title"
+                item-value="value"
+                density="compact"
+                variant="outlined"
+                hide-details
+                style="max-width: 110px"
+              />
+              <v-text-field
+                v-model.number="priorityValue"
+                type="number"
+                min="1"
+                label="value"
+                density="compact"
+                variant="outlined"
+                hide-details
+                style="max-width: 110px"
+              />
+            </template>
+          </div>
           <div class="d-flex gap-2">
             <v-text-field
               v-model="content"
@@ -71,7 +120,7 @@
             <v-btn
               color="primary"
               icon="mdi-send"
-              :disabled="!st.queueActive.value || !content.trim()"
+              :disabled="!canSend"
               :loading="sending"
               @click="send"
             />
@@ -83,7 +132,7 @@
 </template>
 
 <script lang="ts" setup>
-import { nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useModuleStatus } from '@/composables/useModuleStatus'
 import { useStream } from '@/composables/useStream'
 import ModuleOffline from '@/components/ModuleOffline.vue'
@@ -96,6 +145,21 @@ const username = ref('viewer')
 const content = ref('')
 const sending = ref(false)
 const listEl = ref<HTMLElement | null>(null)
+
+const PRIORITY_TYPES = [
+  { title: 'Bits', value: 'bits' },
+  { title: 'Points', value: 'points' },
+] as const
+
+const priority = ref(false)
+const priorityType = ref<'bits' | 'points'>('bits')
+const priorityValue = ref(100)
+
+const canSend = computed(() => {
+  if (!st.queueActive.value || !content.value.trim()) return false
+  if (priority.value && Number(priorityValue.value) < 1) return false
+  return true
+})
 
 let queueTimer: number | null = null
 
@@ -134,7 +198,10 @@ async function send() {
   const text = content.value.trim()
   if (!text) return
   sending.value = true
-  if (await st.postMessage(username.value.trim() || 'viewer', text)) content.value = ''
+  const pri = priority.value
+    ? { type: priorityType.value, value: Math.max(1, Math.floor(Number(priorityValue.value) || 1)) }
+    : undefined
+  if (await st.postMessage(username.value.trim() || 'viewer', text, pri)) content.value = ''
   sending.value = false
 }
 
@@ -208,6 +275,12 @@ onUnmounted(stopTimers)
 .queue-item {
   margin-bottom: 8px;
   font-size: 13px;
+  padding: 4px 6px;
+  border-radius: 4px;
+}
+.queue-item--priority {
+  background: rgba(145, 71, 255, 0.08);
+  border-left: 2px solid #b388ff;
 }
 .queue-item__user {
   color: #b388ff;

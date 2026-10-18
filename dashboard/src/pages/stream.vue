@@ -47,8 +47,11 @@
                 <div class="text-body-2">{{ short(conv) }}</div>
               </v-col>
               <v-col cols="6" md="3">
-                <div class="text-caption text-disabled">轮次 / 待消费消息</div>
-                <div class="text-body-2">{{ rounds }} / {{ st.status.value.queue_depth_unconsumed ?? '—' }}</div>
+                <div class="text-caption text-disabled">轮次 / 待消费（普通 · 优先）</div>
+                <div class="text-body-2">
+                  {{ rounds }} / {{ st.status.value.queue_depth_unconsumed ?? '—' }} ·
+                  {{ st.status.value.priority_queue_depth_unconsumed ?? '—' }}
+                </div>
               </v-col>
               <v-col cols="6" md="3">
                 <div class="text-caption text-disabled">队列</div>

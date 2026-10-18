@@ -1,14 +1,23 @@
 /** stream 模块 /ui/events 画面事件通道（SSE，只读）。
  *
  * 协议（stream.loop.publish 的镜像）：
- * snapshot{state,scene,session} / state / session_begin / session_end /
- * intro / scene_set{id} / speech{index,text,audio,mime,duration} /
- * turn_begin / turn_end{reason}
+ * snapshot{state,scene,session,intro_elapsed?,turn?,chat?} / state / session_begin /
+ * session_end / intro / scene_set{id} / speech{index,text,audio,mime,duration} /
+ * turn_begin / turn_end{reason} / chat_message / priority_message
  */
 
 export interface FeedEvent {
   type: string;
   [key: string]: unknown;
+}
+
+export interface ChatMsg {
+  id: number;
+  username: string;
+  content: string;
+  created_at?: string;
+  priority_type?: string | null;
+  value?: number;
 }
 
 export interface TurnSeg {
@@ -31,6 +40,7 @@ export interface Snapshot {
   } | null;
   intro_elapsed?: number; // starting 中：开场序列已过秒数（视频续播）
   turn?: { active: boolean; speech: TurnSeg[] }; // 当前/最近一轮的字幕时间线
+  chat?: ChatMsg[]; // 最近聊天记录（重连时恢复聊天层）
 }
 
 const EVENT_NAMES = [
@@ -43,6 +53,8 @@ const EVENT_NAMES = [
   "speech",
   "turn_begin",
   "turn_end",
+  "chat_message",
+  "priority_message",
 ];
 
 import { relativeToPage } from "./base";

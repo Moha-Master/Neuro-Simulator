@@ -3,6 +3,8 @@
 表结构：
 - queues：观众消息队列（每场直播一个，queue_id 为对外 uuid）
 - queue_messages：队列消息（只加不减；自增 id 即注入水位线 cursor 的刻度）
+  双轨：priority_type 为空 = 普通消息；非空（bits/points）= 优先消息，
+  由 sessions.priority_cursor 独立消费，普通轨永不抽取优先消息。
 - sessions：直播场次（state: online / online_pause / offline；ended_at 为空 = 进行中）
 
 并发：单 event loop 单连接 + WAL + busy_timeout。
@@ -24,11 +26,13 @@ CREATE TABLE IF NOT EXISTS queues (
 );
 
 CREATE TABLE IF NOT EXISTS queue_messages (
-    id         INTEGER PRIMARY KEY AUTOINCREMENT,
-    queue_row  INTEGER NOT NULL REFERENCES queues(id) ON DELETE CASCADE,
-    username   TEXT NOT NULL,
-    content    TEXT NOT NULL,
-    created_at TEXT NOT NULL
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    queue_row     INTEGER NOT NULL REFERENCES queues(id) ON DELETE CASCADE,
+    username      TEXT NOT NULL,
+    content       TEXT NOT NULL,
+    created_at    TEXT NOT NULL,
+    priority_type TEXT,
+    value         INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS ix_queue_messages_queue ON queue_messages (queue_row, id);
 
@@ -42,6 +46,7 @@ CREATE TABLE IF NOT EXISTS sessions (
     started_at      TEXT NOT NULL,
     ended_at        TEXT,
     cursor_msg      INTEGER NOT NULL DEFAULT 0,
+    priority_cursor INTEGER NOT NULL DEFAULT 0,
     rounds          INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS ix_sessions_started ON sessions (started_at DESC);
@@ -69,7 +74,25 @@ class Storage:
         await self._db.execute("PRAGMA busy_timeout=5000")
         await self._db.execute("PRAGMA foreign_keys=ON")
         await self._db.executescript(_SCHEMA)
+        await self._migrate()
         await self._db.commit()
+
+    async def _migrate(self) -> None:
+        """给既有库补列（CREATE TABLE IF NOT EXISTS 不会改已存在的表）。"""
+        await self._ensure_column("queue_messages", "priority_type", "priority_type TEXT")
+        await self._ensure_column(
+            "queue_messages", "value", "value INTEGER NOT NULL DEFAULT 0"
+        )
+        await self._ensure_column(
+            "sessions", "priority_cursor", "priority_cursor INTEGER NOT NULL DEFAULT 0"
+        )
+
+    async def _ensure_column(self, table: str, column: str, ddl: str) -> None:
+        cur = await self.db.execute(f"PRAGMA table_info({table})")
+        cols = {row[1] for row in await cur.fetchall()}
+        if column not in cols:
+            # table/ddl 均为内部常量拼装，不接受外部输入
+            await self.db.execute(f"ALTER TABLE {table} ADD COLUMN {ddl}")
 
     async def close(self) -> None:
         if self._db is not None:
@@ -95,10 +118,21 @@ class Storage:
         await self.db.commit()
         return int(row[0]), queue_id
 
-    async def append_message(self, queue_row: int, username: str, content: str) -> int:
+    async def append_message(
+        self,
+        queue_row: int,
+        username: str,
+        content: str,
+        *,
+        priority_type: Optional[str] = None,
+        value: int = 0,
+    ) -> int:
+        """追加消息。priority_type 非空即进入优先轨（bits/points + value）。"""
         cur = await self.db.execute(
-            "INSERT INTO queue_messages (queue_row, username, content, created_at) VALUES (?, ?, ?, ?)",
-            (queue_row, username, content, _now()),
+            "INSERT INTO queue_messages "
+            "(queue_row, username, content, created_at, priority_type, value) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (queue_row, username, content, _now(), priority_type, value),
         )
         await self.db.commit()
         return int(cur.lastrowid)
@@ -108,11 +142,46 @@ class Storage:
     ) -> list[dict[str, Any]]:
         """尾读：id > after_id 的消息正序（dashboard 增量轮询 / 注入候选）。"""
         cur = await self.db.execute(
-            "SELECT id, username, content, created_at FROM queue_messages "
-            "WHERE queue_row=? AND id>? ORDER BY id LIMIT ?",
+            "SELECT id, username, content, created_at, priority_type, value "
+            "FROM queue_messages WHERE queue_row=? AND id>? ORDER BY id LIMIT ?",
             (queue_row, after_id, limit),
         )
         return [dict(r) for r in await cur.fetchall()]
+
+    async def list_normal_messages(
+        self, queue_row: int, after_id: int = 0, limit: int = 200
+    ) -> list[dict[str, Any]]:
+        """普通轨候选（排除优先消息）。"""
+        cur = await self.db.execute(
+            "SELECT id, username, content, created_at, priority_type, value "
+            "FROM queue_messages "
+            "WHERE queue_row=? AND id>? AND priority_type IS NULL ORDER BY id LIMIT ?",
+            (queue_row, after_id, limit),
+        )
+        return [dict(r) for r in await cur.fetchall()]
+
+    async def list_priority_messages(
+        self, queue_row: int, after_id: int = 0, limit: int = 1
+    ) -> list[dict[str, Any]]:
+        """优先轨最早未消费消息（id > priority_cursor，正序）。"""
+        cur = await self.db.execute(
+            "SELECT id, username, content, created_at, priority_type, value "
+            "FROM queue_messages "
+            "WHERE queue_row=? AND id>? AND priority_type IS NOT NULL ORDER BY id LIMIT ?",
+            (queue_row, after_id, limit),
+        )
+        return [dict(r) for r in await cur.fetchall()]
+
+    async def recent_messages(self, queue_row: int, limit: int = 30) -> list[dict[str, Any]]:
+        """最近 N 条（含优先消息），正序返回；供 /ui snapshot 重连恢复聊天层。"""
+        cur = await self.db.execute(
+            "SELECT id, username, content, created_at, priority_type, value "
+            "FROM queue_messages WHERE queue_row=? ORDER BY id DESC LIMIT ?",
+            (queue_row, limit),
+        )
+        rows = [dict(r) for r in await cur.fetchall()]
+        rows.reverse()
+        return rows
 
     async def get_queue(self, queue_id: str) -> Optional[dict[str, Any]]:
         cur = await self.db.execute(
@@ -122,9 +191,20 @@ class Storage:
         return dict(row) if row else None
 
     async def queue_depth_after(self, queue_row: int, cursor_msg: int) -> int:
+        """普通轨未消费深度（优先消息不计入）。"""
         cur = await self.db.execute(
-            "SELECT COUNT(*) FROM queue_messages WHERE queue_row=? AND id>?",
+            "SELECT COUNT(*) FROM queue_messages "
+            "WHERE queue_row=? AND id>? AND priority_type IS NULL",
             (queue_row, cursor_msg),
+        )
+        row = await cur.fetchone()
+        return int(row[0])
+
+    async def priority_depth_after(self, queue_row: int, priority_cursor: int) -> int:
+        cur = await self.db.execute(
+            "SELECT COUNT(*) FROM queue_messages "
+            "WHERE queue_row=? AND id>? AND priority_type IS NOT NULL",
+            (queue_row, priority_cursor),
         )
         row = await cur.fetchone()
         return int(row[0])
@@ -151,6 +231,7 @@ class Storage:
         state: Optional[str] = None,
         ended: bool = False,
         cursor_msg: Optional[int] = None,
+        priority_cursor: Optional[int] = None,
         inc_rounds: bool = False,
     ) -> None:
         sets: list[str] = []
@@ -164,6 +245,9 @@ class Storage:
         if cursor_msg is not None:
             sets.append("cursor_msg=?")
             params.append(cursor_msg)
+        if priority_cursor is not None:
+            sets.append("priority_cursor=?")
+            params.append(priority_cursor)
         if inc_rounds:
             sets.append("rounds=rounds+1")
         if sets:
@@ -175,7 +259,7 @@ class Storage:
     async def get_active_session(self) -> Optional[dict[str, Any]]:
         cur = await self.db.execute(
             "SELECT s.id, s.session_id, s.queue_row, q.queue_id, s.channel, s.conversation_id, "
-            "s.state, s.started_at, s.cursor_msg, s.rounds "
+            "s.state, s.started_at, s.cursor_msg, s.priority_cursor, s.rounds "
             "FROM sessions s JOIN queues q ON q.id=s.queue_row "
             "WHERE s.ended_at IS NULL ORDER BY s.id DESC LIMIT 1"
         )
@@ -185,7 +269,7 @@ class Storage:
     async def get_session(self, session_id: str) -> Optional[dict[str, Any]]:
         cur = await self.db.execute(
             "SELECT s.id, s.session_id, s.queue_row, q.queue_id, s.channel, s.conversation_id, "
-            "s.state, s.started_at, s.ended_at, s.rounds "
+            "s.state, s.started_at, s.ended_at, s.priority_cursor, s.rounds "
             "FROM sessions s JOIN queues q ON q.id=s.queue_row "
             "WHERE s.session_id=?",
             (session_id,),

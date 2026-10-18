@@ -285,6 +285,7 @@ class NeuroAgent:
             reasoning = ""
             pending: dict[int, dict] = {}  # tool_call index -> {id, name, args(拼接中的 str)}
             usage = None
+            finish_reason: str | None = None
 
             stream_error: str | None = None
             try:
@@ -305,6 +306,8 @@ class NeuroAgent:
                     if not chunk.choices:
                         continue
                     delta = chunk.choices[0].delta
+                    if chunk.choices[0].finish_reason:
+                        finish_reason = chunk.choices[0].finish_reason
                     if delta.content:
                         content += delta.content
                         yield {"type": "content", "delta": delta.content}
@@ -331,14 +334,35 @@ class NeuroAgent:
                 return
             except Exception as e:
                 stream_error = f"LLM request failed: {type(e).__name__}: {e}"
-                fallback = "Someone tells Vedal there is a problem with my AI."
-                # 即使 LLM 失败，也以 Agent 身份留下这一句并存库
-                await self.storage.append_message(conv_id, {"role": "assistant", "content": fallback})
-                yield {"type": "content", "delta": fallback}
-                if tts_on:
-                    _enqueue_speech(fallback)
-                    async for ev in _drain_all():
-                        yield ev
+                if content and finish_reason is not None:
+                    # 上游已给出 finish_reason 后才抛错（典型：网关在流尾的 usage 帧崩了）。
+                    # 正文已完整，按正常结束处理，不让一次尾帧故障吞掉整轮发言。
+                    print(
+                        f"[warn] 流在 finish_reason={finish_reason} 之后异常，按正常结束处理："
+                        f"{type(e).__name__}: {e}",
+                        flush=True,
+                    )
+                    stream_error = None
+                elif content:
+                    # 中途失败但已有正文：半截内容照常落库（不覆盖为兜底句）
+                    partial = {"role": "assistant", "content": content}
+                    if reasoning:
+                        partial["reasoning"] = reasoning
+                    await self.storage.append_message(conv_id, partial)
+                    if tts_on:
+                        for sentence in splitter.flush():
+                            _enqueue_speech(sentence)
+                        async for ev in _drain_all():
+                            yield ev
+                else:
+                    # 上游完全没有任何输出：才以 Agent 身份留一句兜底（现实中的 Neuro 行为）
+                    fallback = "Someone tells Vedal there is a problem with my AI."
+                    await self.storage.append_message(conv_id, {"role": "assistant", "content": fallback})
+                    yield {"type": "content", "delta": fallback}
+                    if tts_on:
+                        _enqueue_speech(fallback)
+                        async for ev in _drain_all():
+                            yield ev
 
             if cancel_event is not None and cancel_event.is_set():
                 # 流被中断（_stream_with_cancel 关闭了 LLM 连接）：

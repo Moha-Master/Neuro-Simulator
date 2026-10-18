@@ -2,14 +2,16 @@
 
 状态：offline → starting（开播 intro，等 UI 回报或超时）→ live ⇄ paused → offline
 
-每轮：从绑定队列随机抽取 ≤N 条未消费消息（按时间正序呈现）→ 拼装场景化
-user message 调 neuro /chat → 消费响应（speech 转发给 /ui 画面 + 累计语音时长）
-→ 等"发声总时长 + round_gap"→ 下一轮。空队列行为可配（占位消息 / 静默等待，
+每轮：先查优先轨（有则只消费最早 1 条），否则从普通轨随机抽取 ≤N 条未消费消息
+（按时间正序呈现）→ 拼装场景化 user message 调 neuro /chat → 消费响应
+（speech 转发给 /ui 画面 + 累计语音时长）→ 等"发声总时长 + round_gap"→ 下一轮。
+优先消息在注入时与普通消息完全同格式（对模型只是降噪）；入列即广播
+chat_message / priority_message 给画面。空队列行为可配（占位消息 / 静默等待，
 静默模式下由入列事件即时唤醒，无需轮询）。
 
 对外广播（EventBroadcaster → /ui/events）：session_begin / session_end / state /
-intro / scene_set / speech / turn_begin / turn_end。循环是单 task，控制方法
-（pause/resume/stop/report）都只动 Event/标志位，跨 task 安全。
+intro / scene_set / speech / turn_begin / turn_end / chat_message / priority_message。
+循环是单 task，控制方法（pause/resume/stop/report）都只动 Event/标志位，跨 task 安全。
 """
 
 import asyncio
@@ -135,6 +137,7 @@ class StreamLoop:
             "channel": s.channel,
             "conversation_id": conversation_id,
             "cursor": 0,
+            "priority_cursor": 0,
         }
         self.state = STATE_STARTING
         self._stop_event.clear()
@@ -148,7 +151,9 @@ class StreamLoop:
         self.publish({"type": "intro"})
         
         # 启动 chatbot 循环
-        self.chatbot.start_session(queue_row, self.on_new_message)
+        self.chatbot.start_session(
+            queue_row, self.on_new_message, self._announce_chatbot_message
+        )
         
         self._task = asyncio.create_task(self._main(), name="stream-loop")
         logger.info("stream started: session=%s conv=%s", session_id, conversation_id[:8])
@@ -211,6 +216,57 @@ class StreamLoop:
         """入列唤醒：静默等待模式下立刻推进下一轮。"""
         if self.state == STATE_LIVE:
             self._wakeup.set()
+
+    # ---------- 入列（普通 / 优先共用广播与唤醒） ----------
+
+    def _announce_message(
+        self,
+        msg_id: int,
+        username: str,
+        content: str,
+        *,
+        priority_type: Optional[str] = None,
+        value: int = 0,
+    ) -> None:
+        """把新入列消息镜像给 /ui（聊天层 / 优先弹窗）。"""
+        ev: dict[str, Any] = {
+            "type": "priority_message" if priority_type else "chat_message",
+            "id": msg_id,
+            "username": username,
+            "content": content,
+        }
+        if priority_type:
+            ev["priority_type"] = priority_type
+            ev["value"] = value
+        self.publish(ev)
+
+    def _announce_chatbot_message(self, msg_id: int, username: str, content: str) -> None:
+        """Chatbot 直接写库后的广播回调（不含唤醒，批量入列由 chat 循环统一触发）。"""
+        self._announce_message(msg_id, username, content)
+
+    async def append_message(
+        self,
+        username: str,
+        content: str,
+        *,
+        priority_type: Optional[str] = None,
+        value: int = 0,
+    ) -> int:
+        """API 入列：写库 → 广播 → 唤醒（静默等待模式）。"""
+        if self.session is None:
+            raise StreamConflict("当前没有进行中的直播场次，消息无处入列")
+        msg_id = await self.storage.append_message(
+            self.session["queue_row"],
+            username,
+            content,
+            priority_type=priority_type,
+            value=value,
+        )
+        self._announce_message(
+            msg_id, username, content, priority_type=priority_type, value=value
+        )
+        self.on_new_message()
+        return msg_id
 
     # ---------- 主循环 ----------
 
@@ -278,13 +334,19 @@ class StreamLoop:
         if picked is None:
             return "wait"
 
-        if isinstance(picked, str):
-            body = picked  # 占位互动（不推进 cursor）
-            last_id = None
+        last_id = None
+        if picked["kind"] == "placeholder":
+            body = picked["body"]  # 占位互动（不推进 cursor）
         else:
-            lines = "\n".join(f"- {m['username']}: {m['content']}" for m in picked)
+            msgs = picked["messages"]
+            lines = "\n".join(f"- {m['username']}: {m['content']}" for m in msgs)
+            # 优先消息与普通消息对 neuro 完全同格式：不带 type/value，不加标注
             body = f"Recent viewer messages:\n{lines}"
-            last_id = picked[-1]["id"]
+            last_id = msgs[-1]["id"]
+            if picked["kind"] == "priority":
+                session["priority_cursor"] = last_id
+            else:
+                session["cursor"] = last_id
 
         text = f"{s.scene_context}\nCurrent date and time: {_now_human()}\n\n{body}"
         speech_ms = 0.0
@@ -341,9 +403,16 @@ class StreamLoop:
             self.chatbot.update_neuro_speech(" ".join(turn_texts), speech_ms / 1000.0)
 
         if last_id is not None:
-            session["cursor"] = last_id
+            logger.info(
+                "round picked %s message id=%s",
+                "priority" if picked["kind"] == "priority" else "normal",
+                last_id,
+            )
         await self.storage.update_session(
-            session["session_row"], cursor_msg=session["cursor"], inc_rounds=True
+            session["session_row"],
+            cursor_msg=session["cursor"],
+            priority_cursor=session["priority_cursor"],
+            inc_rounds=True,
         )
         if round_failed:
             # 失败轮次加长退避，防毒上游时打爆网关
@@ -351,19 +420,28 @@ class StreamLoop:
             return 0
         return int(speech_ms)
 
-    async def _pick(self, s, session: dict):
-        """返回：抽中的消息 list（正序）| 占位字符串 | None(静默等待)。"""
-        candidates = await self.storage.list_messages(session["queue_row"], session["cursor"], limit=500)
+    async def _pick(self, s, session: dict) -> Optional[dict]:
+        """双轨抽取：优先轨最早一条优先（一次只消费 1 条）；
+        优先轨为空才回落到普通轨随机抽样。返回 None 表示静默等待。"""
+        priority = await self.storage.list_priority_messages(
+            session["queue_row"], session["priority_cursor"], limit=1
+        )
+        if priority:
+            return {"kind": "priority", "messages": priority}
+
+        candidates = await self.storage.list_normal_messages(
+            session["queue_row"], session["cursor"], limit=500
+        )
         if not candidates:
             if s.empty_queue_behavior == "silent":
                 return None
-            return s.placeholder_message
+            return {"kind": "placeholder", "body": s.placeholder_message}
         if len(candidates) > s.messages_per_round:
             picked = random.sample(candidates, s.messages_per_round)
             picked.sort(key=lambda m: m["id"])
         else:
             picked = candidates
-        return picked
+        return {"kind": "normal", "messages": picked}
 
     # ---------- 等待工具（全部可被 stop/wakeup 打断） ----------
 
