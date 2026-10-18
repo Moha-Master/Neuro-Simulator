@@ -3,7 +3,8 @@
  * 协议（stream.loop.publish 的镜像）：
  * snapshot{state,scene,session,intro_elapsed?,turn?,chat?} / state / session_begin /
  * session_end / intro / scene_set{id} / speech{index,text,audio,mime,duration} /
- * turn_begin / turn_end{reason} / chat_message / priority_message
+ * turn_begin / turn_end{reason} / chat_message / priority_message /
+ * tool_start / tool_result（neuro 工具事件原样镜像，画面端按 name 自行消费）
  */
 
 export interface FeedEvent {
@@ -55,6 +56,8 @@ const EVENT_NAMES = [
   "turn_end",
   "chat_message",
   "priority_message",
+  "tool_start",
+  "tool_result",
 ];
 
 import { relativeToPage } from "./base";

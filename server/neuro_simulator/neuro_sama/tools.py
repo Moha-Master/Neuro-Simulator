@@ -2,13 +2,10 @@
 
 import asyncio
 from dataclasses import dataclass
-from datetime import datetime
 from typing import Awaitable, Callable
 
 from ..config import get_config
 from .memory import MemoryStore
-
-_WEEKDAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
 
 
 @dataclass
@@ -67,27 +64,32 @@ class ToolRegistry:
             return False, f"Error: tool {name!r} raised {type(e).__name__}: {e}"
 
 
-def _format_now() -> str:
-    now = datetime.now().astimezone()
-    offset = now.strftime("%z")
-    tz = f"{offset[:3]}:{offset[3:]}" if offset else "UTC"
-    return f"{now:%Y-%m-%d %H:%M:%S} {_WEEKDAYS[now.weekday()]} (UTC{tz})"
-
-
 def build_builtin_tools(memory: MemoryStore) -> list[Tool]:
-    async def time_get_current() -> str:
-        return _format_now()
-
     async def memory_add(content: str) -> str:
         return await memory.add(content)
 
+    async def model_spin() -> str:
+        return "Spin command sent."
+
+    async def model_zoom() -> str:
+        return "Zoom command sent."
+
     return [
+        # 画面动作工具：neuro 只负责发起调用；实际动画由 stream 把 tool_start
+        # 中的 model_* 转发给 /ui，前端映射到 avatar.spin / avatar.zoom_in。
         Tool(
-            "time_get_current",
-            "Get the current detailed date, weekday and time. "
-            "Call this whenever you need to know what time or day it is now.",
+            "model_spin",
+            "Makes your on-stream avatar spin once counter-clockwise. "
+            "Don't get too dizzy when spinning, lol.",
             {"type": "object", "properties": {}, "required": []},
-            time_get_current,
+            model_spin,
+        ),
+        Tool(
+            "model_zoom",
+            "Makes your on-stream avatar zoom in, as if you got closer to the fans. "
+            "The zoom resets after you finish speaking.",
+            {"type": "object", "properties": {}, "required": []},
+            model_zoom,
         ),
         Tool(
             "memory_add",

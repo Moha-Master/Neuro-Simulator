@@ -72,9 +72,13 @@ export class CaptionPlayer {
   private gen = 0; // 换代计数器：clear()/换绑定时打断在途播放
   private hideTimer: number | null = null;
   private lastIndex = -1;
+  private turnEnded = false; // 已收到 turn_end（生成侧结束）
+  private idleFired = false; // 本轮 idle 回调已触发
   muted = false;
   audioBlocked = false;
   private audioOk = false; // 当前句音频是否已成功起播（waitAudio 依据）
+  /** 本轮全部语音播完（队列空且已收到 turn_end）时回调；供画面联动（zoom 复位）。 */
+  onIdle?: () => void;
 
   constructor() {
     this.caption = document.getElementById("neuro-caption")!;
@@ -83,6 +87,8 @@ export class CaptionPlayer {
 
   /** 一轮新生成开始：取消隐藏计时；空闲状态下清空旧文本。 */
   beginTurn(): void {
+    this.turnEnded = false;
+    this.idleFired = false;
     this.cancelHide();
     if (!this.busy && this.queue.length === 0) {
       this.clearText();
@@ -92,7 +98,11 @@ export class CaptionPlayer {
 
   /** 一轮结束（done/cancelled/stream_aborted）：队列播完后进入静默计时。 */
   endOfTurn(): void {
-    if (!this.busy && this.queue.length === 0) this.scheduleHide();
+    this.turnEnded = true;
+    if (!this.busy && this.queue.length === 0) {
+      this.fireIdle();
+      this.scheduleHide();
+    }
   }
 
   enqueue(seg: SpeechSeg): void {
@@ -165,6 +175,8 @@ export class CaptionPlayer {
     this.audioEl.load();
     this.clearText();
     this.lastIndex = -1;
+    this.turnEnded = false;
+    this.idleFired = false;
   }
 
   private async drain(): Promise<void> {
@@ -176,7 +188,15 @@ export class CaptionPlayer {
       if (gen !== this.gen) return; // 期间被 clear
     }
     this.busy = false;
+    if (this.turnEnded) this.fireIdle();
     if (this.hideTimer === null) this.scheduleHide();
+  }
+
+  /** 本轮语音播完只通知一次（turn_end 可能先于/晚于队列排空）。 */
+  private fireIdle(): void {
+    if (this.idleFired) return;
+    this.idleFired = true;
+    this.onIdle?.();
   }
 
   private async playSeg(seg: SpeechSeg, gen: number): Promise<void> {

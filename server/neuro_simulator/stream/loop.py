@@ -10,7 +10,8 @@ chat_message / priority_message 给画面。空队列行为可配（占位消息
 静默模式下由入列事件即时唤醒，无需轮询）。
 
 对外广播（EventBroadcaster → /ui/events）：session_begin / session_end / state /
-intro / scene_set / speech / turn_begin / turn_end / chat_message / priority_message。
+intro / scene_set / speech / turn_begin / turn_end / chat_message / priority_message /
+tool_start / tool_result（neuro 事件原样镜像；工具语义由画面端按 name 处理）。
 循环是单 task，控制方法（pause/resume/stop/report）都只动 Event/标志位，跨 task 安全。
 """
 
@@ -390,6 +391,10 @@ class StreamLoop:
                         "mime": ev.get("mime", ""),
                         "duration": ev.get("duration", 0),
                     })
+                elif et in ("tool_start", "tool_result"):
+                    # 与普通 Chat 一致：工具事件原样镜像（type 已在事件里），
+                    # 是否消费由画面端按 name 自行判断（如 model_spin/model_zoom）。
+                    self.publish(ev)
                 elif et in ("done", "cancelled", "error"):
                     round_failed = et in ("cancelled", "error")
                     self._end_turn(et)

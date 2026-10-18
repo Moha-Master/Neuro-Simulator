@@ -16,10 +16,13 @@ function commit(el: HTMLElement, prop: string, value: string): void {
   el.style.setProperty(prop, value);
 }
 
-function animate(el: HTMLElement, keyframes: Keyframe[], options: KeyframeAnimationOptions): Promise<void> {
-  return el
-    .animate(keyframes, { fill: "forwards", ...options })
-    .finished.then(() => undefined); // 丢弃 Animation 返回值，统一 Promise<void>
+function animate(
+  el: HTMLElement,
+  keyframes: Keyframe[],
+  options: KeyframeAnimationOptions,
+): Promise<Animation> {
+  const anim = el.animate(keyframes, { fill: "forwards", ...options });
+  return anim.finished.then(() => anim);
 }
 
 export const ACTIONS: Record<string, ActionFn> = {
@@ -43,9 +46,9 @@ export const ACTIONS: Record<string, ActionFn> = {
         { bottom: AVATAR_STEP2_BOTTOM, offset: 1 },
       ],
       { duration: 3000 },
-    ).then(() => {
+    ).then((anim) => {
       commit(el, "bottom", AVATAR_STEP2_BOTTOM);
-      el.getAnimations().forEach((a) => a.cancel());
+      anim.cancel(); // 只取消自己的动画，避免误伤并发的 spin/zoom
     });
   },
 
@@ -58,7 +61,7 @@ export const ACTIONS: Record<string, ActionFn> = {
         { transform: "rotate(-360deg)" },
       ],
       { duration: 750, easing: "linear" },
-    ).then(() => el.getAnimations().forEach((a) => a.cancel()));
+    ).then((anim) => anim.cancel());
   },
 
   /** 放大驻留（scale 1.15，复刻旧 zoom-in） */
@@ -66,7 +69,10 @@ export const ACTIONS: Record<string, ActionFn> = {
     return animate(el, [{ transform: "scale(1)" }, { transform: "scale(1.15)" }], {
       duration: 400,
       easing: "ease-in-out",
-    }).then(() => commit(el, "transform", "scale(1.15)"));
+    }).then((anim) => {
+      commit(el, "transform", "scale(1.15)");
+      anim.cancel();
+    });
   },
 
   /** 取消放大 */
@@ -74,7 +80,10 @@ export const ACTIONS: Record<string, ActionFn> = {
     return animate(el, [{ transform: "scale(1.15)" }, { transform: "scale(1)" }], {
       duration: 400,
       easing: "ease-in-out",
-    }).then(() => commit(el, "transform", ""));
+    }).then((anim) => {
+      commit(el, "transform", "");
+      anim.cancel();
+    });
   },
 
   /** highlight 消息：出现 → 停留 → 消失 */
@@ -95,10 +104,10 @@ export const ACTIONS: Record<string, ActionFn> = {
         { opacity: 0, transform: "translate(-50%, -14px) scale(0.95)", offset: 1 },
       ],
       { duration: total },
-    ).then(() => {
+    ).then((anim) => {
       el.classList.add("hidden");
       el.textContent = "";
-      el.getAnimations().forEach((a) => a.cancel());
+      anim.cancel();
     });
   },
 };

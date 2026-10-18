@@ -4,10 +4,45 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from neuro_simulator.broadcaster import EventBroadcaster
 from neuro_simulator.stream.loop import StreamLoop
 from neuro_simulator.stream.storage import Storage
+
+
+class _FakeNeuroClient:
+    """只回放固定事件序列，用于验证 stream 对 tool_start 的转发/过滤。"""
+
+    def __init__(self, url: str) -> None:
+        self.url = url
+
+    async def chat(self, channel: str, conversation_id: str, text: str):
+        yield {
+            "type": "tool_start",
+            "step": 1,
+            "tool_call_id": "c1",
+            "name": "model_spin",
+            "arguments": {},
+        }
+        yield {
+            "type": "tool_start",
+            "step": 1,
+            "tool_call_id": "c2",
+            "name": "memory_add",
+            "arguments": {"content": "not for the UI"},
+        }
+        yield {
+            "type": "tool_result",
+            "step": 1,
+            "tool_call_id": "c1",
+            "name": "model_spin",
+            "ok": True,
+            "result": "Spin command sent.",
+            "duration_ms": 0,
+        }
+        yield {"type": "speech", "index": 0, "text": "ta-da", "duration": 0.01}
+        yield {"type": "done", "content": "ta-da"}
 
 
 class TestPriorityQueue(unittest.IsolatedAsyncioTestCase):
@@ -25,6 +60,8 @@ class TestPriorityQueue(unittest.IsolatedAsyncioTestCase):
         self.session = {
             "session_row": row["id"],
             "queue_row": self.queue_row,
+            "channel": "stream",
+            "conversation_id": "conv-priority-test",
             "cursor": 0,
             "priority_cursor": 0,
         }
@@ -98,6 +135,31 @@ class TestPriorityQueue(unittest.IsolatedAsyncioTestCase):
         picked = await self.loop._pick(self.settings, self.session)
         self.assertEqual(picked["kind"], "placeholder")
         self.assertEqual(picked["body"], "placeholder")
+
+    async def test_mirrors_all_tool_events_without_filtering(self):
+        await self.storage.append_message(self.queue_row, "viewer", "do a trick")
+        self.settings.scene_context = "ctx"
+        self.settings.neuro_url = "http://fake"
+        # settings 以 SimpleNamespace 充当 StreamSettings（_run_round 只读这几个字段）
+        q = self.bus.subscribe()
+        with patch("neuro_simulator.stream.loop.NeuroClient", _FakeNeuroClient):
+            await self.loop._run_round(self.settings, self.session)
+
+        events = []
+        while not q.empty():
+            events.append(q.get_nowait())
+        # stream 不再解释工具语义：所有 tool_start/tool_result 原样镜像，
+        # 由画面端按 name 自行决定是否消费（当前只处理 model_*）。
+        tool_starts = [e for e in events if e["type"] == "tool_start"]
+        self.assertEqual([e["name"] for e in tool_starts], ["model_spin", "memory_add"])
+        self.assertTrue(
+            any(
+                e["type"] == "tool_result" and e["name"] == "model_spin"
+                for e in events
+            )
+        )
+        # 不再产生专用 tool_call 事件
+        self.assertFalse(any(e["type"] == "tool_call" for e in events))
 
 
 if __name__ == "__main__":

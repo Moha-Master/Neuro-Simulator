@@ -5,6 +5,7 @@
 import "./styles/stream.css";
 
 import { loadFonts } from "./core/assets";
+import { runAction } from "./core/action";
 import { ChatOverlay, HighlightOverlay } from "./core/chat";
 import { report, StreamFeed, type ChatMsg, type FeedEvent, type Snapshot } from "./core/feed";
 import { SceneManager } from "./core/scene";
@@ -19,7 +20,39 @@ async function boot(): Promise<void> {
   const player = new CaptionPlayer();
   const chat = new ChatOverlay();
   const highlight = new HighlightOverlay();
+  const avatarEl = document.getElementById("neuro-avatar")!;
+  let avatarZoomed = false;
   await mgr.set(SCENE_STARTING_SOON); // 默认待机，snapshot/state 事件会校正
+
+  /** 结束本轮语音后复位 zoom（旧 client：zoom 持续到整段回答播完）。 */
+  function resetAvatarZoom(immediate = false): void {
+    if (!avatarZoomed) return;
+    avatarZoomed = false;
+    if (immediate) {
+      avatarEl.getAnimations().forEach((a) => a.cancel());
+      avatarEl.style.transform = "";
+    } else {
+      void runAction("avatar.zoom_out", avatarEl);
+    }
+  }
+  player.onIdle = () => resetAvatarZoom();
+
+  /** neuro 的画面工具（model_spin / model_zoom）→ 前端动作。
+   *  其他工具（memory_add / MCP 等）与直播画面无关，静默忽略。 */
+  function onToolCall(ev: FeedEvent): void {
+    const name = String(ev.name ?? "");
+    if (name === "model_spin") {
+      void runAction("avatar.spin", avatarEl);
+    } else if (name === "model_zoom") {
+      // 旧 client 的 class 是幂等的：已经放大时不重复播放 zoom_in
+      if (!avatarZoomed) {
+        avatarZoomed = true;
+        void runAction("avatar.zoom_in", avatarEl);
+      }
+    } else if (name.startsWith("model_")) {
+      console.warn(`未处理的画面工具: ${name}`);
+    }
+  }
 
   let introPlaying = false;
   async function runIntro(elapsed = 0): Promise<void> {
@@ -75,6 +108,7 @@ async function boot(): Promise<void> {
     player.clear();
     chat.clear();
     highlight.clear();
+    resetAvatarZoom(true);
   });
   feed.on("state", (ev: FeedEvent) => {
     const s = String(ev.state ?? "");
@@ -86,6 +120,7 @@ async function boot(): Promise<void> {
       player.clear();
       chat.clear();
       highlight.clear();
+      resetAvatarZoom(true);
       void setScene(SCENE_STARTING_SOON);
     }
   });
@@ -113,8 +148,10 @@ async function boot(): Promise<void> {
     player.clear();
     chat.clear();
     highlight.clear();
+    resetAvatarZoom(true);
     void setScene(SCENE_STARTING_SOON);
   });
+  feed.on("tool_start", onToolCall); // 工具语义在前端：目前只处理 model_* 画面动作
   feed.on("chat_message", (ev: FeedEvent) => {
     chat.append(ev as unknown as ChatMsg);
   });
@@ -126,7 +163,7 @@ async function boot(): Promise<void> {
 
   // 调试/E2E 句柄：控制台或自动化可直接驱动渲染管线（不影响运行逻辑）
   (window as unknown as Record<string, unknown>).__ns = {
-    mgr, player, feed, chat, highlight, runIntro, setScene,
+    mgr, player, feed, chat, highlight, runIntro, setScene, onToolCall, resetAvatarZoom,
   };
 }
 
