@@ -75,37 +75,37 @@
             class="mb-2"
             :disabled="!st.queueActive.value"
           />
-          <div class="d-flex align-center gap-2 mb-2">
-            <v-switch
-              v-model="priority"
-              label="优先消息"
+          <v-switch
+            v-model="priority"
+            label="优先消息"
+            density="compact"
+            hide-details
+            color="deep-purple"
+            :disabled="!st.queueActive.value"
+            class="mb-2"
+          />
+          <!-- 类型切换：Bits/Points 按钮组（配色与直播画面弹窗一致），测试时一键换型 -->
+          <div v-if="priority" class="d-flex align-center gap-2 mb-2">
+            <v-btn-toggle
+              v-model="priorityType"
               density="compact"
-              hide-details
-              color="deep-purple"
+              divided
+              :color="priorityType === 'bits' ? 'deep-purple' : 'pink'"
               :disabled="!st.queueActive.value"
+            >
+              <v-btn value="bits" size="small">Bits</v-btn>
+              <v-btn value="points" size="small">Points</v-btn>
+            </v-btn-toggle>
+            <v-text-field
+              v-model.number="priorityValue"
+              type="number"
+              min="1"
+              label="value"
+              density="compact"
+              variant="outlined"
+              hide-details
+              style="max-width: 110px"
             />
-            <template v-if="priority">
-              <v-select
-                v-model="priorityType"
-                :items="PRIORITY_TYPES"
-                item-title="title"
-                item-value="value"
-                density="compact"
-                variant="outlined"
-                hide-details
-                style="max-width: 110px"
-              />
-              <v-text-field
-                v-model.number="priorityValue"
-                type="number"
-                min="1"
-                label="value"
-                density="compact"
-                variant="outlined"
-                hide-details
-                style="max-width: 110px"
-              />
-            </template>
           </div>
           <div class="d-flex gap-2">
             <v-text-field
@@ -145,11 +145,6 @@ const username = ref('viewer')
 const content = ref('')
 const sending = ref(false)
 const listEl = ref<HTMLElement | null>(null)
-
-const PRIORITY_TYPES = [
-  { title: 'Bits', value: 'bits' },
-  { title: 'Points', value: 'points' },
-] as const
 
 const priority = ref(false)
 const priorityType = ref<'bits' | 'points'>('bits')
