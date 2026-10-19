@@ -167,8 +167,9 @@ body {
 }
 
 /* ===== Twitch 风格聊天覆盖层 =====
-   规格移植自旧 client/src/styles/stream.css #twitch-chat-overlay：
-   左上 25%×50%、透明底、Comic Sans + Noto Sans SC、白字黑描边、自动滚底。 */
+   规格对齐 jChat/ChatIS 的实际直播配置：
+   左上 25%×50%、透明底、Segoe UI、800 字重、白字 + 黑描边、自动滚底。
+   描边用 0.11em（1920 下约 3.2px，接近 jChat thick 3px），随容器缩放。 */
 #twitch-chat-overlay {
   position: absolute;
   top: 0;
@@ -181,8 +182,12 @@ body {
   pointer-events: none;
   user-select: none;
   color: #fff;
-  font-family: "Comic Sans MS", "Noto Sans SC", cursive, sans-serif;
+  font-family: "Segoe UI", "Roboto", "Noto Sans SC", "Helvetica Neue", Arial, sans-serif;
   font-size: 1.5cqi;
+  font-weight: 800;
+  -webkit-text-stroke: 0.11em #000;
+  /* stroke 居中绘制；不先把 fill 画在上层时细字形的白色会被描边吃光 */
+  paint-order: stroke fill;
   scroll-behavior: auto;
 }
 #twitch-chat-overlay * {
@@ -190,27 +195,23 @@ body {
   user-select: none;
 }
 #twitch-chat-overlay .chat-line__message {
-  padding: 2px 0;
+  padding: 0;
   margin: 0;
-  line-height: 1.35;
+  line-height: 1.4;
   word-wrap: break-word;
-  text-shadow:
-    -1px -1px 0 #00000080,
-    1px -1px 0 #00000080,
-    -1px 1px 0 #00000080,
-    1px 1px 0 #00000080,
-    2px 2px 0 rgba(0, 0, 0, 0.5);
-  font-size: 1.5cqi;
+}
+#twitch-chat-overlay .chat-line__user-info {
+  display: inline-block;
 }
 #twitch-chat-overlay .chat-line__username {
-  font-weight: 700;
-  margin-right: 0.15rem;
-  font-size: 1.5cqi;
+  font-weight: inherit;
+}
+#twitch-chat-overlay .chat-line__colon {
+  margin-right: 0.35em;
 }
 #twitch-chat-overlay .text-fragment {
-  font-weight: 700;
+  font-weight: inherit;
   color: #fff;
-  font-size: 1.5cqi;
 }
 
 /* ===== 优先消息弹窗（Super Chat 风格） =====

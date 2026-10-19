@@ -1,7 +1,7 @@
 /** 直播画面聊天层 + 优先消息弹窗。
  *
- * - ChatOverlay：左上角 Twitch 风格弹幕（规格移植自旧 client 的
- *   #twitch-chat-overlay：Comic Sans、随机用户名色、白字黑描边、自动滚底）。
+ * - ChatOverlay：左上角 Twitch 风格弹幕（jChat/ChatIS 风格：Segoe UI、
+ *   800 字重、白字黑描边、Twitch 官方用户名色板、自动滚底）。
  * - HighlightOverlay：优先消息（bits / points）额外弹一个 sc_purple / sc_pink
  *   背景的高亮框，时序同旧 client：滑入 1s → 停留 8s → 滑出 1s。
  *   多条排队逐条展示，避免快速到达时互相覆盖。
@@ -12,25 +12,24 @@
 import { asset } from "./assets";
 import type { ChatMsg } from "./feed";
 
-/** 旧 client 的用户名色板（饱和色 + 黑描边保证可读性）。 */
+/** Twitch 官方默认用户名色板（jChat/ChatIS 直接使用 IRC color tag；
+ *  这里没有真实 color tag，用用户名哈希稳定映射，刷新/重连不换色）。 */
 const USERNAME_COLORS = [
   "#FF0000",
-  "#00FF00",
   "#0000FF",
-  "#00FFFF",
-  "#FF00FF",
+  "#00FF00",
+  "#B22222",
+  "#FF7F50",
+  "#9ACD32",
   "#FF4500",
-  "#ADFF2F",
+  "#2E8B57",
+  "#DAA520",
+  "#D2691E",
+  "#5F9EA0",
   "#1E90FF",
-  "#FFD700",
-  "#8A2BE2",
-  "#00CED1",
   "#FF69B4",
-  "#DA70D6",
-  "#BA55D3",
-  "#87CEEB",
-  "#32CD32",
-  "#CD853F",
+  "#8A2BE2",
+  "#00FF7F",
 ];
 
 const MAX_LINES = 80;
@@ -38,9 +37,19 @@ const MAX_SEEN = 1000;
 const SC_HOLD_MS = 8000;
 const SC_FADE_MS = 1000;
 
+/** 稳定映射用户名 → Twitch 色板（小写后做 FNV-1a，Twitch 用户名不区分大小写）。 */
+function colorFor(username: string): string {
+  const key = username.toLowerCase();
+  let hash = 0x811c9dc5;
+  for (let i = 0; i < key.length; i++) {
+    hash ^= key.charCodeAt(i);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return USERNAME_COLORS[(hash >>> 0) % USERNAME_COLORS.length];
+}
+
 export class ChatOverlay {
   private el: HTMLElement;
-  private colors = new Map<string, string>();
   /** 已渲染的消息 id（snapshot 与实时事件可能重叠，按 id 去重）。 */
   private seen = new Set<number>();
 
@@ -69,16 +78,24 @@ export class ChatOverlay {
     const line = document.createElement("div");
     line.className = "chat-line__message";
 
+    const userInfo = document.createElement("span");
+    userInfo.className = "chat-line__user-info";
+
     const user = document.createElement("span");
     user.className = "chat-line__username";
-    user.style.color = this.colorFor(msg.username || "viewer");
+    user.style.color = colorFor(msg.username || "viewer");
     user.textContent = msg.username || "viewer";
+
+    const colon = document.createElement("span");
+    colon.className = "chat-line__colon";
+    colon.textContent = ":";
 
     const text = document.createElement("span");
     text.className = "text-fragment";
-    text.textContent = `: ${msg.content}`;
+    text.textContent = msg.content;
 
-    line.append(user, text);
+    userInfo.append(user, colon);
+    line.append(userInfo, text);
     this.el.append(line);
 
     // 只保留最近若干行，长时间直播不会无限堆 DOM
@@ -86,15 +103,6 @@ export class ChatOverlay {
       this.el.firstElementChild?.remove();
     }
     this.el.scrollTop = this.el.scrollHeight;
-  }
-
-  private colorFor(username: string): string {
-    let color = this.colors.get(username);
-    if (!color) {
-      color = USERNAME_COLORS[Math.floor(Math.random() * USERNAME_COLORS.length)];
-      this.colors.set(username, color);
-    }
-    return color;
   }
 }
 

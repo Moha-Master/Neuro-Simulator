@@ -7,12 +7,11 @@ export function asset(path: string): string {
 
 /** 画面用字体（经 JS 加载以兼容非根 base）。
  *  - First Coffee：字幕 / 待机标题
- *  - Comic Sans MS + Noto Sans SC：Twitch 聊天覆盖层（旧 client 规格）
+ *  - Noto Sans SC：聊天覆盖层的中文回退（拉丁优先用系统 Segoe UI）
  *  - Causten：优先消息弹窗（旧 client 规格）
  */
 const FONTS: Array<[family: string, path: string]> = [
   ["First Coffee", "fonts/first-coffee.woff2"],
-  ["Comic Sans MS", "fonts/comic.woff2"],
   ["Causten", "fonts/causten.woff2"],
   ["Noto Sans SC", "fonts/noto-sans-sc.woff2"],
 ];
