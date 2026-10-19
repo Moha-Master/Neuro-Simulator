@@ -6,7 +6,6 @@
   "neuro_sama": {
     "model": "",
     "tts": "null",
-    "system_prompt_base": "You are Neuro-Sama, an AI Vtuber streaming on Twitch.",
     "max_steps": 10,
     "max_context_messages": 60,
     "tool_timeout": 30.0,

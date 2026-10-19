@@ -44,6 +44,27 @@ CREATE TABLE IF NOT EXISTS memories (
     created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS ix_memories_scope ON memories (scope);
+
+-- Persona：system prompt 模板（人工编辑）+ core memory（人工编辑）
+CREATE TABLE IF NOT EXISTS prompts (
+    name       TEXT PRIMARY KEY,
+    content    TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS core_memories (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    title      TEXT NOT NULL UNIQUE,
+    content    TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+-- 一次性播种标记等（避免用户删光后重启又恢复默认内容）
+CREATE TABLE IF NOT EXISTS meta (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
 """
 
 
@@ -233,3 +254,80 @@ class Storage:
         cur = await self.db.execute("SELECT COUNT(*) FROM memories WHERE scope=?", (scope,))
         row = await cur.fetchone()
         return int(row[0])
+
+    # ---------- persona：prompt 模板 ----------
+
+    async def get_prompt(self, name: str = "system") -> Optional[dict]:
+        cur = await self.db.execute(
+            "SELECT name, content, updated_at FROM prompts WHERE name=?", (name,)
+        )
+        row = await cur.fetchone()
+        if row is None:
+            return None
+        return {"name": row[0], "content": row[1], "updated_at": row[2]}
+
+    async def upsert_prompt(self, content: str, name: str = "system") -> None:
+        await self.db.execute(
+            "INSERT INTO prompts (name, content, updated_at) VALUES (?, ?, ?) "
+            "ON CONFLICT(name) DO UPDATE SET content=excluded.content, "
+            "updated_at=excluded.updated_at",
+            (name, content, _now()),
+        )
+        await self.db.commit()
+
+    # ---------- persona：core memory ----------
+
+    async def get_core_memories(self) -> list[dict]:
+        cur = await self.db.execute(
+            "SELECT id, title, content, created_at, updated_at FROM core_memories ORDER BY id"
+        )
+        return [
+            {
+                "id": r[0],
+                "title": r[1],
+                "content": r[2],
+                "created_at": r[3],
+                "updated_at": r[4],
+            }
+            for r in await cur.fetchall()
+        ]
+
+    async def add_core_memory(self, title: str, content: str) -> int:
+        now = _now()
+        cur = await self.db.execute(
+            "INSERT INTO core_memories (title, content, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?)",
+            (title, content, now, now),
+        )
+        await self.db.commit()
+        return int(cur.lastrowid)
+
+    async def update_core_memory(self, memory_id: int, title: str, content: str) -> bool:
+        cur = await self.db.execute(
+            "UPDATE core_memories SET title=?, content=?, updated_at=? WHERE id=?",
+            (title, content, _now(), memory_id),
+        )
+        await self.db.commit()
+        return cur.rowcount > 0
+
+    async def delete_core_memory(self, memory_id: int) -> bool:
+        cur = await self.db.execute(
+            "DELETE FROM core_memories WHERE id=?", (memory_id,)
+        )
+        await self.db.commit()
+        return cur.rowcount > 0
+
+    # ---------- meta ----------
+
+    async def get_meta(self, key: str) -> Optional[str]:
+        cur = await self.db.execute("SELECT value FROM meta WHERE key=?", (key,))
+        row = await cur.fetchone()
+        return row[0] if row else None
+
+    async def set_meta(self, key: str, value: str) -> None:
+        await self.db.execute(
+            "INSERT INTO meta (key, value) VALUES (?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            (key, value),
+        )
+        await self.db.commit()

@@ -113,11 +113,17 @@
                           />
                         </v-col>
                         <v-col cols="12">
-                          <v-textarea
-                            v-model="cfg.neuro_sama.system_prompt_base"
-                            label="System prompt base"
-                            variant="outlined" density="compact" rows="2" auto-grow
-                          />
+                          <v-alert type="info" variant="tonal" density="compact" class="mb-1">
+                            <div class="d-flex align-center flex-wrap ga-2">
+                              <span>
+                                System prompt 与 Core Memory 已移至数据库（仅人工编辑），不再放在 config 中。
+                              </span>
+                              <v-spacer />
+                              <v-btn size="small" variant="text" color="primary" to="/neuro-sama-persona">
+                                打开 Persona
+                              </v-btn>
+                            </div>
+                          </v-alert>
                         </v-col>
                         <v-col cols="6" sm="3"><v-text-field v-model.number="cfg.neuro_sama.max_steps" label="Max steps" type="number" variant="outlined" density="compact" /></v-col>
                         <v-col cols="6" sm="3"><v-text-field v-model.number="cfg.neuro_sama.max_context_messages" label="Max context messages" type="number" variant="outlined" density="compact" /></v-col>
@@ -452,9 +458,9 @@ const normalize = (doc: Record<string, any>) => {
   doc.server.tts_services = doc.server.tts_services || {}
   doc.neuro_sama = doc.neuro_sama || {}
   const n = doc.neuro_sama
+  delete n.system_prompt_base // 已迁移到数据库（Persona 页），旧配置键不再保留
   n.model = n.model ?? ''
   n.tts = n.tts ?? 'null'
-  n.system_prompt_base = n.system_prompt_base ?? 'You are Neuro-Sama, an AI Vtuber streaming on Twitch.'
   n.max_steps = n.max_steps ?? 10
   n.max_context_messages = n.max_context_messages ?? 60
   n.tool_timeout = n.tool_timeout ?? 30

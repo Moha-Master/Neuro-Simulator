@@ -43,8 +43,6 @@ MODULE_DATA_DIRS = {
     "stream": "stream",
 }
 
-DEFAULT_SYSTEM_PROMPT = "You are Neuro-Sama, an AI Vtuber streaming on Twitch."
-
 # 服务引用字段清单：(schema, 点分路径, 服务种类)。新增引用只需加一行。
 REF_LLM = "llm"
 REF_TTS = "tts"
@@ -327,7 +325,6 @@ class Config:
         ns = self.module("neuro_sama")
         self.HOST: str = str(ns.get("host", "127.0.0.1"))
         self.PORT: int = _as_int(ns, "port", 8000)
-        self.SYSTEM_PROMPT_BASE: str = str(ns.get("system_prompt_base", DEFAULT_SYSTEM_PROMPT))
         self.MAX_STEPS: int = _as_int(ns, "max_steps", 10)
         self.MAX_CONTEXT_MESSAGES: int = _as_int(ns, "max_context_messages", 60)
         self.TOOL_TIMEOUT: float = _as_float(ns, "tool_timeout", 30.0)

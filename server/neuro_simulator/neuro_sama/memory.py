@@ -1,4 +1,7 @@
-"""记忆系统：SQLite 持久化 + 内存缓存，每轮请求时编译渲染进 system prompt。
+"""短期记忆系统：SQLite 持久化 + 内存缓存，每轮请求时编译渲染进 system prompt。
+
+Persona 三层中的最底层：由 LLM 通过 memory_add 自主维护（人工也可在 dashboard 修正），
+而稳定事实（人设/关系/世界观）属于只能人工编辑的 Core Memory（见 persona.py）。
 
 设计参考 Letta / AstrBot：
 - system prompt 永不缓存，每次 LLM 调用前从当前状态渲染（memory_add 后下一 step 即生效）
@@ -174,13 +177,20 @@ class MemoryStore:
             self._entries = [e for e in self._entries if e.id != memory_id]
 
     def render(self) -> str:
-        """渲染注入 system prompt 的记忆区（读内存缓存）；无记忆时返回空串。"""
-        if not self._entries:
-            return ""
+        """渲染注入 system prompt 的短期记忆区（读内存缓存）。
+
+        始终返回一个完整段落（即使为空），让模型明确知道当前没有笔记。
+        """
         lines = [
-            "## Memory",
-            "Persistent facts about the user and what has happened. Use them naturally in conversation:",
+            "## Short-term Memory",
+            (
+                "My own notes from recent streams. They may be outdated. "
+                "If they conflict with Core Memory, Core Memory wins."
+            ),
         ]
-        lines += [f"- [{e.ts}] {e.text}" for e in self._entries]
+        if self._entries:
+            lines += [f"- [{e.ts}] {e.text}" for e in self._entries]
+        else:
+            lines.append("(none yet)")
         lines.append(f"<!-- {self.used}/{self.char_limit} chars -->")
         return "\n".join(lines)

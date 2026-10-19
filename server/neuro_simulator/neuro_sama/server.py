@@ -29,6 +29,7 @@ from . import tts
 from .agent import NeuroAgent
 from .mcp_client import MCPManager
 from .memory import MemoryError, MemoryStore
+from .persona import PLACEHOLDERS, PersonaError, PersonaStore
 from .storage import Storage
 from .tools import ToolRegistry, build_builtin_tools
 
@@ -82,6 +83,27 @@ def _terminal(event: str, data: dict) -> None:
         print(f"{_RED}[error] {data['message']}{_RESET}", flush=True)
 
 
+def _core_block_dict(block) -> dict:
+    return {
+        "id": block.id,
+        "title": block.title,
+        "content": block.content,
+        "created_at": block.created_at,
+        "updated_at": block.updated_at,
+    }
+
+
+def _persona_core_stats(persona: PersonaStore) -> dict:
+    return {
+        "core": {
+            "blocks": persona.list_core(),
+            "count": len(persona.blocks),
+            "used": persona.core_used,
+            "is_default": persona.is_default_core,
+        }
+    }
+
+
 class ChatRequest(BaseModel):
     message: str
     channel: str = "web"
@@ -97,6 +119,19 @@ class RenamePayload(BaseModel):
 
 
 class MemoryPayload(BaseModel):
+    content: str
+
+
+class PromptPayload(BaseModel):
+    content: str
+
+
+class PreviewPayload(BaseModel):
+    content: str | None = None  # 可选：预览未保存的草稿
+
+
+class CoreMemoryPayload(BaseModel):
+    title: str
     content: str
 
 
@@ -157,6 +192,8 @@ def create_app() -> FastAPI:
 
         storage = Storage(cfg.DB_PATH)
         await storage.init()
+        persona = PersonaStore(storage)
+        await persona.load()
         memory = MemoryStore(storage, cfg.MEMORY_CHAR_LIMIT)
         await memory.load()
 
@@ -174,9 +211,10 @@ def create_app() -> FastAPI:
             if svc
             else None
         )
-        agent = NeuroAgent(client, registry, storage, memory)
+        agent = NeuroAgent(client, registry, storage, memory, persona)
         app.state.agent = agent
         app.state.memory = memory
+        app.state.persona = persona
         app.state.storage = storage
         app.state.mcp = mcp
         app.state.active_streams: dict[str, asyncio.Event] = {}
@@ -208,6 +246,7 @@ def create_app() -> FastAPI:
             "model_service_ok": svc is not None,
             "tools": app.state.agent.registry.names(),
             "memory_entries": app.state.memory.count,
+            "persona": app.state.persona.stats(),
             "tts": tts.tts_state(),
         }
 
@@ -316,6 +355,117 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=404, detail="session not found")
         print(f"[neuro-sama] session renamed: {channel}:{conversation_id} -> {title}", flush=True)
         return {"status": "ok", "title": title}
+
+    # ---------- /manage：persona（prompt 模板 + core memory） ----------
+
+    @app.get("/manage/persona")
+    async def manage_get_persona():
+        persona: PersonaStore = app.state.persona
+        memory: MemoryStore = app.state.memory
+        await memory._ensure_loaded()
+        return {
+            "prompt": {
+                "content": persona.prompt,
+                "updated_at": persona.prompt_updated_at,
+                "is_default": persona.is_default_prompt,
+            },
+            **_persona_core_stats(persona),
+            "placeholders": PLACEHOLDERS,
+            "short_term": memory.stats(),
+        }
+
+    @app.put("/manage/persona/prompt")
+    async def manage_save_prompt(payload: PromptPayload):
+        persona: PersonaStore = app.state.persona
+        try:
+            await persona.save_prompt(payload.content)
+        except PersonaError as e:
+            raise HTTPException(status_code=e.status, detail=e.message) from e
+        print(f"[neuro-sama] system prompt saved ({len(persona.prompt)} chars)", flush=True)
+        return {
+            "status": "ok",
+            "prompt": {
+                "content": persona.prompt,
+                "updated_at": persona.prompt_updated_at,
+                "is_default": persona.is_default_prompt,
+            },
+        }
+
+    @app.post("/manage/persona/prompt/reset")
+    async def manage_reset_prompt():
+        persona: PersonaStore = app.state.persona
+        await persona.reset_prompt()
+        print("[neuro-sama] system prompt reset to default", flush=True)
+        return {
+            "status": "ok",
+            "prompt": {
+                "content": persona.prompt,
+                "updated_at": persona.prompt_updated_at,
+                "is_default": True,
+            },
+        }
+
+    @app.post("/manage/persona/reset")
+    async def manage_reset_persona():
+        """prompt 模板 + core memory 一起恢复内置默认（人工内容全部丢弃）。"""
+        persona: PersonaStore = app.state.persona
+        await persona.reset_all()
+        print("[neuro-sama] persona reset to default (prompt + core memory)", flush=True)
+        return {
+            "status": "ok",
+            "prompt": {
+                "content": persona.prompt,
+                "updated_at": persona.prompt_updated_at,
+                "is_default": True,
+            },
+            **_persona_core_stats(persona),
+        }
+
+    @app.post("/manage/persona/preview")
+    async def manage_preview_persona(payload: PreviewPayload):
+        """返回编译后的完整 system prompt（可传入未保存的 prompt 草稿）。"""
+        persona: PersonaStore = app.state.persona
+        memory: MemoryStore = app.state.memory
+        await memory._ensure_loaded()
+        return persona.preview(memory.render(), payload.content)
+
+    @app.post("/manage/persona/core-memories")
+    async def manage_add_core_memory(payload: CoreMemoryPayload):
+        persona: PersonaStore = app.state.persona
+        try:
+            block = await persona.add_core(payload.title, payload.content)
+        except PersonaError as e:
+            raise HTTPException(status_code=e.status, detail=e.message) from e
+        print(f"[neuro-sama] core memory added: {block.title}", flush=True)
+        return {"status": "ok", "block": _core_block_dict(block), **_persona_core_stats(persona)}
+
+    @app.put("/manage/persona/core-memories/{block_id}")
+    async def manage_update_core_memory(block_id: int, payload: CoreMemoryPayload):
+        persona: PersonaStore = app.state.persona
+        try:
+            block = await persona.update_core(block_id, payload.title, payload.content)
+        except PersonaError as e:
+            raise HTTPException(status_code=e.status, detail=e.message) from e
+        print(f"[neuro-sama] core memory updated: {block.title}", flush=True)
+        return {"status": "ok", "block": _core_block_dict(block), **_persona_core_stats(persona)}
+
+    @app.delete("/manage/persona/core-memories/{block_id}")
+    async def manage_delete_core_memory(block_id: int):
+        persona: PersonaStore = app.state.persona
+        try:
+            await persona.delete_core(block_id)
+        except PersonaError as e:
+            raise HTTPException(status_code=e.status, detail=e.message) from e
+        print(f"[neuro-sama] core memory deleted: {block_id}", flush=True)
+        return {"status": "ok", "deleted": True, **_persona_core_stats(persona)}
+
+    @app.post("/manage/persona/core-memories/reset")
+    async def manage_reset_core_memories():
+        """core memory 整体替换为包内默认块（人工内容全部丢弃）。"""
+        persona: PersonaStore = app.state.persona
+        await persona.reset_core()
+        print(f"[neuro-sama] core memory reset to default ({len(persona.blocks)} blocks)", flush=True)
+        return {"status": "ok", **_persona_core_stats(persona)}
 
     # ---------- /manage：记忆管理 ----------
 

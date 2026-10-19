@@ -33,11 +33,11 @@
             </template>
             <v-list-item-title>Chat</v-list-item-title>
           </v-list-item>
-          <v-list-item to="/neuro-sama-memory" :active="$route.path === '/neuro-sama-memory'">
+          <v-list-item to="/neuro-sama-persona" :active="$route.path === '/neuro-sama-persona'">
             <template #prepend>
-              <v-icon>mdi-database</v-icon>
+              <v-icon>mdi-account-details</v-icon>
             </template>
-            <v-list-item-title>Memory</v-list-item-title>
+            <v-list-item-title>Persona</v-list-item-title>
           </v-list-item>
         </v-list-group>
         <v-list-group v-model="streamOpen" value="stream">

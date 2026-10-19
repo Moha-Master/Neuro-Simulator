@@ -18,6 +18,7 @@ declare module 'vue' {
     ModuleOffline: typeof import('./components/ModuleOffline.vue')['default']
     RouterLink: typeof import('vue-router')['RouterLink']
     RouterView: typeof import('vue-router')['RouterView']
+    ShortTermMemoryPanel: typeof import('./components/ShortTermMemoryPanel.vue')['default']
     ThinkingBlock: typeof import('./components/chat/ThinkingBlock.vue')['default']
     ToolCallBlock: typeof import('./components/chat/ToolCallBlock.vue')['default']
   }

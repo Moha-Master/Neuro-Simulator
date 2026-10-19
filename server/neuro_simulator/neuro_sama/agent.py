@@ -24,17 +24,14 @@ from openai import AsyncOpenAI, AsyncStream
 from ..config import get_config
 from . import tts
 from .memory import MemoryStore
+from .persona import PersonaStore
 from .storage import Storage
 from .tools import ToolRegistry
 
 
-def build_system_prompt(memory: MemoryStore) -> str:
-    """system prompt 每轮动态编译：固定人设 + 记忆区（Letta 式，永不缓存）。"""
-    parts = [get_config().SYSTEM_PROMPT_BASE]
-    memory_section = memory.render()
-    if memory_section:
-        parts.append(memory_section)
-    return "\n\n".join(parts)
+def build_system_prompt(persona: PersonaStore, memory: MemoryStore) -> str:
+    """system prompt 每轮动态编译：prompt 模板 + core memory + short-term memory（永不缓存）。"""
+    return persona.render(memory.render())
 
 
 _HAS_WORD = re.compile(r"\w", re.UNICODE)
@@ -188,11 +185,13 @@ class NeuroAgent:
         registry: ToolRegistry,
         storage: Storage,
         memory: MemoryStore,
+        persona: PersonaStore,
     ) -> None:
         self.client = client
         self.registry = registry
         self.storage = storage
         self.memory = memory
+        self.persona = persona
 
     async def run(
         self,
@@ -277,7 +276,7 @@ class NeuroAgent:
                 yield {"type": "cancelled"}
                 return
             llm_messages = [
-                {"role": "system", "content": build_system_prompt(self.memory)},
+                {"role": "system", "content": build_system_prompt(self.persona, self.memory)},
                 *messages,
             ]
 
