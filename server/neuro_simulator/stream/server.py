@@ -426,9 +426,9 @@ def create_app() -> FastAPI:
 
     @app.post("/scene")
     async def scene_set(payload: ScenePayload):
-        # intro 是内部脚本场景（manual=false），只能由 start 触发，不允许手动选中——
+        # intro 是 hidden 内部脚本场景，只能由 start 等程序化路径触发，不允许手动选中——
         # 手动切到 intro 后没有“到点回 room”的驱动者，会卡在开场。
-        if not scene_catalog.exists(payload.id) or not scene_catalog.manual(payload.id):
+        if not scene_catalog.exists(payload.id) or scene_catalog.hidden(payload.id):
             known = ", ".join(s["id"] for s in scene_catalog.overview()) or "（ui 未构建）"
             raise HTTPException(
                 status_code=400,

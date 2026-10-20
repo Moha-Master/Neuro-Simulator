@@ -130,15 +130,18 @@ class Storage:
         await self.db.commit()
 
     async def get_messages(self, conv_id: int, limit: Optional[int] = None) -> list[dict]:
-        """取最近 limit 条消息（时间正序，每条含行 id）；limit=None 取全部。"""
-        query = "SELECT id, content FROM messages WHERE conversation_id=? ORDER BY id DESC"
+        """取最近 limit 条消息（时间正序，每条含行 id 与 created_at）；limit=None 取全部。"""
+        query = "SELECT id, content, created_at FROM messages WHERE conversation_id=? ORDER BY id DESC"
         params: list[Any] = [conv_id]
         if limit is not None:
             query += " LIMIT ?"
             params.append(limit)
         cur = await self.db.execute(query, params)
         rows = await cur.fetchall()
-        return [{"id": r[0], **json.loads(r[1])} for r in reversed(rows)]
+        return [
+            {"id": r[0], **json.loads(r[1]), "created_at": r[2]}
+            for r in reversed(rows)
+        ]
 
     # ---------- 管理：会话 ----------
 

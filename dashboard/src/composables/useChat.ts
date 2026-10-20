@@ -10,6 +10,24 @@ import type {
 } from '@/types/chat'
 
 const MODULE = 'neuro_sama'
+const nowStamp = (): string => new Date().toISOString()
+
+function appendStreamDelta(msg: DisplayMessage, kind: 'reasoning' | 'content', delta: string): void {
+  if (!delta) return
+  const segments = (msg.segments ??= [])
+  const last = segments[segments.length - 1]
+  if (last?.kind === kind) {
+    last.content += delta
+    return
+  }
+  segments.push({ kind, content: delta, createdAt: nowStamp() })
+}
+
+function appendStreamText(msg: DisplayMessage, text: string): void {
+  if (!text) return
+  const segments = (msg.segments ??= [])
+  segments.push({ kind: 'content', content: text, createdAt: nowStamp() })
+}
 
 export function useChat() {
   const messages = ref<DisplayMessage[]>([])
@@ -45,9 +63,31 @@ export function useChat() {
 
       const displayMsgs: DisplayMessage[] = []
       const toolCallMap = new Map<string, ToolCallDisplay>()
+      // 一个 user turn 内可能有多条 assistant / tool 行（链式工具调用）。
+      // 历史回放把整组合并成一条 assistant 展示消息，与实时流的行为一致。
+      let group: DisplayMessage | null = null
+
+      const flushGroup = (): void => {
+        if (!group) return
+        const segments = group.segments ?? []
+        const contents: string[] = []
+        const reasonings: string[] = []
+        const tools: ToolCallDisplay[] = []
+        for (const seg of segments) {
+          if (seg.kind === 'content') contents.push(seg.content)
+          else if (seg.kind === 'reasoning') reasonings.push(seg.content)
+          else tools.push(seg.tool)
+        }
+        group.content = contents.join('\n\n')
+        group.reasoning = reasonings.length ? reasonings.join('\n\n') : undefined
+        group.tool_calls = tools.length ? tools : undefined
+        if (segments.length) displayMsgs.push(group)
+        group = null
+      }
 
       for (const m of data.messages) {
         if (m.role === 'user') {
+          flushGroup()
           const text = typeof m.content === 'string' ? m.content : JSON.stringify(m.content)
           displayMsgs.push({
             key: `user-${m.id}`,
@@ -56,11 +96,29 @@ export function useChat() {
             createdAt: m.created_at,
           })
         } else if (m.role === 'assistant') {
+          if (!group) {
+            group = {
+              key: `assistant-${m.id}`,
+              role: 'assistant',
+              content: '',
+              createdAt: m.created_at,
+              updatedAt: m.created_at,
+              segments: [],
+            }
+          }
+          if (m.created_at) group.updatedAt = m.created_at
+          const segments = (group.segments ??= [])
+
+          if (m.reasoning) {
+            segments.push({ kind: 'reasoning', content: m.reasoning, createdAt: m.created_at })
+          }
           let content = ''
           if (m.content) {
             content = typeof m.content === 'string' ? m.content : JSON.stringify(m.content)
+            if (content) {
+              segments.push({ kind: 'content', content, createdAt: m.created_at })
+            }
           }
-          const toolCalls: ToolCallDisplay[] = []
           if (m.tool_calls && Array.isArray(m.tool_calls)) {
             for (const tc of m.tool_calls) {
               const fn = tc.function || {}
@@ -68,19 +126,12 @@ export function useChat() {
                 id: tc.id,
                 name: fn.name || 'unknown',
                 arguments: fn.arguments || '{}',
+                createdAt: m.created_at,
               }
               toolCallMap.set(tc.id, td)
-              toolCalls.push(td)
+              segments.push({ kind: 'tool', tool: td, createdAt: m.created_at })
             }
           }
-          displayMsgs.push({
-            key: `assistant-${m.id}`,
-            role: 'assistant',
-            content,
-            reasoning: m.reasoning || undefined,
-            tool_calls: toolCalls.length ? toolCalls : undefined,
-            createdAt: m.created_at,
-          })
         } else if (m.role === 'tool' && m.tool_call_id) {
           const existing = toolCallMap.get(m.tool_call_id)
           if (existing) {
@@ -89,6 +140,7 @@ export function useChat() {
           }
         }
       }
+      flushGroup()
 
       messages.value = displayMsgs
     } catch (e) {
@@ -113,10 +165,12 @@ export function useChat() {
 
     // 用 reactive() 创建：后续流式更新通过该代理写回才能触发视图重渲染
     // （普通对象持有原始引用改属性不会触发响应式）
+    const startedAt = nowStamp()
     const userMsg: DisplayMessage = reactive({
       key: `user-${Date.now()}`,
       role: 'user',
       content: text.trim(),
+      createdAt: startedAt,
     })
     messages.value.push(userMsg)
 
@@ -124,6 +178,8 @@ export function useChat() {
       key: `assistant-streaming-${Date.now()}`,
       role: 'assistant',
       content: '',
+      createdAt: startedAt,
+      segments: [],
       isStreaming: true,
     })
     messages.value.push(assistantMsg)
@@ -193,6 +249,7 @@ export function useChat() {
     } catch (e) {
       if (e instanceof DOMException && e.name === 'AbortError') {
         assistantMsg.content += '\n\n*[生成已中断]*'
+        appendStreamText(assistantMsg, '*[生成已中断]*')
       } else {
         error.value = '发送失败: ' + describeError(e)
         const idx = messages.value.indexOf(assistantMsg)
@@ -220,11 +277,13 @@ export function useChat() {
       case 'reasoning': {
         currentReasoning.value += data.delta
         assistantMsg.reasoning = currentReasoning.value
+        appendStreamDelta(assistantMsg, 'reasoning', String(data.delta ?? ''))
         break
       }
       case 'content': {
         currentContent.value += data.delta
         assistantMsg.content = currentContent.value
+        appendStreamDelta(assistantMsg, 'content', String(data.delta ?? ''))
         break
       }
       case 'tool_start': {
@@ -232,9 +291,15 @@ export function useChat() {
           id: data.tool_call_id,
           name: data.name,
           arguments: data.arguments,
+          createdAt: nowStamp(),
         }
         currentToolCalls.value.push(td)
         assistantMsg.tool_calls = [...currentToolCalls.value]
+        ;(assistantMsg.segments ??= []).push({
+          kind: 'tool',
+          tool: td,
+          createdAt: td.createdAt,
+        })
         break
       }
       case 'tool_result': {
@@ -253,24 +318,38 @@ export function useChat() {
         break
       }
       case 'done': {
-        assistantMsg.content = data.content || currentContent.value
-        assistantMsg.reasoning = data.reasoning || currentReasoning.value
-        assistantMsg.tool_calls = data.tool_calls?.length
-          ? data.tool_calls
-          : currentToolCalls.value.length
-            ? [...currentToolCalls.value]
+        // 不要用 done 的最终正文覆盖累积内容：工具链每一步的文字都已进入 segments，
+        // 这里只补兜底字段并结束流式状态。
+        assistantMsg.content = currentContent.value || String(data.content ?? '')
+        assistantMsg.reasoning = currentReasoning.value || String(data.reasoning ?? '')
+        if (!assistantMsg.segments?.some((s) => s.kind === 'content') && assistantMsg.content) {
+          appendStreamText(assistantMsg, assistantMsg.content)
+        }
+        assistantMsg.tool_calls = currentToolCalls.value.length
+          ? [...currentToolCalls.value]
+          : data.tool_calls?.length
+            ? data.tool_calls
             : undefined
+        assistantMsg.updatedAt = nowStamp()
         assistantMsg.isStreaming = false
         break
       }
       case 'cancelled': {
         assistantMsg.content = currentContent.value || assistantMsg.content || '*[生成已中断]*'
+        if (!assistantMsg.segments?.some((s) => s.kind === 'content')) {
+          appendStreamText(assistantMsg, '*[生成已中断]*')
+        }
+        assistantMsg.updatedAt = nowStamp()
         assistantMsg.isStreaming = false
         break
       }
       case 'error': {
         error.value = data.message
         assistantMsg.content = currentContent.value || `*[错误: ${data.message}]*`
+        if (!assistantMsg.segments?.some((s) => s.kind === 'content')) {
+          appendStreamText(assistantMsg, `*[错误: ${data.message}]*`)
+        }
+        assistantMsg.updatedAt = nowStamp()
         assistantMsg.isStreaming = false
         break
       }

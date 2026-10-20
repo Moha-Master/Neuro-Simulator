@@ -90,8 +90,9 @@ export interface SceneDef {
   icon?: string;
   /** 注入 LLM 的本场景说明；空 = 回落到 config 的 stream.scene_context */
   prompt_context?: string;
-  /** 是否允许 dashboard / POST /scene 手动选择；默认 true，intro 这类内部场景设 false */
-  manual?: boolean;
+  /** 默认 false；true = 只能程序化调用（on_scene），不出现在 dashboard /
+   *  GET /stream/scenes，且 POST /scene 拒绝。intro 这类内部场景设 true。 */
+  hidden?: boolean;
   /** 固定时长的场景脚本（intro 等）；后端据此推进，前端按时间线渲染 */
   timeline?: SceneTimeline;
   elements: ElementDef[];

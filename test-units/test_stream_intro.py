@@ -47,14 +47,14 @@ class TestIntroSceneData(unittest.TestCase):
             ["intro_video", "bg_room", "avatar", "intro_video"],
         )
 
-    def test_intro_is_scripted_but_not_manually_selectable(self):
+    def test_intro_is_scripted_but_hidden(self):
         data = json.loads(PUBLIC_SCENES.read_text(encoding="utf-8"))
         intro = next(s for s in data["scenes"] if s["id"] == "intro")
-        self.assertIs(intro.get("manual"), False)
+        self.assertIs(intro.get("hidden"), True)
 
         with patch.object(scene_catalog, "load_scenes", return_value=data["scenes"]):
             self.assertAlmostEqual(scene_catalog.duration("intro"), 13.475)
-            self.assertFalse(scene_catalog.manual("intro"))
+            self.assertTrue(scene_catalog.hidden("intro"))
             self.assertNotIn("intro", [s["id"] for s in scene_catalog.overview()])
 
 

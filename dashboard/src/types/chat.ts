@@ -37,7 +37,14 @@ export interface ToolCallDisplay {
   result?: string
   ok?: boolean
   duration_ms?: number
+  createdAt?: string
 }
+
+/** 合并后的 assistant turn 内部的有序片段：正文 / 思考 / 工具调用。 */
+export type AssistantSegment =
+  | { kind: "reasoning"; content: string; createdAt?: string }
+  | { kind: "content"; content: string; createdAt?: string }
+  | { kind: "tool"; tool: ToolCallDisplay; createdAt?: string }
 
 export interface UsageInfo {
   step: number
@@ -52,8 +59,11 @@ export interface DisplayMessage {
   content: string
   reasoning?: string
   tool_calls?: ToolCallDisplay[]
+  /** assistant turn 内的有序片段；存在时 ChatMessage 按片段渲染 */
+  segments?: AssistantSegment[]
   usage?: UsageInfo[]
   createdAt?: string
+  updatedAt?: string
   isStreaming?: boolean
 }
 

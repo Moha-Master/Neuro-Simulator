@@ -216,10 +216,11 @@ class NeuroAgent:
 
         # 取最近 2 倍窗口的行，再按轮裁剪到窗口大小，保证裁剪后仍凑满一轮
         raw = await self.storage.get_messages(conv_id, limit=cfg.MAX_CONTEXT_MESSAGES * 2)
-        # 剥离行 id 与 reasoning：reasoning 仅供 UI 展示，不进 LLM 上下文
-        # （OpenAI 消息格式不认 reasoning 字段，带入会导致 400）
+        # 剥离行 id / created_at 与 reasoning：后两者仅供 UI 展示，不进 LLM 上下文
+        # （OpenAI 消息格式不认这些字段，带入会导致 400）
         messages = [
-            {k: v for k, v in m.items() if k not in ("id", "reasoning")} for m in raw
+            {k: v for k, v in m.items() if k not in ("id", "reasoning", "created_at")}
+            for m in raw
         ]
         _prune_messages(messages, cfg.MAX_CONTEXT_MESSAGES)
 

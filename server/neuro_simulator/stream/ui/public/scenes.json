@@ -5,7 +5,7 @@
       "id": "intro",
       "label": "Intro（开播）",
       "icon": "mdi-play",
-      "manual": false,
+      "hidden": true,
       "timeline": {
         "duration": 13.475,
         "steps": [

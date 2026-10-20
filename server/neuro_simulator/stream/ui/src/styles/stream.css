@@ -53,7 +53,9 @@ body {
 }
 
 .ns-el--hidden {
-  display: none;
+  /* 必须压过组件自己的 display（如 wordle.game 的 display:flex），
+     否则父层已隐藏但棋盘/键盘仍留在画面上。 */
+  display: none !important;
 }
 
 .ns-el img {

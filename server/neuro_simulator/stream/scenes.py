@@ -2,7 +2,7 @@
 
 场景（元素清单 + 固定时长脚本）由画面侧拥有（`stream/ui/public/scenes.json` →
 构建到 `dist/scenes.json`），服务端做四件事：
-1. 校验手动切场景的 id 是否存在且允许手动选择（`POST /scene`）；
+1. 校验手动切场景的 id 是否存在且不是 `hidden` 内部场景（`POST /scene`）；
 2. 把清单（id/label/icon + 元素概览）交给 dashboard 渲染场景按钮，**加场景只改一处**；
 3. 提供场景的 `prompt_context`，让 `{{scene_context}}` 随场景变（玩 Wordle 时她知道自己
    在猜词，但棋盘细节仍只从工具返回里看）；
@@ -60,10 +60,10 @@ def exists(scene_id: str) -> bool:
     return find(scene_id) is not None
 
 
-def manual(scene_id: str) -> bool:
-    """是否允许 dashboard/API 手动选择；intro 这类内部脚本场景为 False。"""
+def hidden(scene_id: str) -> bool:
+    """是否为内部场景：只能程序化 on_scene，不允许 dashboard/API 手动选择。"""
     scene = find(scene_id)
-    return bool(scene and scene.get("manual", True) is not False)
+    return bool(scene and scene.get("hidden") is True)
 
 
 def duration(scene_id: Optional[str]) -> Optional[float]:
@@ -108,5 +108,5 @@ def overview() -> List[Dict[str, Any]]:
             ],
         }
         for s in load_scenes()
-        if s.get("manual", True) is not False
+        if s.get("hidden") is not True
     ]

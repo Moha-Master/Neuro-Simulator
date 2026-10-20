@@ -24,28 +24,25 @@
         </div>
       </v-expansion-panel-title>
       <v-expansion-panel-text>
-        <div class="thinking-content text-body-2" v-html="renderedContent" />
+        <div v-if="createdAt" class="text-caption text-disabled mb-2">
+          Time: {{ formatDateTime(createdAt) }}
+        </div>
+        <div v-if="content" class="thinking-content text-body-2">{{ content }}</div>
+        <div v-else class="thinking-content text-body-2"><em>No thinking recorded</em></div>
       </v-expansion-panel-text>
     </v-expansion-panel>
   </v-expansion-panels>
 </template>
 
 <script lang="ts" setup>
-import { computed } from 'vue'
-import MarkdownIt from 'markdown-it'
+import { formatDateTime } from '@/utils/time'
 
-const md = new MarkdownIt({ html: false, breaks: true })
-
-const props = defineProps<{
+defineProps<{
   content: string
   isStreaming: boolean
   duration?: number
+  createdAt?: string
 }>()
-
-const renderedContent = computed(() => {
-  if (!props.content) return '<em>No thinking recorded</em>'
-  return md.render(props.content)
-})
 </script>
 
 <style scoped>
@@ -53,11 +50,6 @@ const renderedContent = computed(() => {
   max-height: 40vh;
   overflow-y: auto;
   white-space: pre-wrap;
-}
-.thinking-content :deep(pre) {
-  background: rgba(0, 0, 0, 0.05);
-  padding: 8px 12px;
-  border-radius: 4px;
-  overflow-x: auto;
+  word-break: break-word;
 }
 </style>

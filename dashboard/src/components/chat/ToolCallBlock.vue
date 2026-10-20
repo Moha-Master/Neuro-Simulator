@@ -30,6 +30,9 @@
         </div>
       </v-expansion-panel-title>
       <v-expansion-panel-text>
+        <div v-if="createdAt" class="text-caption text-disabled mb-2">
+          Time: {{ formatDateTime(createdAt) }}
+        </div>
         <div v-if="tool.arguments" class="mb-2">
           <div class="text-caption text-disabled mb-1">Arguments</div>
           <pre class="tool-pre">{{ formattedArgs }}</pre>
@@ -46,9 +49,11 @@
 <script lang="ts" setup>
 import { computed } from 'vue'
 import type { ToolCallDisplay } from '@/types/chat'
+import { formatDateTime } from '@/utils/time'
 
 const props = defineProps<{
   tool: ToolCallDisplay
+  createdAt?: string
 }>()
 
 const isPending = computed(() => props.tool.result === undefined)
