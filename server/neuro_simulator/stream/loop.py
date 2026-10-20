@@ -10,8 +10,9 @@ chat_message / priority_message 给画面。空队列行为可配（占位消息
 静默模式下由入列事件即时唤醒，无需轮询）。
 
 对外广播（EventBroadcaster → /ui/events）：session_begin / session_end / state /
-intro / scene_set / speech / turn_begin / turn_end / chat_message / priority_message /
-tool_start / tool_result（neuro 事件原样镜像；工具语义由画面端按 name 处理）。
+intro / scene_set / element_state（游戏等元素的全量状态）/ speech / turn_begin /
+turn_end / chat_message / priority_message / tool_start / tool_result
+（neuro 事件原样镜像；工具语义由画面端按 name 处理）。
 循环是单 task，控制方法（pause/resume/stop/report）都只动 Event/标志位，跨 task 安全。
 """
 
@@ -25,8 +26,10 @@ from typing import Any, Optional
 
 from ..broadcaster import EventBroadcaster
 from . import media
+from . import scenes as scene_catalog
 from . import settings as stream_settings
 from .chatbot import ChatbotManager
+from .games import GameHub
 from .neuro_client import NeuroClient, NeuroError
 from .persona import stream_info_line
 from .storage import Storage
@@ -65,6 +68,8 @@ class StreamLoop:
         self.state: str = STATE_OFFLINE
         self.session: Optional[dict[str, Any]] = None
         self.last_scene: Optional[str] = None
+        # 直播里可被 Neuro 工具驱动的本地小游戏（同时至多一个活跃游戏）
+        self.games = GameHub(publish=self.publish, set_scene=self.on_scene)
         self._task: Optional[asyncio.Task] = None
         self._stop_event = asyncio.Event()
         self._intro_event = asyncio.Event()
@@ -373,7 +378,9 @@ class StreamLoop:
             if self._stop_event.is_set():
                 return
             self.state = STATE_LIVE
-            self.last_scene = "room"
+            # 只有没被显式改过（intro 期间手动切场景或开了游戏）才落到 room
+            if self.last_scene in (None, "intro"):
+                self.last_scene = "room"
             self._publish_state()
 
             while not self._stop_event.is_set():
@@ -404,6 +411,7 @@ class StreamLoop:
 
     async def _finalize(self) -> None:
         self.chatbot.stop_session()
+        self.games.clear()
         was = self.state
         self.state = STATE_OFFLINE
         self._intro_started = None
@@ -430,7 +438,10 @@ class StreamLoop:
         title, category = self.session_metadata()
         # 消息模板（可在 dashboard 编辑）的公共变量；{{round}} 用"本轮序号"
         tpl_vars = {
-            "scene_context": s.scene_context,
+            # 场景自带 prompt_context 就用它（如 play_wordle 会说明"正在玩 Wordle"），
+            # 否则回落到 config 的全局 scene_context。棋盘/比分这类细节不走这里——
+            # 它们只从工具返回里给（将来由通用 stream_status 变量统一承载）。
+            "scene_context": scene_catalog.prompt_context(self.last_scene) or s.scene_context,
             "datetime": _now_human(),
             "stream_info": stream_info_line(title, category),
             "title": title,

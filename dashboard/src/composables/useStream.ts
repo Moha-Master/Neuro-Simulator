@@ -1,6 +1,6 @@
 import { ref } from 'vue'
 import { ApiError, api, describeError } from '@/stores/connection'
-import type { QueueMessage, SessionRow, StreamStatus } from '@/types/stream'
+import type { QueueMessage, SceneSummary, SessionRow, StreamStatus } from '@/types/stream'
 
 const MODULE = 'stream'
 
@@ -12,12 +12,23 @@ export function useStream() {
   // 队列：增量尾读游标 + 已加载消息（只加不减的队列，前端也只是追加）
   const messages = ref<QueueMessage[]>([])
   const queueActive = ref(false)
+  /** 场景清单（单一来源 = 画面侧 scenes.json；前端重新构建后自动多出/少掉按钮） */
+  const scenes = ref<SceneSummary[]>([])
   let lastMsgId = 0
   let isPolling = false
 
   async function refreshStatus() {
     try {
       status.value = await api<StreamStatus>(`/manage/${MODULE}/stream/status`)
+    } catch (e) {
+      error.value = describeError(e)
+    }
+  }
+
+  async function refreshScenes() {
+    try {
+      const data = await api<{ scenes: SceneSummary[] }>(`/manage/${MODULE}/stream/scenes`)
+      scenes.value = data.scenes
     } catch (e) {
       error.value = describeError(e)
     }
@@ -165,7 +176,9 @@ export function useStream() {
     busy,
     messages,
     queueActive,
+    scenes,
     refreshStatus,
+    refreshScenes,
     refreshSessions,
     action,
     setMetadata,

@@ -8,9 +8,8 @@
 export type ActionParams = Record<string, unknown>;
 export type ActionFn = (el: HTMLElement, params?: ActionParams) => Promise<void>;
 
-const AVATAR_STEP1_BOTTOM = "-207%"; // 旧 client 标定：露出头顶
-const AVATAR_STEP2_BOTTOM = "-125%"; // 旧 client 标定：落位待机
-const AVATAR_HIDDEN_BOTTOM = "-207%";
+const AVATAR_RISE_FROM = "-207%"; // 旧 client 标定：只露头顶（起始位）
+const AVATAR_RISE_MS = 3000; // 与 stream/media.py 的 RISE_ANIM_S 保持一致（开播闸门按它兜底）
 
 function commit(el: HTMLElement, prop: string, value: string): void {
   el.style.setProperty(prop, value);
@@ -26,28 +25,22 @@ function animate(
 }
 
 export const ACTIONS: Record<string, ActionFn> = {
-  /** 立绘即时落位：pose = hidden | step1 | step2 */
-  "avatar.place"(el, params) {
-    const pose = String(params?.pose ?? "step2");
-    el.style.transition = "none";
-    el.style.visibility = pose === "hidden" ? "hidden" : "visible";
-    el.style.bottom = pose === "step2" ? AVATAR_STEP2_BOTTOM : AVATAR_HIDDEN_BOTTOM;
-    return Promise.resolve();
-  },
-
-  /** 直播开始出场序列：屏幕外(露头顶) → 停留 2s → 升至待机位（复刻旧 STEP1→STEP2） */
-  "avatar.rise_in"(el) {
-    el.style.visibility = "visible";
+  /** 直播开始入场序列：从画面外（露头顶）→ 停留 2s → 升至元素在场景里声明的落位。
+   *  落点读引擎已写入的 inline bottom，所以立绘停在哪完全由场景数据决定（params.from 可改起点）。 */
+  "avatar.rise_in"(el, params) {
+    const target = el.style.bottom || AVATAR_RISE_FROM;
+    const from = String(params?.from ?? AVATAR_RISE_FROM);
+    el.style.bottom = from;
     return animate(
       el,
       [
-        { bottom: AVATAR_STEP1_BOTTOM, offset: 0, easing: "linear" },
-        { bottom: AVATAR_STEP1_BOTTOM, offset: 2 / 3, easing: "cubic-bezier(0.4, 0, 1, 1)" },
-        { bottom: AVATAR_STEP2_BOTTOM, offset: 1 },
+        { bottom: from, offset: 0, easing: "linear" },
+        { bottom: from, offset: 2 / 3, easing: "cubic-bezier(0.4, 0, 1, 1)" },
+        { bottom: target, offset: 1 },
       ],
-      { duration: 3000 },
+      { duration: Number(params?.duration ?? AVATAR_RISE_MS) },
     ).then((anim) => {
-      commit(el, "bottom", AVATAR_STEP2_BOTTOM);
+      commit(el, "bottom", target);
       anim.cancel(); // 只取消自己的动画，避免误伤并发的 spin/zoom
     });
   },

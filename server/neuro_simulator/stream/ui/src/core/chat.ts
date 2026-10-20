@@ -50,17 +50,20 @@ function colorFor(username: string): string {
 
 export class ChatOverlay {
   private el: HTMLElement;
+  /** 内层承载字号：元素自身设 container-type，字号写在子节点上才能按本层宽度缩放 */
+  private lines: HTMLElement;
   /** 已渲染的消息 id（snapshot 与实时事件可能重叠，按 id 去重）。 */
   private seen = new Set<number>();
 
-  constructor(el: HTMLElement | null = document.getElementById("twitch-chat-overlay")) {
-    if (!el) throw new Error("缺少 #twitch-chat-overlay");
+  constructor(el: HTMLElement) {
     this.el = el;
-    this.el.classList.remove("hidden");
+    this.lines = document.createElement("div");
+    this.lines.className = "chat-lines";
+    el.append(this.lines);
   }
 
   clear(): void {
-    this.el.replaceChildren();
+    this.lines.replaceChildren();
     this.seen.clear();
   }
 
@@ -96,11 +99,11 @@ export class ChatOverlay {
 
     userInfo.append(user, colon);
     line.append(userInfo, text);
-    this.el.append(line);
+    this.lines.append(line);
 
     // 只保留最近若干行，长时间直播不会无限堆 DOM
-    while (this.el.childElementCount > MAX_LINES) {
-      this.el.firstElementChild?.remove();
+    while (this.lines.childElementCount > MAX_LINES) {
+      this.lines.firstElementChild?.remove();
     }
     this.el.scrollTop = this.el.scrollHeight;
   }

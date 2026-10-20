@@ -1,0 +1,265 @@
+{
+  "version": 1,
+  "scenes": [
+    {
+      "id": "starting_soon",
+      "label": "Starting Soon",
+      "icon": "mdi-clock-outline",
+      "elements": [
+        {
+          "id": "bg_black",
+          "name": "黑屏",
+          "z": 0,
+          "box": { "x": 0, "y": 0, "w": 1, "h": 1 },
+          "content": { "kind": "color", "color": "#000000" }
+        },
+        {
+          "id": "intro_video",
+          "name": "开场视频",
+          "z": 10,
+          "box": { "x": 0, "y": 0, "w": 1, "h": 1 },
+          "content": { "kind": "video", "src": "neuro_start.mp4", "muted": true },
+          "visible": false
+        },
+        {
+          "id": "avatar",
+          "name": "立绘",
+          "z": 15,
+          "box": { "x": 0.45, "y": -1.25, "w": 0.5, "edge": { "y": "bottom" } },
+          "content": { "kind": "image", "src": "neurosama.png" },
+          "visible": false
+        },
+        {
+          "id": "chat",
+          "name": "聊天",
+          "z": 5,
+          "box": { "x": 0, "y": 0, "w": 0.25, "h": 0.5 },
+          "content": { "kind": "component", "name": "chat.overlay" }
+        },
+        {
+          "id": "caption",
+          "name": "字幕",
+          "z": 20,
+          "box": { "x": 0.05, "y": 0.05, "w": 0.9, "edge": { "y": "bottom" } },
+          "content": { "kind": "component", "name": "caption" }
+        },
+        {
+          "id": "highlight",
+          "name": "优先消息",
+          "z": 25,
+          "box": { "x": 0.29, "y": 0, "w": 0.24 },
+          "content": { "kind": "component", "name": "highlight" }
+        }
+      ]
+    },
+    {
+      "id": "room",
+      "label": "房间（默认）",
+      "icon": "mdi-sofa",
+      "elements": [
+        {
+          "id": "bg_room",
+          "name": "房间背景",
+          "z": 0,
+          "box": { "x": 0, "y": 0, "w": 1, "h": 1 },
+          "content": { "kind": "image", "src": "background.webp", "fit": "cover" },
+          "script": {
+            "enter": { "tween": { "opacity": 1 }, "duration": 600 },
+            "exit": { "tween": { "opacity": 0 }, "duration": 600 }
+          }
+        },
+        {
+          "id": "intro_video",
+          "name": "开场视频",
+          "z": 10,
+          "box": { "x": 0, "y": 0, "w": 1, "h": 1 },
+          "content": { "kind": "video", "src": "neuro_start.mp4", "muted": true },
+          "visible": false
+        },
+        {
+          "id": "avatar",
+          "name": "立绘",
+          "z": 15,
+          "box": { "x": 0.45, "y": -1.25, "w": 0.5, "edge": { "y": "bottom" } },
+          "content": { "kind": "image", "src": "neurosama.png" }
+        },
+        {
+          "id": "chat",
+          "name": "聊天",
+          "z": 5,
+          "box": { "x": 0, "y": 0, "w": 0.25, "h": 0.5 },
+          "content": { "kind": "component", "name": "chat.overlay" }
+        },
+        {
+          "id": "caption",
+          "name": "字幕",
+          "z": 20,
+          "box": { "x": 0.05, "y": 0.05, "w": 0.9, "edge": { "y": "bottom" } },
+          "content": { "kind": "component", "name": "caption" }
+        },
+        {
+          "id": "highlight",
+          "name": "优先消息",
+          "z": 25,
+          "box": { "x": 0.29, "y": 0, "w": 0.24 },
+          "content": { "kind": "component", "name": "highlight" }
+        }
+      ]
+    },
+    {
+      "id": "community_art",
+      "label": "Community Art",
+      "icon": "mdi-palette",
+      "elements": [
+        {
+          "id": "bg_art",
+          "name": "房间背景（压暗）",
+          "z": 0,
+          "box": { "x": 0, "y": 0, "w": 1, "h": 1 },
+          "content": { "kind": "image", "src": "background.webp", "fit": "cover" },
+          "css": { "filter": "brightness(0.35) saturate(0.8)" },
+          "script": {
+            "enter": { "tween": { "opacity": 1 }, "duration": 600 },
+            "exit": { "tween": { "opacity": 0 }, "duration": 600 }
+          }
+        },
+        {
+          "id": "avatar",
+          "name": "立绘",
+          "z": 15,
+          "box": { "x": 0.45, "y": -1.25, "w": 0.5, "edge": { "y": "bottom" } },
+          "content": { "kind": "image", "src": "neurosama.png" }
+        },
+        {
+          "id": "chat",
+          "name": "聊天",
+          "z": 5,
+          "box": { "x": 0, "y": 0, "w": 0.25, "h": 0.5 },
+          "content": { "kind": "component", "name": "chat.overlay" }
+        },
+        {
+          "id": "caption",
+          "name": "字幕",
+          "z": 20,
+          "box": { "x": 0.05, "y": 0.05, "w": 0.9, "edge": { "y": "bottom" } },
+          "content": { "kind": "component", "name": "caption" }
+        },
+        {
+          "id": "highlight",
+          "name": "优先消息",
+          "z": 25,
+          "box": { "x": 0.29, "y": 0, "w": 0.24 },
+          "content": { "kind": "component", "name": "highlight" }
+        }
+      ]
+    },
+    {
+      "id": "gameplay",
+      "label": "Game Play",
+      "icon": "mdi-gamepad-variant",
+      "elements": [
+        {
+          "id": "bg_game",
+          "name": "房间背景（压暗）",
+          "z": 0,
+          "box": { "x": 0, "y": 0, "w": 1, "h": 1 },
+          "content": { "kind": "image", "src": "background.webp", "fit": "cover" },
+          "css": { "filter": "brightness(0.35) saturate(0.8)" },
+          "script": {
+            "enter": { "tween": { "opacity": 1 }, "duration": 600 },
+            "exit": { "tween": { "opacity": 0 }, "duration": 600 }
+          }
+        },
+        {
+          "id": "avatar",
+          "name": "立绘",
+          "z": 15,
+          "box": { "x": 0.45, "y": -1.25, "w": 0.5, "edge": { "y": "bottom" } },
+          "content": { "kind": "image", "src": "neurosama.png" }
+        },
+        {
+          "id": "chat",
+          "name": "聊天",
+          "z": 5,
+          "box": { "x": 0, "y": 0, "w": 0.25, "h": 0.5 },
+          "content": { "kind": "component", "name": "chat.overlay" }
+        },
+        {
+          "id": "caption",
+          "name": "字幕",
+          "z": 20,
+          "box": { "x": 0.05, "y": 0.05, "w": 0.9, "edge": { "y": "bottom" } },
+          "content": { "kind": "component", "name": "caption" }
+        },
+        {
+          "id": "highlight",
+          "name": "优先消息",
+          "z": 25,
+          "box": { "x": 0.29, "y": 0, "w": 0.24 },
+          "content": { "kind": "component", "name": "highlight" }
+        }
+      ]
+    },
+    {
+      "id": "play_wordle",
+      "label": "Wordle",
+      "icon": "mdi-format-text",
+      "prompt_context": "You are playing Wordle on stream right now: a hidden word has to be guessed in six tries, one guess per row, and every guess must be a real word of the same length. Colours mean: green = right letter right place, yellow = right letter wrong place, grey = not in the word.",
+      "elements": [
+        {
+          "id": "bg_room",
+          "name": "房间背景",
+          "z": 0,
+          "box": { "x": 0, "y": 0, "w": 1, "h": 1 },
+          "content": { "kind": "image", "src": "background.webp", "fit": "cover" },
+          "script": {
+            "enter": { "tween": { "opacity": 1 }, "duration": 600 },
+            "exit": { "tween": { "opacity": 0 }, "duration": 600 }
+          }
+        },
+        {
+          "id": "bg_wordle",
+          "name": "Wordle 底色（叠加、无过渡）",
+          "z": 1,
+          "box": { "x": 0, "y": 0, "w": 1, "h": 1 },
+          "content": { "kind": "color", "color": "#352634" }
+        },
+        {
+          "id": "avatar",
+          "name": "立绘",
+          "z": 15,
+          "box": { "x": 0.45, "y": -1.25, "w": 0.5, "edge": { "y": "bottom" } },
+          "content": { "kind": "image", "src": "neurosama.png" }
+        },
+        {
+          "id": "game_wordle",
+          "name": "Wordle 棋盘",
+          "z": 12,
+          "box": { "x": 0.115, "y": 0.125, "w": 0.37, "h": 0.745 },
+          "content": { "kind": "component", "name": "wordle.game" }
+        },
+        {
+          "id": "chat",
+          "name": "聊天（右上）",
+          "z": 20,
+          "box": { "x": 0.805, "y": 0.005, "w": 0.185, "h": 0.2 },
+          "content": { "kind": "component", "name": "chat.overlay" }
+        },
+        {
+          "id": "caption",
+          "name": "字幕",
+          "z": 22,
+          "box": { "x": 0.05, "y": 0.05, "w": 0.9, "edge": { "y": "bottom" } },
+          "content": { "kind": "component", "name": "caption" }
+        },
+        {
+          "id": "highlight",
+          "name": "优先消息",
+          "z": 25,
+          "box": { "x": 0.29, "y": 0, "w": 0.24 },
+          "content": { "kind": "component", "name": "highlight" }
+        }
+      ]
+    }
+  ]
+}

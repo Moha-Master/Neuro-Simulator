@@ -46,6 +46,10 @@ export interface PersistedSession {
 
 export interface StreamStatus {
   state: string
+  /** 当前画面场景 id（starting 中为 intro） */
+  scene: string | null
+  /** 当前活跃游戏 id（无则 null） */
+  game: string | null
   session: StreamSession | null
   metadata: StreamMetadata
   queue_depth_unconsumed: number | null
@@ -77,4 +81,24 @@ export interface SessionRow {
   ended_at: string | null
   rounds: number
   tags?: string[]
+}
+
+/** 场景里的一个元素（清单来自画面侧 scenes.json，服务端只做概览转发）。 */
+export interface SceneElement {
+  id: string
+  name: string
+  /** color / image / video / text / component */
+  content: string | null
+  /** content=component 时的组件名，如 wordle.game */
+  component: string | null
+  z: number
+  visible: boolean
+}
+
+export interface SceneSummary {
+  id: string
+  label: string
+  icon: string
+  prompt_context: string
+  elements: SceneElement[]
 }

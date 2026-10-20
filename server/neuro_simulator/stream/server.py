@@ -7,10 +7,12 @@
                                                                可选 type/value 进优先轨）
 - GET  /queues/{queue_id}/messages                            历史场次队列（按 queue_id 读）
 - POST /scene                                                 手动切场景（→ 广播 scene_set）
-- GET  /stream/metadata 由 PUT /stream/metadata 修改（标题/分区，→ 广播 stream_metadata）
+- GET  /stream/scenes                                         场景清单（读 ui 构建的 scenes.json）
+- POST /game/{game}/action · GET /game/state                   本地小游戏（Wordle…）：动作 + 全量状态
+- PUT  /stream/metadata                                       改本场标题/分区/标签（→ 广播 stream_metadata）
 - /manage/chatbot/persona*：chatbot 的 prompt 模板 + core memory（人工编辑，存 stream DB）
 - /manage/templates*：stream 拼给 neuro / chatbot 的 user message 模板（人工编辑 + 预览）
-- GET  /ui/events（SSE）：snapshot（含最近聊天） + 循环/控制/聊天事件只读镜像
+- GET  /ui/events（SSE）：snapshot（含最近聊天 + 元素状态） + 循环/控制/聊天事件只读镜像
 - POST /ui/report：UI 上行回报（intro_done → 开播闸门）
 - /ui：直播画面静态托管（Vite 构建产物）
 
@@ -33,7 +35,9 @@ from ..config import get_config, module_url
 from ..persona import PersonaError
 from ..templates import TemplateError
 from . import media
+from . import scenes as scene_catalog
 from . import settings as stream_settings
+from .games import GameError
 from .loop import StreamConflict, StreamLoop
 from .neuro_client import NeuroClient
 from .persona import CHATBOT_PLACEHOLDERS, ChatbotPersonaStore, build_template_store, stream_info_line
@@ -90,6 +94,13 @@ class TemplatePreviewPayload(BaseModel):
 class ScenePayload(BaseModel):
     id: str
     params: dict[str, Any] | None = None
+
+
+class GameActionPayload(BaseModel):
+    """游戏动作：action = start / type / delete / submit / restart / exit / state。"""
+
+    action: str
+    args: dict[str, Any] | None = None
 
 
 class ReportPayload(BaseModel):
@@ -240,6 +251,8 @@ def create_app() -> FastAPI:
         tags = lp.session_tags()
         return {
             "state": lp.state,
+            "scene": lp.last_scene,
+            "game": lp.games.active_id,
             "session": lp.session and {k: lp.session[k] for k in (
                 "session_id", "queue_id", "channel", "conversation_id", "cursor",
                 "priority_cursor", "title", "category", "tags",
@@ -406,12 +419,42 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=404, detail="queue not found")
         return {"queue_id": queue_id, "messages": await storage.list_messages(q["id"], after_id, max(1, min(limit, 500)))}
 
-    # ---------- 场景控制（手动/脚本；直播循环本身不感知场景内容） ----------
+    # ---------- 场景控制与场景清单（手动/脚本；循环本身只记 last_scene） ----------
 
     @app.post("/scene")
     async def scene_set(payload: ScenePayload):
+        if not scene_catalog.exists(payload.id):
+            known = ", ".join(s["id"] for s in scene_catalog.overview()) or "（ui 未构建）"
+            raise HTTPException(status_code=400, detail=f"未知场景 {payload.id!r}；可用：{known}")
         _loop().on_scene(payload.id)
         return {"status": "ok", "scene": payload.id}
+
+    @app.get("/stream/scenes")
+    async def stream_scenes():
+        """场景清单（元素概览）。单一来源 = ui 的 scenes.json，dashboard 场景按钮据此渲染。"""
+        return {"scenes": scene_catalog.overview()}
+
+    # ---------- 本地小游戏（Wordle…）：Neuro 的工具打到这里，画面收 element_state ----------
+
+    @app.get("/game/state")
+    async def game_state():
+        game = _loop().games.active
+        return {"active": game.id if game else None, "state": game.state() if game else None}
+
+    @app.post("/game/{game_id}/action")
+    async def game_action(game_id: str, payload: GameActionPayload):
+        """执行一个游戏动作。返回 result_text（给 LLM 读）+ state（画面用的全量快照）。"""
+        lp = _loop()
+        if payload.action == "start" and not lp.session:
+            raise HTTPException(status_code=409, detail="No stream is running; games only exist on air.")
+        hub = lp.games
+        try:
+            if payload.action == "start":
+                return hub.start(game_id)
+            return hub.act(game_id, payload.action, payload.args or {})
+        except GameError as e:
+            # 面向模型的"这步不能做"：给明确文本，不要抛成工具异常
+            raise HTTPException(status_code=400, detail=str(e)) from e
 
     # ---------- /manage：chatbot 人设（prompt 模板 + core memory） ----------
 
@@ -582,6 +625,10 @@ def create_app() -> FastAPI:
                         "tags": lp.session_tags(),
                     },
                 }
+                # 元素层状态（游戏棋盘等）：中途连接的画面直接按全量快照渲染当前局面
+                elements = lp.games.element_states()
+                if elements:
+                    snapshot["elements"] = elements
                 # 中途连接的续播依据：intro 已过时长 / 当前轮 speech 时间线
                 ie = lp.intro_elapsed()
                 if ie is not None:

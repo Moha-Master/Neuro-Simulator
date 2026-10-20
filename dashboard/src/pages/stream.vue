@@ -167,22 +167,28 @@
         </v-card-actions>
       </v-card>
 
-      <!-- 场景切换 -->
+      <!-- 场景切换（清单来自画面侧 scenes.json，前端加场景这里自动多一个按钮） -->
       <v-card class="mb-6">
         <v-card-title class="text-subtitle-1">场景（直播画面）</v-card-title>
         <v-card-actions class="flex-wrap gap-2 pa-4">
           <v-btn
-            v-for="sc in SCENES"
+            v-for="sc in st.scenes.value"
             :key="sc.id"
             size="small"
-            variant="outlined"
+            :variant="sc.id === currentScene ? 'flat' : 'outlined'"
+            :color="sc.id === currentScene ? 'primary' : undefined"
             :prepend-icon="sc.icon"
+            :title="sc.elements.map((e) => `${e.name}(${e.id})`).join(' · ')"
             @click="st.setScene(sc.id)"
           >
             {{ sc.label }}
           </v-btn>
+          <div v-if="!st.scenes.value.length" class="text-caption text-disabled" style="width: 100%">
+            没有读到场景清单：请确认 stream/ui 已构建（scenes.json 在构建产物里）。
+          </div>
           <div class="text-caption text-disabled" style="width: 100%">
             手动广播 scene_set 到 /ui 画面；直播循环的 intro 由「开始直播」自动触发。
+            <span v-if="st.status.value?.game">当前游戏：{{ st.status.value.game }}</span>
           </div>
         </v-card-actions>
       </v-card>
@@ -241,13 +247,6 @@ import TagInput from '@/components/tags/TagInput.vue'
 const status = useModuleStatus('stream')
 const st = useStream()
 
-const SCENES = [
-  { id: 'room', label: 'Room', icon: 'mdi-sofa' },
-  { id: 'starting_soon', label: 'Starting Soon', icon: 'mdi-clock-outline' },
-  { id: 'community_art', label: 'Community Art', icon: 'mdi-palette' },
-  { id: 'gameplay', label: 'Game Play', icon: 'mdi-gamepad-variant' },
-]
-
 /** 常用 Twitch 分区（可自由输入其它值） */
 const CATEGORIES = [
   'Just Chatting',
@@ -267,6 +266,7 @@ const sid = computed(() => st.status.value?.session?.session_id ?? '')
 const conv = computed(() => st.status.value?.session?.conversation_id ?? '')
 const rounds = computed(() => st.status.value?.persisted?.rounds ?? 0)
 const live = computed(() => Boolean(st.status.value?.metadata?.live))
+const currentScene = computed(() => st.status.value?.scene ?? '')
 
 // 本场信息编辑区：以服务端值为基线；用户有未保存改动时不被轮询覆盖，
 // 但场次切换（开播/下播）会重新对齐（新场次的标题来自上一场或 config 默认值）。
@@ -379,6 +379,7 @@ watch(
 )
 
 onMounted(() => {
+  void st.refreshScenes()
   if (status.reachable.value) startPolling()
 })
 onUnmounted(stopPolling)

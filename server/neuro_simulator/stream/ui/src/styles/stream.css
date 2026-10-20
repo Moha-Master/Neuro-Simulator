@@ -1,6 +1,9 @@
 /* Neuro-Sama 直播画面样式。
-   规格移植自旧 client/src/styles/stream.css（针对同一立绘文件标定），
-   布局从 JS ResizeObserver 改为纯 CSS：16:9 letterbox + 容器查询单位（cqi）。 */
+   舞台（16:9 letterbox + 容器查询单位）与旧 client 规格一致；
+   舞台里的每一层都是元素引擎按 scenes.json 建的 `.ns-el`，
+   **位置/大小/层级来自场景数据（inline style）**，这里只写各层内部的样子。
+   组件样式按 [data-component="…"] 挂（组件名由代码拥有，元素 id 属于场景数据）。
+   元素根带 container-type: inline-size，所以层内的 cqi = 该元素自身宽度的 1%。 */
 
 :root {
   --neuro-shadow-color: #32003c;
@@ -42,114 +45,74 @@ body {
   container-name: stage;
 }
 
-/* ===== 背景双缓冲 ===== */
-.bg-layer {
+/* ===== 元素层基座（几何由引擎写成 inline style） ===== */
+.ns-el {
   position: absolute;
-  inset: 0;
-  z-index: 0;
   pointer-events: none;
-  background-position: center;
-  background-size: cover;
-  background-repeat: no-repeat;
-  opacity: 0;
-  transition: opacity 0.6s ease-in-out;
-}
-.bg-layer.visible {
-  opacity: 1;
-}
-.bg-layer.dim {
-  filter: brightness(0.35) saturate(0.8);
+  container-type: inline-size;
 }
 
-/* ===== 开播视频层 ===== */
-.media-layer {
-  position: absolute;
-  inset: 0;
-  z-index: 10;
-  background: #000;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-}
-.media-layer.hidden {
+.ns-el--hidden {
   display: none;
 }
-#startup-video {
-  width: 100%;
-  height: 100%;
-  object-fit: contain;
-}
 
-/* ===== starting soon ===== */
-.starting-soon {
-  position: absolute;
-  inset: 0;
-  z-index: 12;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: 2cqi;
-  pointer-events: none;
-}
-.starting-soon.hidden {
-  display: none;
-}
-.starting-soon__title {
-  font-family: "First Coffee", cursive;
-  font-size: 14cqi;
-  color: #fff;
-  text-shadow:
-    0 0 8px var(--neuro-shadow-color),
-    0 0 8px var(--neuro-shadow-color);
-}
-.starting-soon__sub {
-  font-family: "First Coffee", cursive;
-  font-size: 4cqi;
-  letter-spacing: 0.15em;
-  color: #e6b3ff;
-  animation: soon-pulse 1.6s ease-in-out infinite;
-}
-@keyframes soon-pulse {
-  0%,
-  100% {
-    opacity: 0.55;
-  }
-  50% {
-    opacity: 1;
-  }
-}
-
-/* ===== 立绘 =====
-   left 70% + margin-left -50%自身宽（=旧 translateX(-50%) 居中法，
-   腾出 transform 属性给 spin/zoom 动画）；bottom 由 JS 动作控制。 */
-#neuro-avatar {
-  position: absolute;
-  left: 70%;
-  margin-left: -25%; /* 舞台容器 width 50% → -25% 即回移自身一半 */
-  width: 50%;
-  z-index: 15;
-  visibility: hidden;
-  bottom: -207%; /* hidden 位（旧规格） */
-  pointer-events: none;
-}
-#neuro-avatar img {
-  width: 100%;
+.ns-el img {
   display: block;
+  width: 100%;
 }
 
-/* ===== 字幕 ===== */
-#neuro-caption {
-  position: absolute;
-  bottom: 5%;
-  left: 50%;
-  transform: translateX(-50%);
-  width: 90%;
+.hidden {
+  display: none;
+}
+
+/* ===== 聊天覆盖层（Twitch 风格） =====
+   规格对齐 jChat/ChatIS 的实际直播配置：Segoe UI、800 字重、白字 + 黑描边、自动滚底。
+   字号 6cqi = 旧 1.5cqi（舞台宽）在 25% 宽聊天层下的等价值，换场景改宽度会等比缩放。
+   描边用 0.11em（1920 下约 3.2px，接近 jChat thick 3px），随元素缩放。 */
+.ns-el[data-component="chat.overlay"] {
+  overflow: hidden;
+  user-select: none;
+  color: #fff;
+  font-family: "Segoe UI", "Roboto", "Noto Sans SC", "Helvetica Neue", Arial, sans-serif;
+  scroll-behavior: auto;
+}
+/* 字号写在子节点上：元素自身就是查询容器，写在它自己身上只会解析到舞台宽度 */
+.chat-lines {
+  font-size: 6cqi;
+  font-weight: 800;
+  -webkit-text-stroke: 0.11em #000;
+  /* stroke 居中绘制；不先把 fill 画在上层时细字形的白色会被描边吃光 */
+  paint-order: stroke fill;
+}
+.ns-el[data-component="chat.overlay"] * {
+  pointer-events: none;
+  user-select: none;
+}
+.chat-line__message {
+  padding: 0;
+  margin: 0;
+  line-height: 1.4;
+  word-wrap: break-word;
+}
+.chat-line__user-info {
+  display: inline-block;
+}
+.chat-line__username {
+  font-weight: inherit;
+}
+.chat-line__colon {
+  margin-right: 0.35em;
+}
+.text-fragment {
+  font-weight: inherit;
+  color: #fff;
+}
+
+/* ===== 字幕（TTS 时长驱动的伪流式逐词显示） ===== */
+.ns-el[data-component="caption"] {
   padding: 10px 20px;
   border-radius: 10px;
   text-align: center;
-  z-index: 20;
-  pointer-events: none;
   color: white;
   opacity: 0;
   transition: opacity 0.3s ease;
@@ -159,76 +122,24 @@ body {
     0 0 4px var(--neuro-shadow-color);
   font-family: "First Coffee", "Noto Sans SC", cursive, sans-serif;
   font-weight: normal;
+  /* 元素自身的 cqi 解析到祖先容器（舞台），所以这里保持旧值 3cqi 不变；
+     字幕层在每个场景都是 90% 宽，不需要随元素缩放 */
   font-size: 3cqi;
   line-height: 1.25;
 }
-#neuro-caption.show {
+.ns-el[data-component="caption"].show {
   opacity: 1;
-}
-
-/* ===== Twitch 风格聊天覆盖层 =====
-   规格对齐 jChat/ChatIS 的实际直播配置：
-   左上 25%×50%、透明底、Segoe UI、800 字重、白字 + 黑描边、自动滚底。
-   描边用 0.11em（1920 下约 3.2px，接近 jChat thick 3px），随容器缩放。 */
-#twitch-chat-overlay {
-  position: absolute;
-  top: 0;
-  left: 0;
-  width: 25%;
-  height: 50%;
-  padding: 1cqi;
-  z-index: 5; /* 旧 client 同层：开播视频(10)盖住聊天层，播完才露出 */
-  overflow: hidden;
-  pointer-events: none;
-  user-select: none;
-  color: #fff;
-  font-family: "Segoe UI", "Roboto", "Noto Sans SC", "Helvetica Neue", Arial, sans-serif;
-  font-size: 1.5cqi;
-  font-weight: 800;
-  -webkit-text-stroke: 0.11em #000;
-  /* stroke 居中绘制；不先把 fill 画在上层时细字形的白色会被描边吃光 */
-  paint-order: stroke fill;
-  scroll-behavior: auto;
-}
-#twitch-chat-overlay * {
-  pointer-events: none;
-  user-select: none;
-}
-#twitch-chat-overlay .chat-line__message {
-  padding: 0;
-  margin: 0;
-  line-height: 1.4;
-  word-wrap: break-word;
-}
-#twitch-chat-overlay .chat-line__user-info {
-  display: inline-block;
-}
-#twitch-chat-overlay .chat-line__username {
-  font-weight: inherit;
-}
-#twitch-chat-overlay .chat-line__colon {
-  margin-right: 0.35em;
-}
-#twitch-chat-overlay .text-fragment {
-  font-weight: inherit;
-  color: #fff;
 }
 
 /* ===== 优先消息弹窗（Super Chat 风格） =====
    旧 client 时序：从上方滑入 1s → 停留 8s → 滑出 1s。
-   背景图自带圆角（sc_purple=bits / sc_pink=points）。 */
-#highlight-message-overlay {
-  position: absolute;
-  top: 0;
-  left: 41%;
-  width: 24cqi;
-  z-index: 25; /* 旧 client 的 100：高于字幕/立绘，弹窗不会被遮 */
-  transform: translateX(-50%) translateY(-220%);
+   背景图自带圆角（sc_purple=bits / sc_pink=points）。水平居中由场景的 box 决定。 */
+.ns-el[data-component="highlight"] {
+  transform: translateY(-220%);
   transition: transform 1s;
-  pointer-events: none;
 }
-#highlight-message-overlay.is-visible {
-  transform: translateX(-50%) translateY(0);
+.ns-el[data-component="highlight"].is-visible {
+  transform: translateY(0);
   transition-timing-function: cubic-bezier(0.25, 1, 0.5, 1);
 }
 .sc-background-image {
@@ -251,7 +162,7 @@ body {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: 2cqi;
+  font-size: 8.333cqi;
   text-align: left;
   text-shadow: 0 0 3px rgba(0, 0, 0, 0.25);
 }
@@ -261,7 +172,7 @@ body {
   position: absolute;
   top: 32%;
   left: 20%;
-  font-size: 1.6cqi;
+  font-size: 6.667cqi;
   letter-spacing: 0.04em;
   white-space: nowrap;
   visibility: hidden;
@@ -272,12 +183,179 @@ body {
   left: 50%;
   transform: translate(-50%, -50%);
   width: 90%;
-  font-size: 2cqi;
+  font-size: 8.333cqi;
   text-align: center;
   overflow-wrap: break-word;
 }
 
-.hidden {
-  display: none;
+/* ===== Wordle 元素（棋盘 + 屏幕键盘） =====
+   规格取自 Neurdle(MIT) 的 SCSS 与官方直播截图实测：
+   棋盘 59cqi 宽（截图 420/710）、格子正方形、间隙 1.1cqi，键盘贴元素底部；
+   配色 #3a3a3c(absent) / #b59f3b(present) / #538d4e(correct)，键帽 #818384。 */
+.ns-el[data-component="wordle.game"] {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: space-between;
+  font-family: "Inter", system-ui, sans-serif;
+  color: #e5e5e5;
 }
 
+.wl-board {
+  display: grid;
+  gap: 1.1cqi;
+  width: 59cqi;
+}
+
+.wl-tile {
+  position: relative;
+  aspect-ratio: 1;
+  perspective: 800px;
+}
+
+.wl-inner {
+  position: absolute;
+  inset: 0;
+  transform-style: preserve-3d;
+  transition: transform 0.6s ease; /* FLIP_MS */
+}
+.wl-inner.wl-flip {
+  transform: rotateX(180deg);
+}
+
+.wl-face {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  text-transform: uppercase;
+  /* 直播截图里的字母是细字重（Neurdle 自己用 700，这里照截图） */
+  font-weight: 400;
+  font-size: 6.2cqi;
+  backface-visibility: hidden;
+  box-shadow: inset 0 0 0 0.28cqi #5d4e5d;
+}
+.wl-front {
+  z-index: 1;
+  color: #e5e5e5;
+  background: transparent;
+}
+.wl-tile--filled .wl-front {
+  box-shadow: inset 0 0 0 0.28cqi #565758;
+}
+.wl-back {
+  z-index: 0;
+  transform: rotateX(180deg);
+  color: #fff;
+}
+.wl-back.wl-correct {
+  z-index: 2;
+  background: #538d4e;
+  box-shadow: inset 0 0 0 0.28cqi #538d4e;
+}
+.wl-back.wl-present {
+  z-index: 2;
+  background: #b59f3b;
+  box-shadow: inset 0 0 0 0.28cqi #b59f3b;
+}
+.wl-back.wl-absent {
+  z-index: 2;
+  background: #3a3a3c;
+  box-shadow: inset 0 0 0 0.28cqi #3a3a3c;
+}
+
+@keyframes wl-pop {
+  0% {
+    transform: scale(0.6);
+  }
+  60% {
+    transform: scale(1.12);
+  }
+  100% {
+    transform: scale(1);
+  }
+}
+.wl-tile--pop .wl-front {
+  animation: wl-pop 0.14s ease-out;
+}
+
+.wl-kbd {
+  width: 100cqi;
+  display: flex;
+  flex-direction: column;
+  gap: 0.8cqi;
+}
+.wl-kbd__row {
+  display: flex;
+  justify-content: center;
+  gap: 0.8cqi;
+}
+.wl-key {
+  flex: 1;
+  height: 10cqi;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 0.7cqi;
+  background: #818384;
+  color: #fff;
+  font-size: 2.9cqi;
+  font-weight: 700;
+  user-select: none;
+}
+.wl-key--wide {
+  flex: 1.5;
+}
+.wl-key.wl-absent {
+  background: #3a3a3c;
+}
+.wl-key.wl-present {
+  background: #b59f3b;
+}
+.wl-key.wl-correct {
+  background: #538d4e;
+}
+
+/* 一次性提示（"这不是个词" / 需要填满 N 个字母） */
+.wl-toast {
+  position: absolute;
+  top: 42cqi;
+  left: 50%;
+  transform: translateX(-50%);
+  padding: 2.2cqi 3.4cqi;
+  border-radius: 1.1cqi;
+  background: #920f0f;
+  color: #fff;
+  font-size: 3.2cqi;
+  font-weight: 600;
+  white-space: nowrap;
+  opacity: 0;
+  transition: opacity 0.18s ease;
+}
+.wl-toast.show {
+  opacity: 1;
+}
+
+/* 结束横幅（揭晓答案）；胜负由服务端状态驱动，不靠前端猜 */
+.wl-banner {
+  position: absolute;
+  top: -9cqi;
+  left: 50%;
+  transform: translateX(-50%);
+  font-size: 4.2cqi;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  white-space: nowrap;
+  opacity: 0;
+  transition: opacity 0.3s ease;
+}
+.wl-banner.show {
+  opacity: 1;
+}
+.wl-banner--win {
+  color: #7ed957;
+}
+.wl-banner--lose {
+  color: #f68795;
+}

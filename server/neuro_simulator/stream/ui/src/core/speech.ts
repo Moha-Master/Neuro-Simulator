@@ -80,9 +80,9 @@ export class CaptionPlayer {
   /** 本轮全部语音播完（队列空且已收到 turn_end）时回调；供画面联动（zoom 复位）。 */
   onIdle?: () => void;
 
-  constructor() {
-    this.caption = document.getElementById("neuro-caption")!;
-    this.stage = document.getElementById("stage")!;
+  constructor(caption: HTMLElement, stage: HTMLElement) {
+    this.caption = caption;
+    this.stage = stage;
   }
 
   /** 一轮新生成开始：取消隐藏计时；空闲状态下清空旧文本。 */

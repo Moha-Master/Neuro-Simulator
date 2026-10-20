@@ -65,6 +65,8 @@ class ToolRegistry:
 
 
 def build_builtin_tools(memory: MemoryStore) -> list[Tool]:
+    from .games import build_game_tools  # 延迟导入：games 需要本模块的 Tool
+
     async def memory_add(content: str) -> str:
         return await memory.add(content)
 
@@ -108,4 +110,6 @@ def build_builtin_tools(memory: MemoryStore) -> list[Tool]:
             },
             memory_add,
         ),
+        # 游戏工具：状态与判定在 stream 侧，这里只转发（见 games.py）
+        *build_game_tools(),
     ]

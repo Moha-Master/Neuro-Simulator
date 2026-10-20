@@ -1,8 +1,9 @@
 /** stream 模块 /ui/events 画面事件通道（SSE，只读）。
  *
  * 协议（stream.loop.publish 的镜像）：
- * snapshot{state,scene,session,intro_elapsed?,turn?,chat?,metadata?} / state /
+ * snapshot{state,scene,session,intro_elapsed?,turn?,chat?,metadata?,elements?} / state /
  * session_begin{title,category} / session_end / intro / scene_set{id} /
+ * element_state{id,payload}（游戏等元素层的全量状态）/
  * stream_metadata{title,category} / speech{index,text,audio,mime,duration} /
  * turn_begin / turn_end{reason} / chat_message / priority_message /
  * tool_start / tool_result（neuro 工具事件原样镜像，画面端按 name 自行消费）
@@ -44,6 +45,7 @@ export interface Snapshot {
   turn?: { active: boolean; speech: TurnSeg[] }; // 当前/最近一轮的字幕时间线
   chat?: ChatMsg[]; // 最近聊天记录（重连时恢复聊天层）
   metadata?: { title?: string; category?: string }; // 本场标题/分区（dashboard 观看页消费；画面本身不使用）
+  elements?: Record<string, unknown>; // 各元素层的全量状态（key = 元素 id，如 game_wordle）
 }
 
 const EVENT_NAMES = [
@@ -54,6 +56,7 @@ const EVENT_NAMES = [
   "stream_metadata",
   "intro",
   "scene_set",
+  "element_state",
   "speech",
   "turn_begin",
   "turn_end",
