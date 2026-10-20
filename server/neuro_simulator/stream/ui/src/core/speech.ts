@@ -3,7 +3,8 @@
  *
  * 逐词推进：token 按字符长度比例分摊 duration（CJK 逐字、拉丁逐词）；
  * 有音频时以音频 ended 为句尾锚点（防止音字漂移），无音频（虚拟 TTS）纯计时。
- * 行为对齐旧 neuroCaption：文本跨句累积、静默 3s 后淡出清空、超高自动缩字号。
+ * 行为对齐旧 neuroCaption：文本跨句累积、播完后按 speech_cooldown_ms 淡出清空、
+ * 超高自动缩字号；跨轮先清空，避免新旧字幕拼接。
  */
 
 export interface SpeechSeg {
@@ -12,6 +13,7 @@ export interface SpeechSeg {
   audio?: string;
   mime?: string;
   duration: number;
+  turn_id?: number; // 所属轮次（服务端 turn_id；跨轮字幕不拼在一起）
   consumed?: number; // 仅快照续播用：已发声秒数
   skip_s?: number; // 续播时音频起播位置（= consumed，秒）
 }
@@ -20,7 +22,7 @@ import type { TurnSeg } from "./feed";
 
 export type { TurnSeg };
 
-const CAPTION_HIDE_MS = 3000;
+const DEFAULT_HIDE_DELAY_MS = 1000;
 const MIN_TOKEN_MS = 50;
 const HEIGHT_THRESHOLD = 0.4;
 const MIN_FONT_PX = 16;
@@ -72,6 +74,10 @@ export class CaptionPlayer {
   private gen = 0; // 换代计数器：clear()/换绑定时打断在途播放
   private hideTimer: number | null = null;
   private lastIndex = -1;
+  private turnId = 0; // 当前轮次（服务端 turn_id）
+  private textTurnId = 0; // 当前字幕文本所属轮次：跨轮先清空，避免新旧拼接
+  /** speak 完成后字幕停留时长（stream.speech_cooldown_ms，snapshot/settings 下发）。 */
+  hideDelayMs = DEFAULT_HIDE_DELAY_MS;
   private turnEnded = false; // 已收到 turn_end（生成侧结束）
   private idleFired = false; // 本轮 idle 回调已触发
   muted = false;
@@ -86,18 +92,24 @@ export class CaptionPlayer {
   }
 
   /** 一轮新生成开始：取消隐藏计时；空闲状态下清空旧文本。 */
-  beginTurn(): void {
+  beginTurn(turnId?: number): void {
+    if (turnId !== undefined && turnId !== this.turnId) {
+      this.turnId = turnId;
+      this.lastIndex = -1;
+    }
     this.turnEnded = false;
     this.idleFired = false;
     this.cancelHide();
     if (!this.busy && this.queue.length === 0) {
       this.clearText();
+      this.textTurnId = this.turnId;
       this.lastIndex = -1;
     }
   }
 
   /** 一轮结束（done/cancelled/stream_aborted）：队列播完后进入静默计时。 */
-  endOfTurn(): void {
+  endOfTurn(turnId?: number): void {
+    if (turnId !== undefined && turnId !== this.turnId) return; // 旧轮迟到的 turn_end
     this.turnEnded = true;
     if (!this.busy && this.queue.length === 0) {
       this.fireIdle();
@@ -106,7 +118,16 @@ export class CaptionPlayer {
   }
 
   enqueue(seg: SpeechSeg): void {
-    if (seg.index <= this.lastIndex) return; // 重连快照后去重
+    const segTurn = seg.turn_id ?? this.turnId;
+    if (segTurn < this.turnId) return; // 旧轮迟到事件
+    if (segTurn > this.turnId) {
+      // 没收到 turn_begin（重连/乱序兜底）：直接切到新轮，索引重新计
+      this.turnId = segTurn;
+      this.lastIndex = -1;
+      this.turnEnded = false;
+      this.idleFired = false;
+    }
+    if (seg.index <= this.lastIndex) return; // 同轮重连快照后去重
     this.cancelHide();
     this.queue.push(seg);
     if (!this.busy) void this.drain();
@@ -114,7 +135,13 @@ export class CaptionPlayer {
 
   /** 快照断点续播：已说完的句子静态显示、正在说的显示已蹦 token 后继续、
    *  未开始的整句入队（顺序衔接实时到达的后续 speech 事件）。 */
-  resumeFromSnapshot(segs: TurnSeg[]): void {
+  resumeFromSnapshot(segs: TurnSeg[], turnId = 0): void {
+    if (turnId !== this.turnId) {
+      this.clearText();
+      this.turnId = turnId;
+      this.textTurnId = turnId;
+      this.lastIndex = -1;
+    }
     this.cancelHide();
     let tailTaken = false;
     for (const s of segs) {
@@ -155,10 +182,11 @@ export class CaptionPlayer {
             mime: s.mime,
             duration: restDur,
             skip_s: s.consumed,
+            turn_id: turnId,
           });
         }
       } else {
-        this.enqueue({ index: s.index, text: s.text, duration: dur });
+        this.enqueue({ index: s.index, text: s.text, duration: dur, turn_id: turnId });
       }
     }
     if (this.caption.textContent) this.show();
@@ -175,8 +203,16 @@ export class CaptionPlayer {
     this.audioEl.load();
     this.clearText();
     this.lastIndex = -1;
+    this.turnId = 0;
+    this.textTurnId = 0;
     this.turnEnded = false;
     this.idleFired = false;
+  }
+
+  /** 更新“播完后字幕停留”时长（配置热重载时可由 settings 事件调用）。 */
+  setHideDelay(ms: number): void {
+    if (!Number.isFinite(ms)) return;
+    this.hideDelayMs = Math.max(0, ms);
   }
 
   private async drain(): Promise<void> {
@@ -200,7 +236,14 @@ export class CaptionPlayer {
   }
 
   private async playSeg(seg: SpeechSeg, gen: number): Promise<void> {
-    this.lastIndex = seg.index;
+    const segTurn = seg.turn_id ?? this.turnId;
+    if (segTurn !== this.textTurnId) {
+      // 跨轮边界：旧字幕可能还没淡出，新轮第一句开始前先清空，避免新旧拼接
+      this.clearText();
+      this.textTurnId = segTurn;
+    }
+    // 旧轮残留队列可能还在播：不能让它覆盖新一轮的去重水位线
+    if (segTurn === this.turnId) this.lastIndex = seg.index;
     const tokens = tokenize(seg.text);
     const totalLen = Math.max(1, seg.text.replace(/\s+/g, "").length);
     const msTotal = Math.max(0.3, seg.duration) * 1000;
@@ -290,7 +333,7 @@ export class CaptionPlayer {
     this.hideTimer = window.setTimeout(() => {
       this.hideTimer = null;
       this.clearText();
-    }, CAPTION_HIDE_MS);
+    }, this.hideDelayMs);
   }
 
   private cancelHide(): void {

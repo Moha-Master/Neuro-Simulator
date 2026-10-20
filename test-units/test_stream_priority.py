@@ -1,5 +1,6 @@
 """双轨队列（普通 / 优先）行为测试：优先轨先进先出、一次一条、优先不污染普通轨。"""
 
+import asyncio
 import tempfile
 import unittest
 from pathlib import Path
@@ -46,6 +47,18 @@ class _FakeNeuroClient:
         yield {"type": "done", "content": "ta-da"}
 
 
+class _FakeSlowNeuroClient:
+    """先说一句，再“生成”一段时间才 done：用于验证轮间等待以语音播完为准。"""
+
+    def __init__(self, url: str) -> None:
+        self.url = url
+
+    async def chat(self, channel: str, conversation_id: str, text: str):
+        yield {"type": "speech", "index": 0, "text": "short line", "duration": 0.01}
+        await asyncio.sleep(0.05)  # 模拟工具执行 / 下一步生成：此时语音早已播完
+        yield {"type": "done", "content": "short line"}
+
+
 class TestPriorityQueue(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -72,6 +85,7 @@ class TestPriorityQueue(unittest.IsolatedAsyncioTestCase):
         }
         self.settings = SimpleNamespace(
             messages_per_round=10,
+            speech_cooldown_ms=0,
             empty_queue_behavior="silent",
             placeholder_message="placeholder",
             scene_context="ctx",
@@ -194,6 +208,43 @@ class TestPriorityQueue(unittest.IsolatedAsyncioTestCase):
         )
         # 不再产生专用 tool_call 事件
         self.assertFalse(any(e["type"] == "tool_call" for e in events))
+
+    async def test_pacing_uses_last_speech_end_not_generation_end(self):
+        """语音在 done 之前早已播完时，等待量应为 0（旧实现会再等整整一句时长）。"""
+        await self.storage.append_message(self.queue_row, "viewer", "say something")
+        self.settings.speech_cooldown_ms = 0
+        sleeps: list[float] = []
+
+        async def _record_sleep(ms: float) -> None:
+            sleeps.append(float(ms))
+            await asyncio.sleep(0)
+
+        with (
+            patch("neuro_simulator.stream.loop.NeuroClient", _FakeSlowNeuroClient),
+            patch.object(self.loop, "_sleep_ms", new=_record_sleep),
+        ):
+            await self.loop._run_round(self.settings, self.session)
+
+        # 语音 0.01s，done 前又过了 0.05s：播完 + cooldown 已过，不应再有轮间等待
+        self.assertEqual(len(sleeps), 1)
+        self.assertLess(sleeps[0], 1.0)
+
+    async def test_turn_id_is_stable_within_round(self):
+        """speech / turn_begin / turn_end 共用 turn_id；下一轮递增（画面跨轮去重依据）。"""
+        await self.storage.append_message(self.queue_row, "viewer", "do a trick")
+        q = self.bus.subscribe()
+        with patch("neuro_simulator.stream.loop.NeuroClient", _FakeNeuroClient):
+            await self.loop._run_round(self.settings, self.session)
+
+        events = []
+        while not q.empty():
+            events.append(q.get_nowait())
+        begin = next(e for e in events if e["type"] == "turn_begin")
+        end = next(e for e in events if e["type"] == "turn_end")
+        speech = next(e for e in events if e["type"] == "speech")
+        self.assertEqual(begin["turn_id"], end["turn_id"])
+        self.assertEqual(begin["turn_id"], speech["turn_id"])
+        self.assertEqual(self.loop.turn_snapshot()["id"], begin["turn_id"])
 
 
 if __name__ == "__main__":

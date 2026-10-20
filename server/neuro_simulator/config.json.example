@@ -28,7 +28,7 @@
     "channel": "stream",
     "scene_context": "You are streaming on Twitch now.",
     "messages_per_round": 10,
-    "round_gap_ms": 1500,
+    "speech_cooldown_ms": 1000,
     "empty_queue_behavior": "placeholder",
     "placeholder_message": "No new messages. Say something to your viewers!",
     "default_title": "AI VTuber chatting with chat!",

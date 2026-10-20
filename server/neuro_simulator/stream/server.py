@@ -13,7 +13,6 @@
 - /manage/chatbot/persona*：chatbot 的 prompt 模板 + core memory（人工编辑，存 stream DB）
 - /manage/templates*：stream 拼给 neuro / chatbot 的 user message 模板（人工编辑 + 预览）
 - GET  /ui/events（SSE）：snapshot（含最近聊天 + 元素状态） + 循环/控制/聊天事件只读镜像
-- POST /ui/report：UI 上行回报（intro_done → 开播闸门）
 - /ui：直播画面静态托管（Vite 构建产物）
 
 直播循环语义见 loop.py；跨模块访问（neuro URL）约定见 settings.py。
@@ -40,7 +39,12 @@ from . import settings as stream_settings
 from .games import GameError
 from .loop import StreamConflict, StreamLoop
 from .neuro_client import NeuroClient
-from .persona import CHATBOT_PLACEHOLDERS, ChatbotPersonaStore, build_template_store, stream_info_line
+from .persona import (
+    CHATBOT_PLACEHOLDERS,
+    ChatbotPersonaStore,
+    build_template_store,
+    stream_info_line,
+)
 from .storage import Storage
 
 
@@ -101,10 +105,6 @@ class GameActionPayload(BaseModel):
 
     action: str
     args: dict[str, Any] | None = None
-
-
-class ReportPayload(BaseModel):
-    event: str
 
 
 def _sse(event: str, data: dict) -> str:
@@ -282,6 +282,9 @@ def create_app() -> FastAPI:
         下一轮循环即用新值；host/port 变更仍需重启进程。
         """
         get_config().reload()
+        # 通知已连接画面：字幕停留/轮间冷却参数可能变了（无需刷新页面）
+        lp = _loop()
+        lp.publish({"type": "settings", **lp.ui_settings()})
         return {"status": "ok", "reloaded": True}
 
     @app.delete("/stream/sessions/{session_id}")
@@ -423,9 +426,14 @@ def create_app() -> FastAPI:
 
     @app.post("/scene")
     async def scene_set(payload: ScenePayload):
-        if not scene_catalog.exists(payload.id):
+        # intro 是内部脚本场景（manual=false），只能由 start 触发，不允许手动选中——
+        # 手动切到 intro 后没有“到点回 room”的驱动者，会卡在开场。
+        if not scene_catalog.exists(payload.id) or not scene_catalog.manual(payload.id):
             known = ", ".join(s["id"] for s in scene_catalog.overview()) or "（ui 未构建）"
-            raise HTTPException(status_code=400, detail=f"未知场景 {payload.id!r}；可用：{known}")
+            raise HTTPException(
+                status_code=400,
+                detail=f"未知或不可手动选择的场景 {payload.id!r}；可用：{known}",
+            )
         _loop().on_scene(payload.id)
         return {"status": "ok", "scene": payload.id}
 
@@ -619,6 +627,7 @@ def create_app() -> FastAPI:
                     "state": lp.state,
                     "scene": lp.last_scene,
                     "session": session_info,
+                    "settings": lp.ui_settings(),
                     "metadata": {
                         "title": title,
                         "category": category,
@@ -658,11 +667,6 @@ def create_app() -> FastAPI:
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
-
-    @app.post("/ui/report")
-    async def ui_report(payload: ReportPayload):
-        _loop().on_report(payload.event)
-        return {"status": "ok"}
 
     # ---------- 静态托管（放在最后，避免遮挡 API 路由） ----------
 

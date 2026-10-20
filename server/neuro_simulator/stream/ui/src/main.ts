@@ -12,15 +12,14 @@ import { loadFonts } from "./core/assets";
 import { runAction } from "./core/action";
 import { ChatOverlay, HighlightOverlay } from "./core/chat";
 import { ElementEngine } from "./core/elements";
-import { report, StreamFeed, type ChatMsg, type FeedEvent, type Snapshot } from "./core/feed";
+import { StreamFeed, type ChatMsg, type FeedEvent, type Snapshot } from "./core/feed";
 import { CaptionPlayer } from "./core/speech";
 import {
   AVATAR_ELEMENT,
+  SCENE_INTRO,
   SCENE_ROOM,
   SCENE_STARTING_SOON,
-  abortIntro,
   fetchScenes,
-  playIntro,
 } from "./scenes";
 
 async function boot(): Promise<void> {
@@ -81,21 +80,12 @@ async function boot(): Promise<void> {
     }
   }
 
-  let introPlaying = false;
-  async function runIntro(elapsed = 0): Promise<void> {
-    if (introPlaying) return;
-    introPlaying = true;
+  async function setScene(
+    id: string,
+    opts: { instant?: boolean; elapsed?: number } = {},
+  ): Promise<void> {
     try {
-      await playIntro(engine, elapsed); // 视频（可续播） → 立绘 rise_in 入场
-      await report("intro_done"); // 通知 stream：可以开始注入消息了
-    } finally {
-      introPlaying = false;
-    }
-  }
-
-  async function setScene(id: string, instant = false): Promise<void> {
-    try {
-      await engine.setScene(id, { instant });
+      await engine.setScene(id, opts);
     } catch (e) {
       console.warn(`场景切换失败: ${id}`, e);
     }
@@ -111,34 +101,41 @@ async function boot(): Promise<void> {
 
   feed.on("snapshot", (ev: FeedEvent) => {
     const snap = ev as unknown as Snapshot;
+    // 画面端运行参数（字幕停留/轮间冷却；配置热重载时另有 settings 事件）
+    player?.setHideDelay(Number(snap.settings?.speech_cooldown_ms ?? 1000));
     // 聊天层：重连时用 snapshot 的最近记录整体恢复；无场次则清空
     if (snap.chat?.length) chat?.replace(snap.chat);
     else chat?.clear();
     applyElements(snap.elements);
-    if (snap.state === "offline") highlight?.clear();
-    if (snap.scene === "intro" && snap.state === "starting") {
-      // 中途连上：按已过时长续播开场序列（视频 seek 到断点；已过片尾则只升起立绘）
-      void runIntro(Number(snap.intro_elapsed ?? 0));
+    if (snap.state === "offline") {
+      highlight?.clear();
+      void setScene(SCENE_STARTING_SOON, { instant: true }); // 黑屏等待
+      return;
+    }
+    if (snap.state === "starting" && snap.scene === SCENE_INTRO) {
+      // 中途连上：按场景时间线已过秒数续播（视频 seek、未开始的立绘动作顺延）
+      void setScene(SCENE_INTRO, {
+        instant: true,
+        elapsed: Number(snap.intro_elapsed ?? 0),
+      });
       return;
     }
     if (snap.state === "starting" || snap.state === "live" || snap.state === "paused") {
-      abortIntro();
       // 落到 snapshot 声明的实际场景（含循环期间手动切换过的场景），未知则 room。
       // 重连用 instant：不重复播淡入，画面不会因为 SSE 断开重连而闪一下。
-      void setScene(snap.scene && snap.scene !== "intro" ? snap.scene : SCENE_ROOM, true);
+      void setScene(snap.scene && snap.scene !== SCENE_INTRO ? snap.scene : SCENE_ROOM, {
+        instant: true,
+      });
       if (snap.turn?.speech?.length && player) {
-        player.resumeFromSnapshot(snap.turn.speech);
-        if (!snap.turn.active) player.endOfTurn(); // 轮间连接：恢复完即进入淡出计时
+        player.resumeFromSnapshot(snap.turn.speech, Number(snap.turn.id ?? 0));
+        if (!snap.turn.active) player.endOfTurn(Number(snap.turn.id ?? 0)); // 轮间连接：恢复完即进入淡出计时
       }
     } else {
-      abortIntro();
-      void setScene(SCENE_STARTING_SOON, true); // offline：黑屏等待
+      void setScene(SCENE_STARTING_SOON, { instant: true });
     }
   });
-  feed.on("intro", () => void runIntro());
-  // 新场次开始：清掉上一场残留字幕（intro 由独立 intro 事件驱动）
+  // 新场次开始：清掉上一场残留字幕/聊天（场景本身由 start 广播的 scene_set 驱动）
   feed.on("session_begin", () => {
-    abortIntro();
     player?.clear();
     chat?.clear();
     highlight?.clear();
@@ -147,14 +144,17 @@ async function boot(): Promise<void> {
   feed.on("state", (ev: FeedEvent) => {
     const s = String(ev.state ?? "");
     if (s === "live" || s === "paused") {
-      // 开场序列在跑就别抢：闸门可能是别的画面实例先报开的，这里抢着落位会
-      // 把还在放末帧的开场视频直接收掉（立绘升起要 3s）。序列自己会收尾。
-      if (introPlaying) return;
-      abortIntro();
-      // 已经在某个直播场景里（含游戏）就别把它拽回 room——暂停/继续不该换画面
-      if (!engine.current || engine.current.id === SCENE_STARTING_SOON) void setScene(SCENE_ROOM);
+      // 后端是唯一时钟：进入 live 时若还停在待机/开场，直接落 room。
+      // 已经在某个直播场景里（含游戏）就别把它拽回 room——暂停/继续不该换画面。
+      // 即使本画面的开场视频卡住，也会被这一帧纠正；后端从不等待它。
+      if (
+        !engine.current ||
+        engine.current.id === SCENE_STARTING_SOON ||
+        engine.current.id === SCENE_INTRO
+      ) {
+        void setScene(SCENE_ROOM);
+      }
     } else if (s === "offline") {
-      abortIntro();
       player?.clear();
       chat?.clear();
       highlight?.clear();
@@ -163,29 +163,31 @@ async function boot(): Promise<void> {
     }
   });
   feed.on("scene_set", (ev: FeedEvent) => {
-    abortIntro();
+    // 场景脚本的取消由 ElementEngine.setScene 负责：旧 intro 的 timer/动画不会
+    // 在 room 上继续跑，因此这里不需要额外的 abort 协议。
     void setScene(String(ev.id ?? ""));
   });
   feed.on("element_state", (ev: FeedEvent) => {
     engine.update(String(ev.id ?? ""), ev.payload);
   });
+  feed.on("settings", (ev: FeedEvent) => {
+    player?.setHideDelay(Number(ev.speech_cooldown_ms ?? 1000));
+  });
   feed.on("speech", (ev: FeedEvent) => {
-    abortIntro();
     player?.enqueue({
       index: Number(ev.index ?? 0),
       text: String(ev.text ?? ""),
       audio: String(ev.audio ?? ""),
       mime: String(ev.mime ?? ""),
       duration: Number(ev.duration ?? 0),
+      turn_id: Number(ev.turn_id ?? 0),
     });
   });
-  feed.on("turn_begin", () => {
-    abortIntro();
-    player?.beginTurn();
+  feed.on("turn_begin", (ev: FeedEvent) => {
+    player?.beginTurn(Number(ev.turn_id ?? 0));
   });
-  feed.on("turn_end", () => player?.endOfTurn());
+  feed.on("turn_end", (ev: FeedEvent) => player?.endOfTurn(Number(ev.turn_id ?? 0)));
   feed.on("session_end", () => {
-    abortIntro();
     player?.clear();
     chat?.clear();
     highlight?.clear();
@@ -204,7 +206,7 @@ async function boot(): Promise<void> {
 
   // 调试/E2E 句柄：控制台或自动化可直接驱动渲染管线（不影响运行逻辑）
   (window as unknown as Record<string, unknown>).__ns = {
-    engine, player, feed, chat, highlight, runIntro, setScene, onToolCall, resetAvatarZoom,
+    engine, player, feed, chat, highlight, setScene, onToolCall, resetAvatarZoom,
   };
 }
 

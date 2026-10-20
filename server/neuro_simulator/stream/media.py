@@ -1,6 +1,7 @@
 """媒体资产的服务器端感知：mp4 时长探测（纯标准库解析轨道时长）。
 
-用途：开播闸门的兜底超时 = 视频实际时长 + 立绘入场动画 + 余量，
+用途：场景脚本的兜底时长 = 视频实际时长 + 立绘入场动画（没有前端回报，
+后端按固定时间轴推进；scenes.json 的 intro.timeline.duration 是首选来源）。
 无需任何配置项（视频文件随包分发、内容固定，探测结果进程内缓存）。
 
 真实时长取"所有 trak 的 mdhd duration 最大值"——与浏览器 video.duration
@@ -14,8 +15,6 @@ from typing import Optional
 
 # avatar.rise_in 入场动画时长（须与 ui/src/core/action.ts 的 duration 保持一致）
 RISE_ANIM_S = 3.0
-# 视频加载/seek 的兜底余量
-GATE_MARGIN_S = 5.0
 # 探测失败时的回退视频时长
 FALLBACK_VIDEO_S = 20.0
 
@@ -136,6 +135,10 @@ def intro_video_seconds() -> float:
     return _video_s
 
 
-def intro_gate_seconds() -> float:
-    """开播闸门兜底超时：视频 + 入场动画 + 余量。"""
-    return intro_video_seconds() + RISE_ANIM_S + GATE_MARGIN_S
+def intro_duration_seconds() -> float:
+    """开播 intro 的兜底总时长：视频 + 立绘入场动画。
+
+    首选来源是 `scenes.json` 的 `intro.timeline.duration`；这里只在场景数据
+    缺失/损坏时兜底。不再有前端回报，也没有额外的等待余量。
+    """
+    return intro_video_seconds() + RISE_ANIM_S

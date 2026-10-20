@@ -5,6 +5,8 @@
  *   （离场 → 跑 exit 后隐藏、不销毁；进场 → 挂载并跑 enter；两边都有且几何变了 → 跑 move）。
  *   不销毁是有意为之：聊天历史、字幕队列、游戏动画状态都要跨场景活着。
  * - 默认无过渡（不写脚本 = 直接出现 / 直接落位）；要淡入或平滑移动就在场景数据里写脚本。
+ * - 场景级 `timeline` 由引擎按秒执行（video / show / hide / ACTIONS 动作）；切场景会
+ *   取消旧 timer/动画并暂停视频，snapshot 的 `elapsed` 可从断点恢复（intro 靠它续播）。
  * - `update(id, payload)` 是通用元素状态通道（stream 的 element_state 事件 + snapshot.elements），
  *   引擎缓存每层最新 payload，组件首次挂载时立刻回放，中途连接也能渲染出当前状态。
  */
@@ -12,7 +14,15 @@
 import { asset } from "./assets";
 import { runAction } from "./action";
 import { COMPONENTS, type ComponentInstance, type ElementView } from "./components";
-import type { Box, Content, ElementDef, SceneDef, Script } from "../scenes/schema";
+import type {
+  Box,
+  Content,
+  ElementDef,
+  SceneDef,
+  Script,
+  SceneTimeline,
+  TimelineStep,
+} from "../scenes/schema";
 
 interface Mounted {
   def: ElementDef;
@@ -68,6 +78,11 @@ export class ElementEngine {
   private defs = new Map<string, SceneDef>();
   private mounted = new Map<string, Mounted>();
   private states = new Map<string, unknown>();
+  /** 当前场景脚本的取消标记：每次切场景递增，旧 timer / 动作据此失效。 */
+  private timelineToken = 0;
+  private timelineTimers: number[] = [];
+  /** 场景脚本触碰过的元素（切场景时取消其动画并暂停视频）。 */
+  private timelineEls = new Set<HTMLElement>();
   current: SceneDef | null = null;
 
   constructor(stage: HTMLElement, scenes: SceneDef[]) {
@@ -83,7 +98,7 @@ export class ElementEngine {
     return this.defs.has(id);
   }
 
-  /** 元素根节点（intro 序列要拿里面的 <video>） */
+  /** 元素根节点（场景时间线的 media.* 动作要拿里面的 <video>） */
   element(id: string): HTMLElement | null {
     return this.mounted.get(id)?.el ?? null;
   }
@@ -141,37 +156,33 @@ export class ElementEngine {
 
   /** 切场景：diff 元素清单。
    *
-   * - `enter`：本次切换里指定元素改用的入场动作（元素 id → ACTIONS 名），
-   *   开播序列就靠它把 `avatar.rise_in` 挂到 room 场景的立绘上。
-   * - `awaitEnter`：需要等待完成的入场动作（其余过渡并发跑完即可，不阻塞状态机）。
-   * - `keepVisible`：本次切换**不要**自动隐藏的 `visible: false` 元素（开播序列要让末帧
-   *   一直挂到立绘到位的那一瞬间，由序列自己收尾）。
    * - `instant`：跳过所有过渡（snapshot 校正状态时用，避免每次重连都淡入一遍）。
+   * - `elapsed`：场景脚本已过的秒数（snapshot 中途连接续播）；不会补播已过动作，
+   *   正在进行的动作按剩余时长收尾，未开始的按剩余延迟排程。
+   * 元素进场/离场过渡与场景时间线都由数据驱动；不再有“开播序列专用”的强制入场参数。
    */
   async setScene(
     id: string,
     opts?: {
-      enter?: Record<string, string>;
-      awaitEnter?: string[];
-      keepVisible?: string[];
       instant?: boolean;
+      elapsed?: number;
     },
   ): Promise<void> {
     const def = this.defs.get(id);
     if (!def) throw new Error(`未知场景: ${id}`);
+    // 先取消上一个场景的时间线，再改 current；旧 timer / 动画不能影响新场景。
+    const token = this.resetTimeline();
     this.current = def;
     const want = new Map(def.elements.map((e) => [e.id, e]));
-    const pending: Promise<void>[] = [];
-    const schedule = (eid: string, p: Promise<void>): void => {
-      if (opts?.awaitEnter?.includes(eid)) void pending.push(p);
-      else p.catch((e) => console.warn(`元素过渡失败: ${eid}`, e));
+    const transition = (eid: string, p: Promise<void>): void => {
+      p.catch((e) => console.warn(`元素过渡失败: ${eid}`, e));
     };
 
     // 1) 离场：跑 exit 脚本后隐藏（不销毁，实例与内部状态留着）
     for (const [eid, m] of [...this.mounted]) {
       if (want.has(eid) || !m.visible) continue;
       if (opts?.instant) this.hide(eid);
-      else schedule(eid, this.runExit(m));
+      else transition(eid, this.runExit(m));
     }
 
     // 2) 进场 / 留在场景内
@@ -202,19 +213,166 @@ export class ElementEngine {
       // 场景数据里的 visible 是权威：平时藏着的元素（开场视频、待机场景的立绘）
       // 不能因为"两边都列出了同一 id"就被复活。
       if (e.visible === false) {
-        if (m.visible && !opts?.keepVisible?.includes(e.id)) schedule(e.id, this.runExit(m));
+        if (m.visible) transition(e.id, this.runExit(m));
         continue;
       }
-      const forced = opts?.enter?.[e.id];
-      if (forced) {
-        schedule(e.id, this.runActionScript(m, { action: forced }));
-      } else if (!m.visible) {
-        schedule(e.id, this.runScript(m, e.script?.enter, "enter"));
+      if (!m.visible) {
+        transition(e.id, this.runScript(m, e.script?.enter, "enter"));
       } else if (moved) {
-        schedule(e.id, this.runScript(m, e.script?.move, "move"));
+        transition(e.id, this.runScript(m, e.script?.move, "move"));
       }
     }
-    await Promise.all(pending);
+    // 只有当前场景还能启动脚本；同步段之后 token 不会变（过渡都是异步的）。
+    if (token !== this.timelineToken) return;
+    if (def.timeline) {
+      this.startTimeline(def.timeline, Math.max(0, Number(opts?.elapsed ?? 0)), token);
+    }
+  }
+
+  // ---------- 场景脚本 ----------
+
+  /** 取消当前场景脚本：清 timer、停视频、取消它启动的动画。 */
+  private resetTimeline(): number {
+    this.timelineToken += 1;
+    for (const t of this.timelineTimers) window.clearTimeout(t);
+    this.timelineTimers = [];
+    for (const el of this.timelineEls) {
+      // 时间线动作被中途取消时，先把元素的旧场景落位提交回 inline style，
+      // 否则 rise_in 会停在半空；下一个场景若几何相同就不会再 applyGeometry。
+      const m = el.dataset.el ? this.mounted.get(el.dataset.el) : undefined;
+      el.getAnimations().forEach((a) => a.cancel());
+      if (m) {
+        m.box = m.def.box;
+        this.applyGeometry(m);
+      }
+      const videos =
+        el instanceof HTMLVideoElement ? [el] : Array.from(el.querySelectorAll("video"));
+      for (const v of videos) v.pause();
+    }
+    this.timelineEls.clear();
+    return this.timelineToken;
+  }
+
+  /** 从 elapsed 秒处开始/恢复场景时间线。 */
+  private startTimeline(timeline: SceneTimeline, elapsed: number, token: number): void {
+    for (const step of timeline.steps ?? []) {
+      const at = Math.max(0, Number(step.at) || 0);
+      const duration = Math.max(0, Number(step.duration) || 0);
+      const end = at + duration;
+      if (end <= elapsed) {
+        this.applyTimelineStep(step, "final", 0, token);
+      } else if (at <= elapsed) {
+        this.applyTimelineStep(step, "partial", elapsed - at, token);
+      } else {
+        const timer = window.setTimeout(() => {
+          if (token !== this.timelineToken) return;
+          this.applyTimelineStep(step, "start", 0, token);
+        }, (at - elapsed) * 1000);
+        this.timelineTimers.push(timer);
+      }
+    }
+  }
+
+  private applyTimelineStep(
+    step: TimelineStep,
+    mode: "start" | "partial" | "final",
+    offset: number,
+    token: number,
+  ): void {
+    const m = this.mounted.get(step.element);
+    if (!m) {
+      console.warn(`场景脚本目标未挂载: ${step.element}`);
+      return;
+    }
+    const el = m.el;
+    this.timelineEls.add(el);
+
+    if (step.action === "element.show") {
+      m.box = m.def.box;
+      this.applyGeometry(m);
+      this.show(step.element);
+      return;
+    }
+    if (step.action === "element.hide") {
+      this.hide(step.element);
+      return;
+    }
+    if (step.action === "media.play" || step.action === "media.pause") {
+      m.box = m.def.box;
+      this.applyGeometry(m);
+      this.show(step.element);
+      const video = el.querySelector("video");
+      if (!video) {
+        console.warn(`场景脚本目标不是视频: ${step.element}`);
+        return;
+      }
+      this.timelineEls.add(video);
+      if (step.action === "media.pause" || mode === "final") {
+        this.settleVideo(video, Number(step.duration) || 0);
+      } else {
+        this.playVideo(video, mode === "partial" ? offset : 0, token);
+      }
+      return;
+    }
+
+    // 命名动作：先把元素放到场景声明的落位并显示（rise_in 会从落位反推起点）。
+    m.box = m.def.box;
+    this.applyGeometry(m);
+    this.show(step.element);
+
+    if (mode === "final") {
+      el.getAnimations().forEach((a) => a.cancel());
+      return;
+    }
+    const params: Record<string, unknown> = { ...(step.params ?? {}) };
+    if (mode === "partial") {
+      const remaining = Math.max(0, (Number(step.duration) || 0) - offset);
+      if (remaining <= 0.05) {
+        el.getAnimations().forEach((a) => a.cancel());
+        return;
+      }
+      params.duration = remaining * 1000;
+    }
+    void runAction(step.action, el, params).catch((e) => {
+      // 切场景时主动 cancel 动画会以 AbortError 拒绝，不是故障。
+      if ((e as { name?: string } | null)?.name === "AbortError") return;
+      console.warn(`场景动作失败: ${step.action}`, e);
+    });
+  }
+
+  /** 视频从 offset 秒开始播放（元数据未就绪时等 loadedmetadata）。 */
+  private playVideo(video: HTMLVideoElement, offset: number, token: number): void {
+    const start = (): void => {
+      if (token !== this.timelineToken) return;
+      try {
+        video.currentTime = Math.min(Math.max(0, offset), video.duration || offset);
+      } catch {
+        /* 元数据异常：保持默认起点 */
+      }
+      video.play().catch(() => {
+        video.muted = true;
+        video.play().catch(() => {
+          /* 浏览器拒绝播放：画面停在当前帧，后端不受影响 */
+        });
+      });
+    };
+    if (video.readyState >= 1 /* HAVE_METADATA */) start();
+    else video.addEventListener("loadedmetadata", start, { once: true });
+  }
+
+  /** 把视频停在末帧（已过播放段的中途连接 / 动作已完成）。 */
+  private settleVideo(video: HTMLVideoElement, end: number): void {
+    video.pause();
+    const seek = (): void => {
+      try {
+        const duration = video.duration || end;
+        video.currentTime = Math.max(0, Math.min(end, duration) - 0.05);
+      } catch {
+        /* 忽略 seek 失败 */
+      }
+    };
+    if (video.readyState >= 1 /* HAVE_METADATA */) seek();
+    else video.addEventListener("loadedmetadata", seek, { once: true });
   }
 
   // ---------- 内部 ----------

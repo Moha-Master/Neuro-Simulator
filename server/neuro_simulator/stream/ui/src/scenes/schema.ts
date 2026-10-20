@@ -1,7 +1,8 @@
 /** 场景声明格式（纯数据，可序列化为 JSON / 未来直接进 DB 由 dashboard 编辑）。
  *
- * 模型：**场景 = 元素清单**。每个元素有稳定 `id`、内容（图片/视频/纯色/文本/组件）、
- * 相对舞台的比例化几何、层级、以及生命周期脚本（出现/消失/跨场景移动）。
+ * 模型：**场景 = 元素清单 + 可选固定时长脚本**。每个元素有稳定 `id`、内容
+ * （图片/视频/纯色/文本/组件）、相对舞台的比例化几何、层级、以及生命周期脚本
+ * （出现/消失/跨场景移动）；场景可声明 `timeline`，由引擎按秒执行（intro）。
  *
  * 关键约定：
  * - **同 id 跨场景 = 同一个 DOM 节点与同一个组件实例**，所以"立绘从旧位置平滑移动到
@@ -44,13 +45,38 @@ export type Script =
       easing?: string;
     };
 
+/** 场景时间线的一步：进入场景后第 `at` 秒对 `element` 执行动作。
+ *
+ * `duration` 是动作占用的秒数（视频播放、立绘升起等）；它既是场景总时长的一部分，
+ * 也是 snapshot 中途续播时判断“该步已播到哪”的依据。瞬时动作可省略（0）。
+ * 内置动作：`element.show` / `element.hide` / `media.play` / `media.pause`；
+ * 其余按名字查 `core/action.ts` 的 ACTIONS。
+ */
+export interface TimelineStep {
+  at: number;
+  element: string;
+  action: string;
+  params?: Record<string, unknown>;
+  duration?: number;
+}
+
+/** 场景脚本：固定时长 + 从进入场景开始计时的动作时间线。
+ *
+ * `duration` 是后端推进场景的唯一依据（如开播 intro 到点切 room）。前端只按这份
+ * 数据渲染；某个画面卡住不会反过来影响后端，下一次 scene_set / snapshot 会把它纠正。
+ */
+export interface SceneTimeline {
+  duration: number;
+  steps: TimelineStep[];
+}
+
 export interface ElementDef {
   id: string;
   name?: string;
   content: Content;
   box: Box;
   z: number;
-  /** 默认 true；false = 挂载但隐藏（如开场视频平时不显示，intro 序列里 show()） */
+  /** 默认 true；false = 挂载但隐藏（如开场视频平时不显示，由场景时间线 show()） */
   visible?: boolean;
   /** 少量样式覆盖（filter / mix-blend-mode 等），键为 CSS 属性名 */
   css?: Record<string, string>;
@@ -64,6 +90,10 @@ export interface SceneDef {
   icon?: string;
   /** 注入 LLM 的本场景说明；空 = 回落到 config 的 stream.scene_context */
   prompt_context?: string;
+  /** 是否允许 dashboard / POST /scene 手动选择；默认 true，intro 这类内部场景设 false */
+  manual?: boolean;
+  /** 固定时长的场景脚本（intro 等）；后端据此推进，前端按时间线渲染 */
+  timeline?: SceneTimeline;
   elements: ElementDef[];
 }
 

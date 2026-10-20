@@ -187,7 +187,8 @@
             没有读到场景清单：请确认 stream/ui 已构建（scenes.json 在构建产物里）。
           </div>
           <div class="text-caption text-disabled" style="width: 100%">
-            手动广播 scene_set 到 /ui 画面；直播循环的 intro 由「开始直播」自动触发。
+            手动广播 scene_set 到 /ui 画面；开播 intro 是内部脚本场景（不出现在按钮里），
+            由「开始直播」自动触发并按固定时长进入 room。
             <span v-if="st.status.value?.game">当前游戏：{{ st.status.value.game }}</span>
           </div>
         </v-card-actions>

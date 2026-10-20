@@ -126,10 +126,15 @@ class ChatbotManager:
         if client is not None:
             await client.close()
 
-    def update_neuro_speech(self, text: str, duration: float) -> None:
+    def note_neuro_speech(self, text: str, finish_time: float) -> None:
+        """记录 Neuro 正在/刚说完的话。
+
+        finish_time 是本轮语音**预测播完**的 monotonic 时刻（服务端与画面共用同一
+        时间轴），睡眠判定从这一刻开始计时，而不是从整轮生成结束时。
+        """
         if text and text.strip():
             self._last_neuro_said = text.strip()
-            self._tts_finish_time = time.monotonic() + max(0.0, duration)
+        self._tts_finish_time = max(self._tts_finish_time, finish_time)
 
     @property
     def in_flight(self) -> int:
@@ -323,7 +328,7 @@ class ChatbotManager:
         # 部分模型（qwen3 系）即便关了 thinking 也会漏出 think 标签，
         # 或把思考内容混进正文；先剥掉标签，再丢弃空白行。
         raw = self._THINK_TAG.sub("", raw)
-        lines = [l.strip() for l in raw.splitlines() if l.strip()]
+        lines = [line.strip() for line in raw.splitlines() if line.strip()]
         result: list[str] = []
         for line in lines:
             clean = self._LIST_PREFIX.sub("", line).strip()

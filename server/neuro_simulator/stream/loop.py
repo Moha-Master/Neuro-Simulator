@@ -1,19 +1,21 @@
 """StreamLoop：直播循环状态机（stream 模块的心脏）。
 
-状态：offline → starting（开播 intro，等 UI 回报或超时）→ live ⇄ paused → offline
+状态：offline → starting（固定时长的 intro 场景）→ live ⇄ paused → offline
 
 每轮：先查优先轨（有则只消费最早 1 条），否则从普通轨随机抽取 ≤N 条未消费消息
 （按时间正序呈现）→ 拼装场景化 user message 调 neuro /chat → 消费响应
-（speech 转发给 /ui 画面 + 累计语音时长）→ 等"发声总时长 + round_gap"→ 下一轮。
+（speech 转发给 /ui 画面 + 记录预测播放时间线）→ 等“最后一句播完 +
+speech_cooldown_ms”→ 下一轮。
 优先消息在注入时与普通消息完全同格式（对模型只是降噪）；入列即广播
 chat_message / priority_message 给画面。空队列行为可配（占位消息 / 静默等待，
 静默模式下由入列事件即时唤醒，无需轮询）。
 
 对外广播（EventBroadcaster → /ui/events）：session_begin / session_end / state /
-intro / scene_set / element_state（游戏等元素的全量状态）/ speech / turn_begin /
+scene_set / element_state（游戏等元素的全量状态）/ speech / turn_begin /
 turn_end / chat_message / priority_message / tool_start / tool_result
 （neuro 事件原样镜像；工具语义由画面端按 name 处理）。
-循环是单 task，控制方法（pause/resume/stop/report）都只动 Event/标志位，跨 task 安全。
+循环是单 task，控制方法（pause/resume/stop）都只动 Event/标志位，跨 task 安全。
+开播 intro 是普通场景：时长来自 scenes.json，后端到点切 room，不等待任何前端。
 """
 
 import asyncio
@@ -72,15 +74,16 @@ class StreamLoop:
         self.games = GameHub(publish=self.publish, set_scene=self.on_scene)
         self._task: Optional[asyncio.Task] = None
         self._stop_event = asyncio.Event()
-        self._intro_event = asyncio.Event()
         self._wakeup = asyncio.Event()
-        # 开播闸门计时起点（snapshot 供新连接的 UI 续播 intro 视频）
+        # intro 场景时间线计时起点（snapshot 供新连接的 UI 续播 intro）
         self._intro_started: Optional[float] = None
         # 当前轮次的 speech 时间线（供 snapshot 断点续播）：
         # 每项 {index, text, duration, start}，start 为预测发声起点（monotonic）
         self._turn_speech: list[dict[str, Any]] = []
         self._turn_play_head = 0.0
         self._in_turn = False
+        # 轮次序号：speech / turn_begin / turn_end / snapshot 共用，画面据此区分轮次
+        self._turn_id = 0
 
     # ---------- 供 snapshot 的中途连接状态 ----------
 
@@ -108,7 +111,15 @@ class StreamLoop:
                 seg["audio"] = s["audio"]
                 seg["mime"] = s.get("mime", "")
             segs.append(seg)
-        return {"active": self._in_turn, "speech": segs}
+        return {"id": self._turn_id, "active": self._in_turn, "speech": segs}
+
+    def ui_settings(self) -> dict[str, Any]:
+        """画面端运行参数（snapshot 下发；配置热重载时广播 settings 事件）。"""
+        try:
+            s = stream_settings.load()
+        except RuntimeError:
+            return {"speech_cooldown_ms": 1000}
+        return {"speech_cooldown_ms": s.speech_cooldown_ms}
 
     # ---------- 广播 ----------
 
@@ -117,8 +128,10 @@ class StreamLoop:
 
     def _end_turn(self, reason: str) -> None:
         """轮次结束：时间线保留（供中途连接的 UI 续显/淡出），仅标记不在轮中。"""
+        if not self._in_turn:
+            return  # 本轮尚未开始/已结束：不要给上一轮补发迟到的 turn_end
         self._in_turn = False
-        self.publish({"type": "turn_end", "reason": reason})
+        self.publish({"type": "turn_end", "turn_id": self._turn_id, "reason": reason})
 
     def _publish_state(self) -> None:
         self.publish({"type": "state", "state": self.state, "session_state": _SESSION_STATE[self.state]})
@@ -172,7 +185,6 @@ class StreamLoop:
         }
         self.state = STATE_STARTING
         self._stop_event.clear()
-        self._intro_event.clear()
         self._wakeup.clear()
         self.last_scene = "intro"
         self._intro_started = time.monotonic()
@@ -180,7 +192,8 @@ class StreamLoop:
                       "conversation_id": conversation_id,
                       "title": meta_title, "category": meta_category, "tags": meta_tags})
         self._publish_state()
-        self.publish({"type": "intro"})
+        # intro 是 scenes.json 里的普通场景：广播 scene_set 让画面按数据跑时间线。
+        self.on_scene("intro")
 
         # 启动 chatbot 循环（本场标题/分区作为其消息模板的变量来源）
         self.chatbot.start_session(
@@ -274,7 +287,6 @@ class StreamLoop:
             return {"status": "not_running"}
         self._stop_event.set()
         self._wakeup.set()
-        self._intro_event.set()
         if self.session and self.state in (STATE_LIVE, STATE_PAUSED):
             # 中断 neuro 侧在途生成（若正在一轮中）
             s = self.session
@@ -290,7 +302,6 @@ class StreamLoop:
         if self.state != STATE_OFFLINE:
             self._stop_event.set()
             self._wakeup.set()
-            self._intro_event.set()
         if self._task is not None:
             with contextlib.suppress(Exception):
                 await asyncio.wait_for(asyncio.shield(self._task), timeout=5)
@@ -300,14 +311,6 @@ class StreamLoop:
     def on_scene(self, scene_id: str) -> None:
         self.last_scene = scene_id
         self.publish({"type": "scene_set", "id": scene_id})
-
-    def on_report(self, event: str) -> None:
-        """/ui 上行回报。intro_done：intro 视频 + 立绘入场播完，允许开始循环。"""
-        if event == "intro_done":
-            if self.state == STATE_STARTING:
-                self._intro_event.set()
-        else:
-            logger.debug("未知 report: %s", event)
 
     def on_new_message(self) -> None:
         """入列唤醒：静默等待模式下立刻推进下一轮。"""
@@ -370,17 +373,28 @@ class StreamLoop:
     async def _main(self) -> None:
         session = self.session
         try:
-            # intro 闸门：等画面回报，或按"视频时长+入场动画+余量"精确兜底
-            # （无人接入画面/回报丢失时不至于永久卡在 starting）
-            timeout = media.intro_gate_seconds()
-            with contextlib.suppress(asyncio.TimeoutError):
-                await asyncio.wait_for(self._intro_event.wait(), timeout)
+            # intro 是固定时长的普通场景：时长首选 scenes.json 的 timeline.duration，
+            # 缺失时按视频+入场动画兜底。后端按自己的时钟推进，不等待任何前端；
+            # stop 事件可即时打断等待。
+            try:
+                duration = scene_catalog.duration("intro") or media.intro_duration_seconds()
+            except RuntimeError:
+                # 场景数据损坏也只能影响画面构建，不能把直播循环拖住/弄崩。
+                logger.warning("intro scene duration unavailable; using media fallback", exc_info=True)
+                duration = media.intro_duration_seconds()
+            try:
+                await asyncio.wait_for(self._stop_event.wait(), timeout=duration)
+                return
+            except asyncio.TimeoutError:
+                pass
             if self._stop_event.is_set():
                 return
             self.state = STATE_LIVE
-            # 只有没被显式改过（intro 期间手动切场景或开了游戏）才落到 room
+            # 只有没被显式改过（intro 期间手动切场景或开了游戏）才落到 room。
+            # 广播 scene_set 是“后端推进画面”的唯一手段：任何前端卡住/迟到，
+            # 都会被这一帧纠正；没有前端也不影响循环。
             if self.last_scene in (None, "intro"):
-                self.last_scene = "room"
+                self.on_scene("room")
             self._publish_state()
 
             while not self._stop_event.is_set():
@@ -401,9 +415,7 @@ class StreamLoop:
                     await self._wait_or(self._wakeup)
                     self._wakeup.clear()
                     continue
-                # 轮间等待（发声时长 + gap 已在 _run_round 内消耗的部分会被扣掉？不——
-                # _run_round 只负责生成与转发，等待放这里统一做）
-                await self._sleep_ms(s.round_gap_ms + outcome)
+                # 语音播完 + speech_cooldown 的等待已在 _run_round 内完成
         except Exception:
             logger.exception("stream loop crashed, ending session")
         finally:
@@ -412,6 +424,8 @@ class StreamLoop:
     async def _finalize(self) -> None:
         self.chatbot.stop_session()
         self.games.clear()
+        # 若停止时仍有在途轮次，先按正常轮次结束广播 turn_end（画面据此进入淡出）
+        self._end_turn("stopped")
         was = self.state
         self.state = STATE_OFFLINE
         self._intro_started = None
@@ -427,9 +441,14 @@ class StreamLoop:
         self.last_scene = None
         self._publish_state()
 
-    async def _run_round(self, s: stream_settings.StreamSettings, session: dict) -> int | str:
-        """跑一轮：抽取→拼装→生成消费→（发声时长等待）。返回需追加等待的毫秒数，
-        或 "wait"（静默模式无消息）。"""
+    async def _run_round(self, s: stream_settings.StreamSettings, session: dict) -> str | None:
+        """跑一轮：抽取→拼装→生成消费→等语音播完 + cooldown。
+
+        返回 "wait"（静默模式无消息）或 None（本轮已完成，可继续下一轮）。
+        语音播完的判定使用服务端预测时间轴 `_turn_play_head`：最后一句的
+        `start + duration`，与画面顺序播放模型一致；**不是**“生成结束后再等
+        整轮语音总时长”（那会把生成期间已经播掉的时间重复计算）。
+        """
         picked = await self._pick(s, session)
         if picked is None:
             return "wait"
@@ -463,13 +482,15 @@ class StreamLoop:
             else:
                 session["cursor"] = last_id
         text = self.templates.render("neuro_user", {**tpl_vars, "messages": messages_block})
-        speech_ms = 0.0
         round_failed = False
-        turn_texts: list[str] = []
+        had_speech = False
+        turn_text = ""
+        self._turn_id += 1
+        turn_id = self._turn_id
         self._turn_speech = []
         self._turn_play_head = time.monotonic()
         self._in_turn = True
-        self.publish({"type": "turn_begin"})
+        self.publish({"type": "turn_begin", "turn_id": turn_id})
         client = NeuroClient(s.neuro_url)
         try:
             async for ev in client.chat(session["channel"], session["conversation_id"], text):
@@ -478,14 +499,14 @@ class StreamLoop:
                 et = ev.get("type")
                 if et == "speech":
                     duration = float(ev.get("duration") or 0)
-                    speech_ms += duration * 1000
                     stext = str(ev.get("text") or "").strip()
                     if stext:
-                        turn_texts.append(stext)
+                        turn_text = f"{turn_text} {stext}".strip()
                     # 发声时刻 = max(事件到达, 前句播完)：与 UI 顺序播放模型一致
                     now = time.monotonic()
                     start = max(now, self._turn_play_head)
                     self._turn_play_head = start + duration
+                    had_speech = True
                     self._turn_speech.append(
                         {
                             "index": ev.get("index", 0),
@@ -496,8 +517,12 @@ class StreamLoop:
                             "mime": str(ev.get("mime") or ""),
                         }
                     )
+                    # 睡眠判定从“这句预测播完”开始计时：字幕还在播时 chatbot 不会
+                    # 把 Neuro 判成空闲；长工具轮里也不会等整轮结束才更新。
+                    self.chatbot.note_neuro_speech(turn_text, self._turn_play_head)
                     self.publish({
                         "type": "speech",
+                        "turn_id": turn_id,
                         "index": ev.get("index", 0),
                         "text": ev.get("text", ""),
                         "audio": ev.get("audio", ""),
@@ -517,9 +542,6 @@ class StreamLoop:
             self._end_turn("error")
             round_failed = True
 
-        if turn_texts:
-            self.chatbot.update_neuro_speech(" ".join(turn_texts), speech_ms / 1000.0)
-
         if last_id is not None:
             logger.info(
                 "round picked %s message id=%s",
@@ -533,11 +555,15 @@ class StreamLoop:
             priority_cursor=session["priority_cursor"],
             inc_rounds=True,
         )
+
+        # 下一轮请求 = 语音播完 + cooldown。没有语音时从本轮结束开始计 cooldown。
+        speech_finished = self._turn_play_head if had_speech else time.monotonic()
+        wait_ms = (speech_finished + s.speech_cooldown_ms / 1000.0 - time.monotonic()) * 1000
+        await self._sleep_ms(wait_ms)
         if round_failed:
             # 失败轮次加长退避，防毒上游时打爆网关
             await self._sleep_ms(3000)
-            return 0
-        return int(speech_ms)
+        return None
 
     async def _pick(self, s, session: dict) -> Optional[dict]:
         """双轨抽取：优先轨最早一条优先（一次只消费 1 条）；

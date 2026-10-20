@@ -58,7 +58,7 @@ class StreamSettings:
     channel: str
     scene_context: str
     messages_per_round: int
-    round_gap_ms: int
+    speech_cooldown_ms: int  # 语音播完后字幕停留 / 下一轮请求等待
     empty_queue_behavior: str  # "placeholder" | "silent"
     placeholder_message: str
     default_title: str
@@ -118,12 +118,16 @@ def load() -> StreamSettings:
     except ValueError as e:
         raise RuntimeError(f"stream.default_tags 不合法：{e}") from e
 
+    raw_cooldown = ns.get("speech_cooldown_ms")
+    speech_cooldown_ms = int(raw_cooldown if raw_cooldown is not None else 1000)
+    speech_cooldown_ms = max(0, min(speech_cooldown_ms, 60_000))
+
     return StreamSettings(
         neuro_url=neuro_url,
         channel=str(ns.get("channel") or "stream"),
         scene_context=str(ns.get("scene_context") or "You are streaming on Twitch now."),
         messages_per_round=int(ns.get("messages_per_round") or 10),
-        round_gap_ms=int(ns.get("round_gap_ms") or 1500),
+        speech_cooldown_ms=speech_cooldown_ms,
         empty_queue_behavior=behavior,
         placeholder_message=str(ns.get("placeholder_message") or "No new messages. Say something to your viewers!"),
         default_title=str(ns.get("default_title") or ""),

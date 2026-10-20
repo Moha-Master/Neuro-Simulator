@@ -170,7 +170,7 @@
                           <v-textarea v-model="cfg.stream.scene_context" label="Scene context（每轮注入的场景描述）" variant="outlined" density="compact" rows="2" auto-grow />
                         </v-col>
                         <v-col cols="6" sm="4"><v-text-field v-model.number="cfg.stream.messages_per_round" label="Messages / round" type="number" variant="outlined" density="compact" /></v-col>
-                        <v-col cols="6" sm="4"><v-text-field v-model.number="cfg.stream.round_gap_ms" label="Round gap (ms)" type="number" variant="outlined" density="compact" /></v-col>
+                        <v-col cols="6" sm="4"><v-text-field v-model.number="cfg.stream.speech_cooldown_ms" label="Speech cooldown (ms，字幕停留 / 下一轮等待)" type="number" variant="outlined" density="compact" /></v-col>
                         <v-col cols="12" sm="4">
                           <v-select
                             v-model="cfg.stream.empty_queue_behavior"
@@ -497,7 +497,7 @@ const normalize = (doc: Record<string, any>) => {
   s.channel = s.channel ?? 'stream'
   s.scene_context = s.scene_context ?? 'You are streaming on Twitch now.'
   s.messages_per_round = s.messages_per_round ?? 10
-  s.round_gap_ms = s.round_gap_ms ?? 1500
+  s.speech_cooldown_ms = s.speech_cooldown_ms ?? 1000
   s.empty_queue_behavior = s.empty_queue_behavior ?? 'placeholder'
   s.placeholder_message = s.placeholder_message ?? 'No new messages. Say something to your viewers!'
   s.default_title = s.default_title ?? 'AI VTuber chatting with chat!'

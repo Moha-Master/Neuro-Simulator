@@ -36,7 +36,7 @@ def _settings(**chatbot_overrides) -> StreamSettings:
         channel="stream",
         scene_context="ctx",
         messages_per_round=10,
-        round_gap_ms=0,
+        speech_cooldown_ms=0,
         empty_queue_behavior="placeholder",
         placeholder_message="idle",
         default_title="t",
@@ -182,7 +182,9 @@ class TestChatbot(unittest.IsolatedAsyncioTestCase):
             mgr._get_neuro_status(5.0),
             "Neuro just online now! Stream is starting soon...",
         )
-        mgr.update_neuro_speech("Hello everyone, I am streaming!", duration=2.0)
+        mgr.note_neuro_speech(
+            "Hello everyone, I am streaming!", finish_time=time.monotonic() + 2.0
+        )
         self.assertEqual(
             mgr._get_neuro_status(5.0), "Neuro says: Hello everyone, I am streaming!"
         )

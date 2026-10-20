@@ -1,11 +1,12 @@
 """场景清单的服务端视角：读 ui 构建产物里的 `scenes.json`。
 
-场景（元素清单）由画面侧拥有（`stream/ui/public/scenes.json` → 构建到 `dist/scenes.json`），
-服务端只做三件事：
-1. 校验手动切场景的 id 是否存在（`POST /scene`）；
+场景（元素清单 + 固定时长脚本）由画面侧拥有（`stream/ui/public/scenes.json` →
+构建到 `dist/scenes.json`），服务端做四件事：
+1. 校验手动切场景的 id 是否存在且允许手动选择（`POST /scene`）；
 2. 把清单（id/label/icon + 元素概览）交给 dashboard 渲染场景按钮，**加场景只改一处**；
 3. 提供场景的 `prompt_context`，让 `{{scene_context}}` 随场景变（玩 Wordle 时她知道自己
-   在猜词，但棋盘细节仍只从工具返回里看）。
+   在猜词，但棋盘细节仍只从工具返回里看）；
+4. 读取场景脚本的固定时长（如 intro），让直播循环按后端时钟推进，不等任何前端。
 
 文件按 mtime 缓存，重新构建前端后无需重启进程。
 """
@@ -59,6 +60,27 @@ def exists(scene_id: str) -> bool:
     return find(scene_id) is not None
 
 
+def manual(scene_id: str) -> bool:
+    """是否允许 dashboard/API 手动选择；intro 这类内部脚本场景为 False。"""
+    scene = find(scene_id)
+    return bool(scene and scene.get("manual", True) is not False)
+
+
+def duration(scene_id: Optional[str]) -> Optional[float]:
+    """场景脚本的固定时长（秒）。没有脚本/时长非法时返回 None。"""
+    scene = find(scene_id)
+    if not scene:
+        return None
+    timeline = scene.get("timeline")
+    if not isinstance(timeline, dict):
+        return None
+    try:
+        value = float(timeline.get("duration"))
+    except (TypeError, ValueError):
+        return None
+    return value if value > 0 else None
+
+
 def prompt_context(scene_id: Optional[str]) -> str:
     """场景自带说明则用它，否则空串（调用方回落到 config 的 scene_context）。"""
     scene = find(scene_id)
@@ -86,4 +108,5 @@ def overview() -> List[Dict[str, Any]]:
             ],
         }
         for s in load_scenes()
+        if s.get("manual", True) is not False
     ]

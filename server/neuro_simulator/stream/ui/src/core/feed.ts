@@ -1,11 +1,12 @@
 /** stream 模块 /ui/events 画面事件通道（SSE，只读）。
  *
- * 协议（stream.loop.publish 的镜像）：
- * snapshot{state,scene,session,intro_elapsed?,turn?,chat?,metadata?,elements?} / state /
- * session_begin{title,category} / session_end / intro / scene_set{id} /
+ * protocol（stream.loop.publish 的镜像）：
+ * snapshot{state,scene,session,settings,intro_elapsed?,turn?,chat?,metadata?,elements?} /
+ * state / session_begin{title,category} / session_end / scene_set{id} /
+ * settings{speech_cooldown_ms} /
  * element_state{id,payload}（游戏等元素层的全量状态）/
- * stream_metadata{title,category} / speech{index,text,audio,mime,duration} /
- * turn_begin / turn_end{reason} / chat_message / priority_message /
+ * stream_metadata{title,category} / speech{turn_id,index,text,audio,mime,duration} /
+ * turn_begin{turn_id} / turn_end{turn_id,reason} / chat_message / priority_message /
  * tool_start / tool_result（neuro 工具事件原样镜像，画面端按 name 自行消费）
  */
 
@@ -41,8 +42,9 @@ export interface Snapshot {
     channel: string;
     conversation_id: string;
   } | null;
-  intro_elapsed?: number; // starting 中：开场序列已过秒数（视频续播）
-  turn?: { active: boolean; speech: TurnSeg[] }; // 当前/最近一轮的字幕时间线
+  intro_elapsed?: number; // starting 中：intro 场景时间线已过秒数（视频 seek/动作顺延）
+  turn?: { id: number; active: boolean; speech: TurnSeg[] }; // 当前/最近一轮的字幕时间线
+  settings?: { speech_cooldown_ms?: number }; // 画面端运行参数（字幕停留/轮间冷却）
   chat?: ChatMsg[]; // 最近聊天记录（重连时恢复聊天层）
   metadata?: { title?: string; category?: string }; // 本场标题/分区（dashboard 观看页消费；画面本身不使用）
   elements?: Record<string, unknown>; // 各元素层的全量状态（key = 元素 id，如 game_wordle）
@@ -54,7 +56,7 @@ const EVENT_NAMES = [
   "session_begin",
   "session_end",
   "stream_metadata",
-  "intro",
+  "settings",
   "scene_set",
   "element_state",
   "speech",
@@ -115,18 +117,5 @@ export class StreamFeed {
 
   close(): void {
     this.es.close();
-  }
-}
-
-/** UI → stream 上行回报（fire-and-forget，失败静默）。 */
-export async function report(event: string): Promise<void> {
-  try {
-    await fetch(resolveEndpoint("report"), {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ event }),
-    });
-  } catch (e) {
-    console.warn("report 失败", e);
   }
 }
