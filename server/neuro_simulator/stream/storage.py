@@ -10,6 +10,7 @@
 并发：单 event loop 单连接 + WAL + busy_timeout。
 """
 
+import json
 import time
 import uuid
 from pathlib import Path
@@ -47,9 +48,37 @@ CREATE TABLE IF NOT EXISTS sessions (
     ended_at        TEXT,
     cursor_msg      INTEGER NOT NULL DEFAULT 0,
     priority_cursor INTEGER NOT NULL DEFAULT 0,
-    rounds          INTEGER NOT NULL DEFAULT 0
+    rounds          INTEGER NOT NULL DEFAULT 0,
+    title           TEXT,
+    category        TEXT,
+    tags            TEXT
 );
 CREATE INDEX IF NOT EXISTS ix_sessions_started ON sessions (started_at DESC);
+
+-- 可编辑内容层（与 neuro_sama 同构，逻辑复用顶层 neuro_simulator/persona.py）
+-- prompts：chatbot 的 system prompt + stream 拼给 neuro/chatbot 的消息模板（按 name 区分）
+CREATE TABLE IF NOT EXISTS prompts (
+    name       TEXT PRIMARY KEY,
+    content    TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+-- core_memories：人工维护的观众视角事实块（scope 预留多套人设）
+CREATE TABLE IF NOT EXISTS core_memories (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    scope      TEXT NOT NULL DEFAULT 'chatbot',
+    title      TEXT NOT NULL,
+    content    TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE (scope, title)
+);
+
+-- 一次性播种标记（避免用户删光后重启又恢复默认内容）
+CREATE TABLE IF NOT EXISTS meta (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
 """
 
 
@@ -59,6 +88,25 @@ def _now() -> str:
 
 def new_id() -> str:
     return uuid.uuid4().hex
+
+
+def _decode_tags(value: Any) -> list[str]:
+    """sessions.tags 以 JSON 数组存库；读取时还原成 list。"""
+    if not value:
+        return []
+    try:
+        data = json.loads(value) if isinstance(value, str) else value
+    except (TypeError, ValueError):
+        return []
+    if not isinstance(data, list):
+        return []
+    return [str(t) for t in data if str(t).strip()]
+
+
+def _session_row(row: Any) -> dict[str, Any]:
+    data = dict(row)
+    data["tags"] = _decode_tags(data.get("tags"))
+    return data
 
 
 class Storage:
@@ -86,6 +134,9 @@ class Storage:
         await self._ensure_column(
             "sessions", "priority_cursor", "priority_cursor INTEGER NOT NULL DEFAULT 0"
         )
+        await self._ensure_column("sessions", "title", "title TEXT")
+        await self._ensure_column("sessions", "category", "category TEXT")
+        await self._ensure_column("sessions", "tags", "tags TEXT")
 
     async def _ensure_column(self, table: str, column: str, ddl: str) -> None:
         cur = await self.db.execute(f"PRAGMA table_info({table})")
@@ -212,13 +263,30 @@ class Storage:
     # ---------- 场次 ----------
 
     async def create_session(
-        self, queue_row: int, channel: str, conversation_id: str
+        self,
+        queue_row: int,
+        channel: str,
+        conversation_id: str,
+        *,
+        title: Optional[str] = None,
+        category: Optional[str] = None,
+        tags: Optional[list[str]] = None,
     ) -> tuple[int, str]:
         session_id = new_id()
         cur = await self.db.execute(
-            "INSERT INTO sessions (session_id, queue_row, channel, conversation_id, state, started_at) "
-            "VALUES (?, ?, ?, ?, 'online', ?) RETURNING id",
-            (session_id, queue_row, channel, conversation_id, _now()),
+            "INSERT INTO sessions "
+            "(session_id, queue_row, channel, conversation_id, state, started_at, title, category, tags) "
+            "VALUES (?, ?, ?, ?, 'online', ?, ?, ?, ?) RETURNING id",
+            (
+                session_id,
+                queue_row,
+                channel,
+                conversation_id,
+                _now(),
+                title,
+                category,
+                json.dumps(tags or [], ensure_ascii=False),
+            ),
         )
         row = await cur.fetchone()
         await self.db.commit()
@@ -233,6 +301,9 @@ class Storage:
         cursor_msg: Optional[int] = None,
         priority_cursor: Optional[int] = None,
         inc_rounds: bool = False,
+        title: Optional[str] = None,
+        category: Optional[str] = None,
+        tags: Optional[list[str]] = None,
     ) -> None:
         sets: list[str] = []
         params: list[Any] = []
@@ -248,6 +319,15 @@ class Storage:
         if priority_cursor is not None:
             sets.append("priority_cursor=?")
             params.append(priority_cursor)
+        if title is not None:
+            sets.append("title=?")
+            params.append(title)
+        if category is not None:
+            sets.append("category=?")
+            params.append(category)
+        if tags is not None:
+            sets.append("tags=?")
+            params.append(json.dumps(tags, ensure_ascii=False))
         if inc_rounds:
             sets.append("rounds=rounds+1")
         if sets:
@@ -259,23 +339,24 @@ class Storage:
     async def get_active_session(self) -> Optional[dict[str, Any]]:
         cur = await self.db.execute(
             "SELECT s.id, s.session_id, s.queue_row, q.queue_id, s.channel, s.conversation_id, "
-            "s.state, s.started_at, s.cursor_msg, s.priority_cursor, s.rounds "
+            "s.state, s.started_at, s.cursor_msg, s.priority_cursor, s.rounds, "
+            "s.title, s.category, s.tags "
             "FROM sessions s JOIN queues q ON q.id=s.queue_row "
             "WHERE s.ended_at IS NULL ORDER BY s.id DESC LIMIT 1"
         )
         row = await cur.fetchone()
-        return dict(row) if row else None
+        return _session_row(row) if row else None
 
     async def get_session(self, session_id: str) -> Optional[dict[str, Any]]:
         cur = await self.db.execute(
             "SELECT s.id, s.session_id, s.queue_row, q.queue_id, s.channel, s.conversation_id, "
-            "s.state, s.started_at, s.ended_at, s.priority_cursor, s.rounds "
+            "s.state, s.started_at, s.ended_at, s.priority_cursor, s.rounds, s.title, s.category, s.tags "
             "FROM sessions s JOIN queues q ON q.id=s.queue_row "
             "WHERE s.session_id=?",
             (session_id,),
         )
         row = await cur.fetchone()
-        return dict(row) if row else None
+        return _session_row(row) if row else None
 
     async def delete_session_data(self, session_id: str) -> Optional[tuple[str, str]]:
         """删除场次及其关联队列。返回 (channel, conversation_id) 以便后续删除 Neuro 对话。"""
@@ -291,9 +372,90 @@ class Storage:
     async def list_sessions(self, limit: int = 20) -> list[dict[str, Any]]:
         cur = await self.db.execute(
             "SELECT s.session_id, q.queue_id, s.channel, s.conversation_id, "
-            "s.state, s.started_at, s.ended_at, s.rounds "
+            "s.state, s.started_at, s.ended_at, s.rounds, s.title, s.category, s.tags "
             "FROM sessions s JOIN queues q ON q.id=s.queue_row "
             "ORDER BY s.id DESC LIMIT ?",
             (limit,),
         )
-        return [dict(r) for r in await cur.fetchall()]
+        return [_session_row(r) for r in await cur.fetchall()]
+
+    # ---------- persona / 模板（prompts + core_memories + meta） ----------
+    # 供顶层 neuro_simulator.persona.PersonaStore 与 templates.TemplateStore 使用；
+    # 本模块的 core memory 固定 scope='chatbot'。
+
+    _CORE_SCOPE = "chatbot"
+
+    async def get_prompt(self, name: str) -> Optional[dict[str, Any]]:
+        cur = await self.db.execute(
+            "SELECT name, content, updated_at FROM prompts WHERE name=?", (name,)
+        )
+        row = await cur.fetchone()
+        if row is None:
+            return None
+        return {"name": row[0], "content": row[1], "updated_at": row[2]}
+
+    async def upsert_prompt(self, content: str, name: str) -> None:
+        await self.db.execute(
+            "INSERT INTO prompts (name, content, updated_at) VALUES (?, ?, ?) "
+            "ON CONFLICT(name) DO UPDATE SET content=excluded.content, "
+            "updated_at=excluded.updated_at",
+            (name, content, _now()),
+        )
+        await self.db.commit()
+
+    async def get_core_memories(self) -> list[dict[str, Any]]:
+        cur = await self.db.execute(
+            "SELECT id, title, content, created_at, updated_at FROM core_memories "
+            "WHERE scope=? ORDER BY id",
+            (self._CORE_SCOPE,),
+        )
+        return [
+            {
+                "id": r[0],
+                "title": r[1],
+                "content": r[2],
+                "created_at": r[3],
+                "updated_at": r[4],
+            }
+            for r in await cur.fetchall()
+        ]
+
+    async def add_core_memory(self, title: str, content: str) -> int:
+        now = _now()
+        cur = await self.db.execute(
+            "INSERT INTO core_memories (scope, title, content, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (self._CORE_SCOPE, title, content, now, now),
+        )
+        await self.db.commit()
+        return int(cur.lastrowid)
+
+    async def update_core_memory(self, memory_id: int, title: str, content: str) -> bool:
+        cur = await self.db.execute(
+            "UPDATE core_memories SET title=?, content=?, updated_at=? "
+            "WHERE id=? AND scope=?",
+            (title, content, _now(), memory_id, self._CORE_SCOPE),
+        )
+        await self.db.commit()
+        return cur.rowcount > 0
+
+    async def delete_core_memory(self, memory_id: int) -> bool:
+        cur = await self.db.execute(
+            "DELETE FROM core_memories WHERE id=? AND scope=?",
+            (memory_id, self._CORE_SCOPE),
+        )
+        await self.db.commit()
+        return cur.rowcount > 0
+
+    async def get_meta(self, key: str) -> Optional[str]:
+        cur = await self.db.execute("SELECT value FROM meta WHERE key=?", (key,))
+        row = await cur.fetchone()
+        return row[0] if row else None
+
+    async def set_meta(self, key: str, value: str) -> None:
+        await self.db.execute(
+            "INSERT INTO meta (key, value) VALUES (?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            (key, value),
+        )
+        await self.db.commit()

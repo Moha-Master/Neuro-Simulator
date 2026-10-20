@@ -427,7 +427,7 @@ def create_app() -> FastAPI:
         persona: PersonaStore = app.state.persona
         memory: MemoryStore = app.state.memory
         await memory._ensure_loaded()
-        return persona.preview(memory.render(), payload.content)
+        return persona.preview_system(memory.render(), payload.content)
 
     @app.post("/manage/persona/core-memories")
     async def manage_add_core_memory(payload: CoreMemoryPayload):

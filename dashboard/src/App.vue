@@ -64,6 +64,18 @@
             </template>
             <v-list-item-title>View</v-list-item-title>
           </v-list-item>
+          <v-list-item to="/stream-chatbot" :active="$route.path === '/stream-chatbot'">
+            <template #prepend>
+              <v-icon>mdi-account-group-outline</v-icon>
+            </template>
+            <v-list-item-title>Chatbot</v-list-item-title>
+          </v-list-item>
+          <v-list-item to="/stream-templates" :active="$route.path === '/stream-templates'">
+            <template #prepend>
+              <v-icon>mdi-message-text-outline</v-icon>
+            </template>
+            <v-list-item-title>Message Templates</v-list-item-title>
+          </v-list-item>
         </v-list-group>
       </v-list>
     </v-navigation-drawer>
@@ -86,8 +98,9 @@
     </v-app-bar>
 
     <!-- Main Content -->
-    <v-main>
-      <v-container fluid>
+    <v-main :class="{ 'tw-main--fullbleed': route.meta.fullBleed }">
+      <router-view v-if="route.meta.fullBleed" />
+      <v-container v-else fluid>
         <router-view />
       </v-container>
     </v-main>
@@ -127,3 +140,15 @@ watch(
   },
 )
 </script>
+
+<style>
+/* fullBleed 页面（Twitch 观看页）：让 v-main 成为固定高度容器，
+   页面根节点用 flex 填满剩余空间。
+   注意：不能依赖 --v-layout-top —— 该变量在 v-main 子元素上会继承到 0px。 */
+.tw-main--fullbleed {
+  display: flex;
+  flex-direction: column;
+  height: 100dvh;
+  min-height: 0;
+}
+</style>

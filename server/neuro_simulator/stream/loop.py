@@ -28,6 +28,7 @@ from . import media
 from . import settings as stream_settings
 from .chatbot import ChatbotManager
 from .neuro_client import NeuroClient, NeuroError
+from .persona import stream_info_line
 from .storage import Storage
 
 logger = logging.getLogger(__name__)
@@ -55,10 +56,12 @@ def _now_human() -> str:
 
 
 class StreamLoop:
-    def __init__(self, storage: Storage, bus: EventBroadcaster) -> None:
+    def __init__(self, storage: Storage, bus: EventBroadcaster, persona, templates) -> None:
         self.storage = storage
         self.bus = bus
-        self.chatbot = ChatbotManager(storage)
+        self.persona = persona
+        self.templates = templates
+        self.chatbot = ChatbotManager(storage, persona, templates)
         self.state: str = STATE_OFFLINE
         self.session: Optional[dict[str, Any]] = None
         self.last_scene: Optional[str] = None
@@ -117,7 +120,12 @@ class StreamLoop:
 
     # ---------- 控制入口 ----------
 
-    async def start(self) -> dict[str, Any]:
+    async def start(
+        self,
+        title: Optional[str] = None,
+        category: Optional[str] = None,
+        tags: Optional[list[str]] = None,
+    ) -> dict[str, Any]:
         if self.state != STATE_OFFLINE:
             raise StreamConflict(f"直播已在进行中（state={self.state}），先停止再开始")
         try:
@@ -127,8 +135,21 @@ class StreamLoop:
 
         queue_row, queue_id = await self.storage.create_queue(f"stream {time.strftime('%Y-%m-%d %H:%M')}")
         conversation_id = uuid.uuid4().hex
+        # 未显式指定时取 config 的默认值（dashboard 开播面板里也可以直接改）
+        meta_title = (s.default_title if title is None else title).strip()
+        meta_category = (s.default_category if category is None else category).strip()
+        meta_tags = (
+            list(s.default_tags)
+            if tags is None
+            else stream_settings.normalize_tags(tags)
+        )
         session_row, session_id = await self.storage.create_session(
-            queue_row, s.channel, conversation_id
+            queue_row,
+            s.channel,
+            conversation_id,
+            title=meta_title,
+            category=meta_category,
+            tags=meta_tags,
         )
         self.session = {
             "session_row": session_row,
@@ -139,6 +160,10 @@ class StreamLoop:
             "conversation_id": conversation_id,
             "cursor": 0,
             "priority_cursor": 0,
+            "rounds": 0,
+            "title": meta_title,
+            "category": meta_category,
+            "tags": meta_tags,
         }
         self.state = STATE_STARTING
         self._stop_event.clear()
@@ -147,18 +172,82 @@ class StreamLoop:
         self.last_scene = "intro"
         self._intro_started = time.monotonic()
         self.publish({"type": "session_begin", "session_id": session_id, "channel": s.channel,
-                      "conversation_id": conversation_id})
+                      "conversation_id": conversation_id,
+                      "title": meta_title, "category": meta_category, "tags": meta_tags})
         self._publish_state()
         self.publish({"type": "intro"})
-        
-        # 启动 chatbot 循环
+
+        # 启动 chatbot 循环（本场标题/分区作为其消息模板的变量来源）
         self.chatbot.start_session(
-            queue_row, self.on_new_message, self._announce_chatbot_message
+            queue_row,
+            self.on_new_message,
+            self._announce_chatbot_message,
+            metadata_provider=self.session_metadata,
         )
-        
+
         self._task = asyncio.create_task(self._main(), name="stream-loop")
         logger.info("stream started: session=%s conv=%s", session_id, conversation_id[:8])
         return self.session
+
+    # ---------- 本场信息（标题 / 分区） ----------
+
+    def session_metadata(self) -> tuple[str, str]:
+        """(title, category)。无场次时回落到 config 默认值（供预览与开播面板用）。"""
+        if self.session:
+            return (self.session.get("title") or "", self.session.get("category") or "")
+        try:
+            s = stream_settings.load()
+        except RuntimeError:
+            return ("", "")
+        return (s.default_title, s.default_category)
+
+    def session_tags(self) -> list[str]:
+        """本场标签；无场次时回落到 config 默认值。"""
+        if self.session:
+            return list(self.session.get("tags") or [])
+        try:
+            s = stream_settings.load()
+        except RuntimeError:
+            return []
+        return list(s.default_tags)
+
+    async def set_metadata(
+        self,
+        *,
+        title: Optional[str] = None,
+        category: Optional[str] = None,
+        tags: Optional[list[str]] = None,
+    ) -> dict[str, Any]:
+        """直播中修改本场标题/分区/标签：落库 + 广播，下一轮消息即生效。"""
+        if not self.session:
+            raise StreamConflict("没有进行中的直播，无法修改本场信息")
+        new_title = self.session.get("title", "") if title is None else title.strip()
+        new_category = (
+            self.session.get("category", "") if category is None else category.strip()
+        )
+        new_tags = (
+            list(self.session.get("tags") or [])
+            if tags is None
+            else stream_settings.normalize_tags(tags)
+        )
+        await self.storage.update_session(
+            self.session["session_row"],
+            title=new_title,
+            category=new_category,
+            tags=new_tags,
+        )
+        self.session["title"] = new_title
+        self.session["category"] = new_category
+        self.session["tags"] = new_tags
+        meta = {"title": new_title, "category": new_category, "tags": new_tags}
+        self.publish({"type": "stream_metadata", **meta})
+        logger.info(
+            "stream metadata updated: %r [%s] tags=%s",
+            new_title,
+            new_category,
+            new_tags,
+        )
+        return meta
 
     async def pause(self) -> None:
         if self.state != STATE_LIVE:
@@ -192,7 +281,7 @@ class StreamLoop:
         return {"status": "stopped"}
 
     async def shutdown(self) -> None:
-        """进程退出钩子：结束当前场次（尽力而为）。"""
+        """进程退出钩子：结束当前场次（尽力而为）并关闭 chatbot 的 LLM 客户端。"""
         if self.state != STATE_OFFLINE:
             self._stop_event.set()
             self._wakeup.set()
@@ -200,6 +289,8 @@ class StreamLoop:
         if self._task is not None:
             with contextlib.suppress(Exception):
                 await asyncio.wait_for(asyncio.shield(self._task), timeout=5)
+        with contextlib.suppress(Exception):
+            await self.chatbot.aclose()
 
     def on_scene(self, scene_id: str) -> None:
         self.last_scene = scene_id
@@ -336,20 +427,31 @@ class StreamLoop:
             return "wait"
 
         last_id = None
+        title, category = self.session_metadata()
+        # 消息模板（可在 dashboard 编辑）的公共变量；{{round}} 用"本轮序号"
+        tpl_vars = {
+            "scene_context": s.scene_context,
+            "datetime": _now_human(),
+            "stream_info": stream_info_line(title, category),
+            "title": title,
+            "category": category,
+            "scene": self.last_scene or "",
+            "round": str(session.get("rounds", 0) + 1),
+        }
         if picked["kind"] == "placeholder":
-            body = picked["body"]  # 占位互动（不推进 cursor）
+            # 空队列：{{messages}} 换成占位指令（不推进 cursor）。
+            # 不再单独维护"空队列模板"——少一条模板、少一个变量，行为也更直观。
+            messages_block = picked["body"]
         else:
             msgs = picked["messages"]
-            lines = "\n".join(f"- {m['username']}: {m['content']}" for m in msgs)
             # 优先消息与普通消息对 neuro 完全同格式：不带 type/value，不加标注
-            body = f"Recent viewer messages:\n{lines}"
+            messages_block = "\n".join(f"- {m['username']}: {m['content']}" for m in msgs)
             last_id = msgs[-1]["id"]
             if picked["kind"] == "priority":
                 session["priority_cursor"] = last_id
             else:
                 session["cursor"] = last_id
-
-        text = f"{s.scene_context}\nCurrent date and time: {_now_human()}\n\n{body}"
+        text = self.templates.render("neuro_user", {**tpl_vars, "messages": messages_block})
         speech_ms = 0.0
         round_failed = False
         turn_texts: list[str] = []
@@ -413,6 +515,7 @@ class StreamLoop:
                 "priority" if picked["kind"] == "priority" else "normal",
                 last_id,
             )
+        session["rounds"] = session.get("rounds", 0) + 1
         await self.storage.update_session(
             session["session_row"],
             cursor_msg=session["cursor"],

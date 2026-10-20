@@ -24,6 +24,8 @@ declare module 'vue-router/auto-routes' {
     '/neuro-sama-memory': RouteRecordInfo<'/neuro-sama-memory', '/neuro-sama-memory', Record<never, never>, Record<never, never>>,
     '/neuro-sama-persona': RouteRecordInfo<'/neuro-sama-persona', '/neuro-sama-persona', Record<never, never>, Record<never, never>>,
     '/stream': RouteRecordInfo<'/stream', '/stream', Record<never, never>, Record<never, never>>,
+    '/stream-chatbot': RouteRecordInfo<'/stream-chatbot', '/stream-chatbot', Record<never, never>, Record<never, never>>,
+    '/stream-templates': RouteRecordInfo<'/stream-templates', '/stream-templates', Record<never, never>, Record<never, never>>,
     '/stream-view': RouteRecordInfo<'/stream-view', '/stream-view', Record<never, never>, Record<never, never>>,
   }
 
@@ -60,6 +62,14 @@ declare module 'vue-router/auto-routes' {
     }
     'src/pages/stream.vue': {
       routes: '/stream'
+      views: never
+    }
+    'src/pages/stream-chatbot.vue': {
+      routes: '/stream-chatbot'
+      views: never
+    }
+    'src/pages/stream-templates.vue': {
+      routes: '/stream-templates'
       views: never
     }
     'src/pages/stream-view.vue': {

@@ -31,13 +31,17 @@
     "round_gap_ms": 1500,
     "empty_queue_behavior": "placeholder",
     "placeholder_message": "No new messages. Say something to your viewers!",
+    "default_title": "AI VTuber chatting with chat!",
+    "default_category": "Just Chatting",
+    "default_tags": [],
     "chatbot": {
       "enabled": true,
       "model": "",
-      "system_prompt": "You are a simulator for Twitch chatters watching an AI Vtuber stream. Generate {count} short, realistic Twitch viewer comments based on Neuro's status. Each comment should be on a new line in the format 'username: message'. Use typical Twitch slang, emotes (e.g. Pog, LUL, Kappa), or short reactions.",
       "interval_s": 10.0,
       "count": 3,
-      "neuro_sleep_timeout_s": 45.0
+      "neuro_sleep_timeout_s": 45.0,
+      "max_concurrent": 3,
+      "interval_jitter": 0.2
     }
   }
 }

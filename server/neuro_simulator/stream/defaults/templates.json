@@ -1,0 +1,4 @@
+{
+  "neuro_user": "{{scene_context}}\nCurrent date and time: {{datetime}}\n{{stream_info}}\n\nRecent viewer messages:\n{{messages}}",
+  "chatbot_user": "Current date and time: {{datetime}}\n{{stream_info}}\n\n{{neuro_status}}"
+}

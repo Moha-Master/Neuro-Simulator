@@ -32,12 +32,38 @@ export function useStream() {
     }
   }
 
-  async function action(kind: 'start' | 'pause' | 'resume' | 'stop') {
+  async function action(
+    kind: 'start' | 'pause' | 'resume' | 'stop',
+    meta?: { title?: string; category?: string; tags?: string[] },
+  ) {
     busy.value = true
     error.value = ''
     try {
-      await api(`/manage/${MODULE}/stream/${kind}`, { method: 'POST' })
+      await api(`/manage/${MODULE}/stream/${kind}`, {
+        method: 'POST',
+        // 只有 start 需要本场信息；其余保持无 body
+        ...(kind === 'start' ? { body: JSON.stringify(meta ?? {}) } : {}),
+      })
       await Promise.all([refreshStatus(), refreshSessions()])
+      return true
+    } catch (e) {
+      error.value = describeError(e)
+      return false
+    } finally {
+      busy.value = false
+    }
+  }
+
+  /** 直播中修改本场标题 / 分区（→ 广播给画面，下一轮消息即生效）。 */
+  async function setMetadata(title: string, category: string, tags: string[]): Promise<boolean> {
+    error.value = ''
+    busy.value = true
+    try {
+      await api(`/manage/${MODULE}/stream/metadata`, {
+        method: 'PUT',
+        body: JSON.stringify({ title, category, tags }),
+      })
+      await refreshStatus()
       return true
     } catch (e) {
       error.value = describeError(e)
@@ -142,6 +168,7 @@ export function useStream() {
     refreshStatus,
     refreshSessions,
     action,
+    setMetadata,
     setScene,
     pollQueue,
     resetQueue,

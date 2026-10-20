@@ -34,7 +34,16 @@ class TestPersona(unittest.IsolatedAsyncioTestCase):
         titles = [b.title for b in self.persona.blocks]
         self.assertEqual(
             titles,
-            ["Persona", "Vedal", "Evil", "Anny", "Chat", "Other People", "Lore & Running Jokes"],
+            [
+                "Persona",
+                "Vedal",
+                "Evil",
+                "Anny",
+                "Chat",
+                "Other People",
+                "Lore & Running Jokes",
+                "Timeline",
+            ],
         )
         self.assertIn(CORE_PLACEHOLDER, self.persona.prompt)
         self.assertIn(SHORT_TERM_PLACEHOLDER, self.persona.prompt)
@@ -87,7 +96,16 @@ class TestPersona(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(
             [b.title for b in self.persona.blocks],
-            ["Persona", "Vedal", "Evil", "Anny", "Chat", "Other People", "Lore & Running Jokes"],
+            [
+                "Persona",
+                "Vedal",
+                "Evil",
+                "Anny",
+                "Chat",
+                "Other People",
+                "Lore & Running Jokes",
+                "Timeline",
+            ],
         )
         self.assertTrue(self.persona.is_default_core)
         self.assertNotIn("My Own Block", [b.title for b in self.persona.blocks])
@@ -107,7 +125,7 @@ class TestPersona(unittest.IsolatedAsyncioTestCase):
 
     async def test_render_replaces_placeholders(self):
         await self.memory.add_entry("Chat likes cookies.")
-        rendered = self.persona.render(self.memory.render())
+        rendered = self.persona.render_system(self.memory.render())
 
         self.assertIn("### Persona", rendered)
         self.assertIn("### Vedal", rendered)
@@ -118,7 +136,7 @@ class TestPersona(unittest.IsolatedAsyncioTestCase):
 
     async def test_missing_placeholders_are_appended(self):
         await self.persona.save_prompt("Custom prompt without placeholders.")
-        rendered = self.persona.render(self.memory.render())
+        rendered = self.persona.render_system(self.memory.render())
 
         self.assertTrue(rendered.startswith("Custom prompt without placeholders."))
         self.assertIn("## Core Memory", rendered)
@@ -126,7 +144,7 @@ class TestPersona(unittest.IsolatedAsyncioTestCase):
 
     async def test_preview_with_draft_does_not_persist(self):
         saved = self.persona.prompt
-        preview = self.persona.preview(self.memory.render(), "Draft {{core_memory}}")
+        preview = self.persona.preview_system(self.memory.render(), "Draft {{core_memory}}")
 
         self.assertEqual(self.persona.prompt, saved)
         self.assertIn("Draft ## Core Memory", preview["prompt"])

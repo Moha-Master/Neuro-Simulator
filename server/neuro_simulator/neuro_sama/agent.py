@@ -31,7 +31,7 @@ from .tools import ToolRegistry
 
 def build_system_prompt(persona: PersonaStore, memory: MemoryStore) -> str:
     """system prompt 每轮动态编译：prompt 模板 + core memory + short-term memory（永不缓存）。"""
-    return persona.render(memory.render())
+    return persona.render_system(memory.render())
 
 
 _HAS_WORD = re.compile(r"\w", re.UNICODE)

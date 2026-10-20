@@ -8,6 +8,7 @@ from unittest.mock import patch
 
 from neuro_simulator.broadcaster import EventBroadcaster
 from neuro_simulator.stream.loop import StreamLoop
+from neuro_simulator.stream.persona import ChatbotPersonaStore, build_template_store
 from neuro_simulator.stream.storage import Storage
 
 
@@ -50,8 +51,12 @@ class TestPriorityQueue(unittest.IsolatedAsyncioTestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.storage = Storage(Path(self.tmp.name) / "test.db")
         await self.storage.init()
+        self.persona = ChatbotPersonaStore(self.storage)
+        await self.persona.load()
+        self.templates = build_template_store(self.storage)
+        await self.templates.load()
         self.bus = EventBroadcaster()
-        self.loop = StreamLoop(self.storage, self.bus)
+        self.loop = StreamLoop(self.storage, self.bus, self.persona, self.templates)
         self.queue_row, _ = await self.storage.create_queue("test queue")
         _, session_id = await self.storage.create_session(
             self.queue_row, "stream", "conv-priority-test"
@@ -69,6 +74,8 @@ class TestPriorityQueue(unittest.IsolatedAsyncioTestCase):
             messages_per_round=10,
             empty_queue_behavior="silent",
             placeholder_message="placeholder",
+            scene_context="ctx",
+            neuro_url="http://fake",
         )
 
     async def asyncTearDown(self):
@@ -135,6 +142,33 @@ class TestPriorityQueue(unittest.IsolatedAsyncioTestCase):
         picked = await self.loop._pick(self.settings, self.session)
         self.assertEqual(picked["kind"], "placeholder")
         self.assertEqual(picked["body"], "placeholder")
+
+    async def test_empty_queue_renders_placeholder_as_messages_block(self):
+        """空队列不再走独立模板：{{messages}} 直接换成 placeholder_message。"""
+        self.settings.empty_queue_behavior = "placeholder"
+        self.settings.placeholder_message = "Nobody is talking. Start a topic yourself."
+        self.session["rounds"] = 0
+        captured: dict[str, str] = {}
+
+        class _CapturingClient(_FakeNeuroClient):
+            async def chat(self, channel: str, conversation_id: str, text: str):
+                captured["text"] = text
+                async for ev in super().chat(channel, conversation_id, text):
+                    yield ev
+
+        with patch("neuro_simulator.stream.loop.NeuroClient", _CapturingClient):
+            await self.loop._run_round(self.settings, self.session)
+
+        text = captured["text"]
+        self.assertIn("Recent viewer messages:", text)
+        self.assertIn("Nobody is talking. Start a topic yourself.", text)
+        self.assertNotIn("{{", text)
+        # 占位轮不推进 cursor
+        self.assertEqual(self.session["cursor"], 0)
+
+    async def test_only_two_message_templates(self):
+        names = [t["name"] for t in self.templates.list()]
+        self.assertEqual(names, ["neuro_user", "chatbot_user"])
 
     async def test_mirrors_all_tool_events_without_filtering(self):
         await self.storage.append_message(self.queue_row, "viewer", "do a trick")

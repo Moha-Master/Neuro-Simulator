@@ -15,11 +15,18 @@ declare module 'vue' {
     ChatInput: typeof import('./components/chat/ChatInput.vue')['default']
     ChatMessage: typeof import('./components/chat/ChatMessage.vue')['default']
     ChatSidebar: typeof import('./components/chat/ChatSidebar.vue')['default']
+    CoreMemoryList: typeof import('./components/persona/CoreMemoryList.vue')['default']
     ModuleOffline: typeof import('./components/ModuleOffline.vue')['default']
+    PromptEditor: typeof import('./components/persona/PromptEditor.vue')['default']
     RouterLink: typeof import('vue-router')['RouterLink']
     RouterView: typeof import('vue-router')['RouterView']
     ShortTermMemoryPanel: typeof import('./components/ShortTermMemoryPanel.vue')['default']
+    TagInput: typeof import('./components/tags/TagInput.vue')['default']
     ThinkingBlock: typeof import('./components/chat/ThinkingBlock.vue')['default']
     ToolCallBlock: typeof import('./components/chat/ToolCallBlock.vue')['default']
+    TwitchChannelInfo: typeof import('./components/twitch/TwitchChannelInfo.vue')['default']
+    TwitchChatPanel: typeof import('./components/twitch/TwitchChatPanel.vue')['default']
+    TwitchIcon: typeof import('./components/twitch/TwitchIcon.vue')['default']
+    TwitchOfflinePanel: typeof import('./components/twitch/TwitchOfflinePanel.vue')['default']
   }
 }

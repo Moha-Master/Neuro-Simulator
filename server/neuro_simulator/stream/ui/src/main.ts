@@ -81,7 +81,9 @@ async function boot(): Promise<void> {
     // 聊天层：重连时用 snapshot 的最近记录整体恢复；无场次则清空
     if (snap.chat?.length) chat.replace(snap.chat);
     else chat.clear();
-    if (snap.state === "offline") highlight.clear();
+    if (snap.state === "offline") {
+      highlight.clear();
+    }
     if (snap.scene === "intro" && snap.state === "starting") {
       // 中途连上：按已过时长续播开场序列（视频 seek 到断点；已过片尾则只升起立绘）
       void runIntro(Number(snap.intro_elapsed ?? 0));
@@ -103,7 +105,7 @@ async function boot(): Promise<void> {
 
   feed.on("intro", () => void runIntro());
   // 新场次开始：清掉上一场残留字幕（intro 由独立 intro 事件驱动）
-  feed.on("session_begin", () => {
+  feed.on("session_begin", (ev: FeedEvent) => {
     abortIntro();
     player.clear();
     chat.clear();

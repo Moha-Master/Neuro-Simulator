@@ -7,6 +7,9 @@
                                                                可选 type/value 进优先轨）
 - GET  /queues/{queue_id}/messages                            历史场次队列（按 queue_id 读）
 - POST /scene                                                 手动切场景（→ 广播 scene_set）
+- GET  /stream/metadata 由 PUT /stream/metadata 修改（标题/分区，→ 广播 stream_metadata）
+- /manage/chatbot/persona*：chatbot 的 prompt 模板 + core memory（人工编辑，存 stream DB）
+- /manage/templates*：stream 拼给 neuro / chatbot 的 user message 模板（人工编辑 + 预览）
 - GET  /ui/events（SSE）：snapshot（含最近聊天） + 循环/控制/聊天事件只读镜像
 - POST /ui/report：UI 上行回报（intro_done → 开播闸门）
 - /ui：直播画面静态托管（Vite 构建产物）
@@ -16,6 +19,7 @@
 
 import asyncio
 import json
+import time
 from contextlib import asynccontextmanager
 from typing import Any
 
@@ -26,9 +30,13 @@ from pydantic import BaseModel
 
 from ..broadcaster import EventBroadcaster
 from ..config import get_config, module_url
+from ..persona import PersonaError
+from ..templates import TemplateError
 from . import media
+from . import settings as stream_settings
 from .loop import StreamConflict, StreamLoop
 from .neuro_client import NeuroClient
+from .persona import CHATBOT_PLACEHOLDERS, ChatbotPersonaStore, build_template_store, stream_info_line
 from .storage import Storage
 
 
@@ -39,6 +47,44 @@ class MessagePayload(BaseModel):
     # 不传 type = 普通观众消息。
     type: str | None = None
     value: int = 0
+
+
+class StartPayload(BaseModel):
+    """开播参数（全部可选）：缺省用 config 的 stream 默认值。"""
+
+    title: str | None = None
+    category: str | None = None
+    tags: list[str] | None = None
+
+
+class MetadataPayload(BaseModel):
+    """本场信息（直播中可改）。None 表示该字段不动，空串/空数组表示清空。"""
+
+    title: str | None = None
+    category: str | None = None
+    tags: list[str] | None = None
+
+
+class PromptPayload(BaseModel):
+    content: str
+
+
+class ChatbotPreviewPayload(BaseModel):
+    content: str | None = None  # 可选：预览未保存的草稿
+
+
+class CoreMemoryPayload(BaseModel):
+    title: str
+    content: str
+
+
+class TemplatePayload(BaseModel):
+    content: str
+
+
+class TemplatePreviewPayload(BaseModel):
+    content: str | None = None  # 可选：预览未保存的草稿
+    messages: int = 3           # 预览样例：取队列里最近 N 条观众消息
 
 
 class ScenePayload(BaseModel):
@@ -54,17 +100,80 @@ def _sse(event: str, data: dict) -> str:
     return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
 
 
+def _prompt_info(persona) -> dict:
+    return {
+        "content": persona.prompt,
+        "updated_at": persona.prompt_updated_at,
+        "is_default": persona.is_default_prompt,
+    }
+
+
+def _core_block_dict(block) -> dict:
+    return {
+        "id": block.id,
+        "title": block.title,
+        "content": block.content,
+        "created_at": block.created_at,
+        "updated_at": block.updated_at,
+    }
+
+
+def _core_stats(persona) -> dict:
+    return {
+        "core": {
+            "blocks": persona.list_core(),
+            "count": len(persona.blocks),
+            "used": persona.core_used,
+            "is_default": persona.is_default_core,
+        }
+    }
+
+
+async def _template_vars(app: FastAPI, lp: StreamLoop, sample_messages: int) -> dict:
+    """构造一次模板渲染的变量：优先用当前场次真实上下文，无场次时用样例值。"""
+    s = stream_settings.load()
+    title, category = lp.session_metadata()
+    tpl_vars = {
+        "scene_context": s.scene_context,
+        "datetime": time.strftime("%a %Y-%m-%d %H:%M:%S"),
+        "stream_info": stream_info_line(title, category),
+        "title": title,
+        "category": category,
+        "scene": lp.last_scene or "room",
+        "round": str((lp.session or {}).get("rounds", 0) + 1),
+        "neuro_status": lp.chatbot.describe_status(),
+    }
+    if lp.session:
+        msgs = await app.state.storage.recent_messages(
+            lp.session["queue_row"], max(1, min(sample_messages, 20))
+        )
+        # 与真实循环一致：没有消息时 {{messages}} 就是 placeholder_message
+        tpl_vars["messages"] = (
+            "\n".join(f"- {m['username']}: {m['content']}" for m in msgs)
+            or s.placeholder_message
+        )
+    else:
+        tpl_vars["messages"] = "- pogger_99: hello neuro\n- kappa_fan: 9+10?"
+    return tpl_vars
+
+
 def create_app() -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         cfg = get_config()
         storage = Storage(cfg.WORKDIR / "stream" / "data.db")
         await storage.init()
+        persona = ChatbotPersonaStore(storage)
+        await persona.load()
+        templates = build_template_store(storage)
+        await templates.load()
         bus = EventBroadcaster()
-        loop = StreamLoop(storage, bus)
+        loop = StreamLoop(storage, bus, persona, templates)
         app.state.storage = storage
         app.state.bus = bus
         app.state.loop = loop
+        app.state.persona = persona
+        app.state.templates = templates
         # 进程重启后的遗留场次兜底：进行中记录标记为 offline
         stale = await storage.get_active_session()
         if stale:
@@ -95,6 +204,23 @@ def create_app() -> FastAPI:
             "session_id": lp.session["session_id"] if lp.session else None,
             "conversation_id": lp.session["conversation_id"] if lp.session else None,
             "ui_subscribers": app.state.bus.subscriber_count,
+            "chatbot": {
+                **app.state.persona.stats(),
+                "in_flight": lp.chatbot.in_flight,
+            },
+        }
+
+    async def _chatbot_status(lp: StreamLoop) -> dict:
+        cb = stream_settings.load().chatbot
+        return {
+            "enabled": cb.enabled,
+            "model": cb.model or None,
+            "model_ref": cb.model_ref or None,
+            "interval_s": cb.interval_s,
+            "count": cb.count,
+            "max_concurrent": cb.max_concurrent,
+            "interval_jitter": cb.interval_jitter,
+            "in_flight": lp.chatbot.in_flight,
         }
 
     @app.get("/stream/status")
@@ -110,13 +236,23 @@ def create_app() -> FastAPI:
             priority_depth = await storage.priority_depth_after(
                 lp.session["queue_row"], lp.session["priority_cursor"]
             )
+        title, category = lp.session_metadata()
+        tags = lp.session_tags()
         return {
             "state": lp.state,
             "session": lp.session and {k: lp.session[k] for k in (
-                "session_id", "queue_id", "channel", "conversation_id", "cursor", "priority_cursor"
+                "session_id", "queue_id", "channel", "conversation_id", "cursor",
+                "priority_cursor", "title", "category", "tags",
             )},
+            "metadata": {
+                "title": title,
+                "category": category,
+                "tags": tags,
+                "live": lp.session is not None,
+            },
             "queue_depth_unconsumed": depth,
             "priority_queue_depth_unconsumed": priority_depth,
+            "chatbot": await _chatbot_status(lp),
             "persisted": active or (recent[0] if recent else None),
         }
 
@@ -170,9 +306,38 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=409, detail=str(e))
 
     @app.post("/stream/start")
-    async def stream_start():
-        session = await _guard(_loop().start())
-        return {"status": "starting", "session": session["session_id"], "queue": session["queue_id"]}
+    async def stream_start(payload: StartPayload = StartPayload()):
+        title = None if payload.title is None else str(payload.title)
+        category = None if payload.category is None else str(payload.category)
+        try:
+            tags = None if payload.tags is None else stream_settings.normalize_tags(payload.tags)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        session = await _guard(_loop().start(title, category, tags))
+        return {
+            "status": "starting",
+            "session": session["session_id"],
+            "queue": session["queue_id"],
+            "title": session.get("title", ""),
+            "category": session.get("category", ""),
+            "tags": session.get("tags", []),
+        }
+
+    @app.put("/stream/metadata")
+    async def stream_metadata(payload: MetadataPayload):
+        """直播中修改本场标题/分区/标签（→ 广播 stream_metadata，下一轮消息即生效）。"""
+        try:
+            tags = None if payload.tags is None else stream_settings.normalize_tags(payload.tags)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        meta = await _guard(
+            _loop().set_metadata(
+                title=payload.title,
+                category=payload.category,
+                tags=tags,
+            )
+        )
+        return {"status": "ok", **meta}
 
     @app.post("/stream/pause")
     async def stream_pause():
@@ -248,6 +413,146 @@ def create_app() -> FastAPI:
         _loop().on_scene(payload.id)
         return {"status": "ok", "scene": payload.id}
 
+    # ---------- /manage：chatbot 人设（prompt 模板 + core memory） ----------
+
+    @app.get("/manage/chatbot/persona")
+    async def manage_chatbot_persona():
+        persona: ChatbotPersonaStore = app.state.persona
+        cb = stream_settings.load().chatbot
+        return {
+            "prompt": {
+                "content": persona.prompt,
+                "updated_at": persona.prompt_updated_at,
+                "is_default": persona.is_default_prompt,
+            },
+            **_core_stats(persona),
+            "placeholders": CHATBOT_PLACEHOLDERS,
+            "count": cb.count,
+        }
+
+    @app.put("/manage/chatbot/persona/prompt")
+    async def manage_chatbot_save_prompt(payload: PromptPayload):
+        persona: ChatbotPersonaStore = app.state.persona
+        try:
+            await persona.save_prompt(payload.content)
+        except PersonaError as e:
+            raise HTTPException(status_code=e.status, detail=e.message) from e
+        print(f"[stream] chatbot prompt saved ({len(persona.prompt)} chars)", flush=True)
+        return {"status": "ok", "prompt": _prompt_info(persona)}
+
+    @app.post("/manage/chatbot/persona/prompt/reset")
+    async def manage_chatbot_reset_prompt():
+        persona: ChatbotPersonaStore = app.state.persona
+        await persona.reset_prompt()
+        print("[stream] chatbot prompt reset to default", flush=True)
+        return {"status": "ok", "prompt": _prompt_info(persona)}
+
+    @app.post("/manage/chatbot/persona/reset")
+    async def manage_chatbot_reset_persona():
+        """chatbot prompt + core memory 一起恢复内置默认。"""
+        persona: ChatbotPersonaStore = app.state.persona
+        await persona.reset_all()
+        print("[stream] chatbot persona reset to default", flush=True)
+        return {"status": "ok", "prompt": _prompt_info(persona), **_core_stats(persona)}
+
+    @app.post("/manage/chatbot/persona/preview")
+    async def manage_chatbot_preview(payload: ChatbotPreviewPayload):
+        """用当前 count 编译 chatbot 的 system prompt（可传未保存草稿）。"""
+        persona: ChatbotPersonaStore = app.state.persona
+        cb = stream_settings.load().chatbot
+        return persona.preview_prompt(cb.count, payload.content)
+
+    @app.post("/manage/chatbot/persona/core-memories")
+    async def manage_chatbot_add_core(payload: CoreMemoryPayload):
+        persona: ChatbotPersonaStore = app.state.persona
+        try:
+            block = await persona.add_core(payload.title, payload.content)
+        except PersonaError as e:
+            raise HTTPException(status_code=e.status, detail=e.message) from e
+        print(f"[stream] chatbot core memory added: {block.title}", flush=True)
+        return {"status": "ok", "block": _core_block_dict(block), **_core_stats(persona)}
+
+    @app.put("/manage/chatbot/persona/core-memories/{block_id}")
+    async def manage_chatbot_update_core(block_id: int, payload: CoreMemoryPayload):
+        persona: ChatbotPersonaStore = app.state.persona
+        try:
+            block = await persona.update_core(block_id, payload.title, payload.content)
+        except PersonaError as e:
+            raise HTTPException(status_code=e.status, detail=e.message) from e
+        print(f"[stream] chatbot core memory updated: {block.title}", flush=True)
+        return {"status": "ok", "block": _core_block_dict(block), **_core_stats(persona)}
+
+    @app.delete("/manage/chatbot/persona/core-memories/{block_id}")
+    async def manage_chatbot_delete_core(block_id: int):
+        persona: ChatbotPersonaStore = app.state.persona
+        try:
+            await persona.delete_core(block_id)
+        except PersonaError as e:
+            raise HTTPException(status_code=e.status, detail=e.message) from e
+        print(f"[stream] chatbot core memory deleted: {block_id}", flush=True)
+        return {"status": "ok", "deleted": True, **_core_stats(persona)}
+
+    @app.post("/manage/chatbot/persona/core-memories/reset")
+    async def manage_chatbot_reset_core():
+        persona: ChatbotPersonaStore = app.state.persona
+        await persona.reset_core()
+        print(f"[stream] chatbot core memory reset ({len(persona.blocks)} blocks)", flush=True)
+        return {"status": "ok", **_core_stats(persona)}
+
+    # ---------- /manage：消息模板（stream 拼给 neuro / chatbot 的 user message） ----------
+
+    @app.get("/manage/templates")
+    async def manage_list_templates():
+        templates = app.state.templates
+        lp = _loop()
+        title, category = lp.session_metadata()
+        return {
+            "templates": templates.list(),
+            "context": {
+                "title": title,
+                "category": category,
+                "live": lp.session is not None,
+                "scene": lp.last_scene,
+                "rounds": (lp.session or {}).get("rounds", 0),
+            },
+        }
+
+    @app.put("/manage/templates/{name}")
+    async def manage_save_template(name: str, payload: TemplatePayload):
+        templates = app.state.templates
+        try:
+            await templates.save(name, payload.content)
+        except TemplateError as e:
+            raise HTTPException(status_code=e.status, detail=e.message) from e
+        print(f"[stream] template saved: {name}", flush=True)
+        return {"status": "ok", "templates": templates.list()}
+
+    @app.post("/manage/templates/{name}/reset")
+    async def manage_reset_template(name: str):
+        templates = app.state.templates
+        try:
+            await templates.reset(name)
+        except TemplateError as e:
+            raise HTTPException(status_code=e.status, detail=e.message) from e
+        print(f"[stream] template reset: {name}", flush=True)
+        return {"status": "ok", "templates": templates.list()}
+
+    @app.post("/manage/templates/{name}/preview")
+    async def manage_preview_template(name: str, payload: TemplatePreviewPayload):
+        """用当前场次上下文（可含未保存草稿）渲染一次，看到实际会发出去的内容。"""
+        templates = app.state.templates
+        lp = _loop()
+        vars = await _template_vars(app, lp, payload.messages)
+        if payload.content is not None:
+            try:
+                templates.spec(name)  # 未知模板 → 404
+            except TemplateError as e:
+                raise HTTPException(status_code=e.status, detail=e.message) from e
+        try:
+            return templates.preview(name, vars, payload.content)
+        except TemplateError as e:
+            raise HTTPException(status_code=e.status, detail=e.message) from e
+
     # ---------- /ui 画面事件通道 ----------
 
     @app.get("/ui/events")
@@ -266,10 +571,16 @@ def create_app() -> FastAPI:
                             "session_id", "queue_id", "channel", "conversation_id"
                         )
                     }
+                title, category = lp.session_metadata()
                 snapshot = {
                     "state": lp.state,
                     "scene": lp.last_scene,
                     "session": session_info,
+                    "metadata": {
+                        "title": title,
+                        "category": category,
+                        "tags": lp.session_tags(),
+                    },
                 }
                 # 中途连接的续播依据：intro 已过时长 / 当前轮 speech 时间线
                 ie = lp.intro_elapsed()

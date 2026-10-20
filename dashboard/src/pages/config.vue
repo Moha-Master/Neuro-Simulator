@@ -179,7 +179,13 @@
                           />
                         </v-col>
                         <v-col cols="12">
-                          <v-textarea v-model="cfg.stream.placeholder_message" label="Placeholder message" variant="outlined" density="compact" rows="1" auto-grow />
+                          <v-textarea v-model="cfg.stream.placeholder_message" label="Placeholder message（空队列时作为 {{ '{{messages}}' }} 的内容）" variant="outlined" density="compact" rows="1" auto-grow />
+                        </v-col>
+                        <v-col cols="12" sm="6"><v-text-field v-model="cfg.stream.default_title" label="默认直播标题（开播初值）" variant="outlined" density="compact" /></v-col>
+                        <v-col cols="12" sm="6"><v-text-field v-model="cfg.stream.default_category" label="默认分区（开播初值）" variant="outlined" density="compact" /></v-col>
+                        <v-col cols="12">
+                          <div class="text-caption text-medium-emphasis mb-1">默认标签（开播初值，Twitch tags）</div>
+                          <TagInput v-model="cfg.stream.default_tags" />
                         </v-col>
                       </v-row>
 
@@ -206,12 +212,24 @@
                             <v-col cols="6" sm="2"><v-text-field v-model.number="cfg.stream.chatbot.interval_s" label="Interval (s)" type="number" step="any" variant="outlined" density="compact" /></v-col>
                             <v-col cols="6" sm="2"><v-text-field v-model.number="cfg.stream.chatbot.count" label="每次条数" type="number" variant="outlined" density="compact" /></v-col>
                             <v-col cols="6" sm="2"><v-text-field v-model.number="cfg.stream.chatbot.neuro_sleep_timeout_s" label="Sleep 判定 (s)" type="number" step="any" variant="outlined" density="compact" /></v-col>
+                            <v-col cols="6" sm="2"><v-text-field v-model.number="cfg.stream.chatbot.max_concurrent" label="并发上限" type="number" variant="outlined" density="compact" /></v-col>
+                            <v-col cols="6" sm="2"><v-text-field v-model.number="cfg.stream.chatbot.interval_jitter" label="间隔抖动" type="number" step="0.05" variant="outlined" density="compact" /></v-col>
                             <v-col cols="12">
-                              <v-textarea
-                                v-model="cfg.stream.chatbot.system_prompt"
-                                label="System prompt（{count} 为占位符；留空用内置默认）"
-                                variant="outlined" density="compact" rows="2" auto-grow
-                              />
+                              <v-alert type="info" variant="tonal" density="compact">
+                                <div class="d-flex align-center flex-wrap ga-2">
+                                  <span>
+                                    Chatbot 的 prompt 与 core memory 已移至数据库（仅人工编辑）；
+                                    并发调度按 interval_s 排程，响应慢不会拖慢节奏。
+                                  </span>
+                                  <v-spacer />
+                                  <v-btn size="small" variant="text" color="primary" to="/stream-chatbot">
+                                    打开 Chatbot 人设
+                                  </v-btn>
+                                  <v-btn size="small" variant="text" to="/stream-templates">
+                                    消息模板
+                                  </v-btn>
+                                </div>
+                              </v-alert>
                             </v-col>
                           </v-row>
                         </v-card-text>
@@ -392,6 +410,7 @@
 <script lang="ts" setup>
 import { ref, computed, onMounted } from 'vue'
 import { api, ApiError } from '@/stores/connection'
+import TagInput from '@/components/tags/TagInput.vue'
 
 // ---------- 类型 ----------
 interface LLMEntry {
@@ -481,11 +500,16 @@ const normalize = (doc: Record<string, any>) => {
   s.round_gap_ms = s.round_gap_ms ?? 1500
   s.empty_queue_behavior = s.empty_queue_behavior ?? 'placeholder'
   s.placeholder_message = s.placeholder_message ?? 'No new messages. Say something to your viewers!'
+  s.default_title = s.default_title ?? 'AI VTuber chatting with chat!'
+  s.default_category = s.default_category ?? 'Just Chatting'
+  s.default_tags = Array.isArray(s.default_tags) ? s.default_tags : []
   s.chatbot = s.chatbot || {}
   const c = s.chatbot
+  delete c.system_prompt // 已迁移到数据库（Stream → Chatbot 页），旧配置键不再保留
   c.enabled = c.enabled ?? true
   c.model = c.model ?? ''
-  c.system_prompt = c.system_prompt ?? ''
+  c.max_concurrent = c.max_concurrent ?? 3
+  c.interval_jitter = c.interval_jitter ?? 0.2
   c.interval_s = c.interval_s ?? 10
   c.count = c.count ?? 3
   c.neuro_sleep_timeout_s = c.neuro_sleep_timeout_s ?? 45

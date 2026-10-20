@@ -12,6 +12,7 @@
     "lint": "eslint . --fix"
   },
   "dependencies": {
+    "@fontsource/inter": "^5.3.0",
     "@fontsource/roboto": "5.2.7",
     "@mdi/font": "7.4.47",
     "highlight.js": "^11.12.0",

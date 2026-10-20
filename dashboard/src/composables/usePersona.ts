@@ -9,16 +9,17 @@ import type {
   PromptInfo,
 } from '@/types/persona'
 
-const MODULE = 'neuro_sama'
-const BASE = `/manage/${MODULE}/manage/persona`
-
-export function usePersona() {
+/** 人设（prompt 模板 + core memory）读写。
+ * base 决定操作哪个人设：neuro 的 /manage/persona 或 stream 的
+ * /manage/chatbot/persona —— 两端协议完全一致，共用这一份实现。 */
+export function usePersona(base = '/manage/neuro_sama/manage/persona') {
   const prompt = ref<PromptInfo>({ content: '', updated_at: '', is_default: false })
   const blocks = ref<CoreMemoryBlock[]>([])
   const placeholders = ref<PlaceholderInfo[]>([])
   const coreCount = ref(0)
   const coreUsed = ref(0)
   const coreIsDefault = ref(false)
+  const count = ref(0) // chatbot 侧附带：本轮生成条数（neuro 侧为 0）
   const isLoading = ref(false)
   const busy = ref(false)
   const error = ref('')
@@ -34,10 +35,11 @@ export function usePersona() {
     isLoading.value = true
     error.value = ''
     try {
-      const data = await api<PersonaData>(BASE)
+      const data = await api<PersonaData>(base)
       prompt.value = data.prompt
       applyCore(data.core)
       placeholders.value = data.placeholders
+      count.value = data.count ?? 0
     } catch (e) {
       error.value = '加载 Persona 失败: ' + describeError(e)
     } finally {
@@ -49,7 +51,7 @@ export function usePersona() {
     error.value = ''
     busy.value = true
     try {
-      const data = await api<{ prompt: PromptInfo }>(`${BASE}/prompt`, {
+      const data = await api<{ prompt: PromptInfo }>(`${base}/prompt`, {
         method: 'PUT',
         body: JSON.stringify({ content }),
       })
@@ -67,7 +69,7 @@ export function usePersona() {
     error.value = ''
     busy.value = true
     try {
-      const data = await api<{ prompt: PromptInfo }>(`${BASE}/prompt/reset`, {
+      const data = await api<{ prompt: PromptInfo }>(`${base}/prompt/reset`, {
         method: 'POST',
       })
       prompt.value = data.prompt
@@ -84,7 +86,7 @@ export function usePersona() {
     error.value = ''
     busy.value = true
     try {
-      const data = await api<{ core: CoreInfo }>(`${BASE}/core-memories/reset`, {
+      const data = await api<{ core: CoreInfo }>(`${base}/core-memories/reset`, {
         method: 'POST',
       })
       applyCore(data.core)
@@ -101,7 +103,7 @@ export function usePersona() {
     error.value = ''
     busy.value = true
     try {
-      const data = await api<{ prompt: PromptInfo; core: CoreInfo }>(`${BASE}/reset`, {
+      const data = await api<{ prompt: PromptInfo; core: CoreInfo }>(`${base}/reset`, {
         method: 'POST',
       })
       prompt.value = data.prompt
@@ -118,7 +120,7 @@ export function usePersona() {
   async function preview(content?: string): Promise<PreviewResult | null> {
     error.value = ''
     try {
-      return await api<PreviewResult>(`${BASE}/preview`, {
+      return await api<PreviewResult>(`${base}/preview`, {
         method: 'POST',
         body: JSON.stringify(content === undefined ? {} : { content }),
       })
@@ -132,7 +134,7 @@ export function usePersona() {
     error.value = ''
     busy.value = true
     try {
-      const data = await api<{ block: CoreMemoryBlock; core: CoreInfo }>(`${BASE}/core-memories`, {
+      const data = await api<{ block: CoreMemoryBlock; core: CoreInfo }>(`${base}/core-memories`, {
         method: 'POST',
         body: JSON.stringify({ title, content }),
       })
@@ -151,7 +153,7 @@ export function usePersona() {
     busy.value = true
     try {
       const data = await api<{ block: CoreMemoryBlock; core: CoreInfo }>(
-        `${BASE}/core-memories/${id}`,
+        `${base}/core-memories/${id}`,
         { method: 'PUT', body: JSON.stringify({ title, content }) },
       )
       applyCore(data.core)
@@ -168,7 +170,7 @@ export function usePersona() {
     error.value = ''
     busy.value = true
     try {
-      const data = await api<{ core: CoreInfo }>(`${BASE}/core-memories/${id}`, {
+      const data = await api<{ core: CoreInfo }>(`${base}/core-memories/${id}`, {
         method: 'DELETE',
       })
       applyCore(data.core)
@@ -188,6 +190,7 @@ export function usePersona() {
     coreCount,
     coreUsed,
     coreIsDefault,
+    count,
     isLoading,
     busy,
     error,

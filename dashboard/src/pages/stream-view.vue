@@ -1,6 +1,12 @@
+<route lang="json">
+{
+  "meta": { "fullBleed": true }
+}
+</route>
+
 <template>
-  <div class="stream-view-page">
-    <div v-if="!status.checked.value" class="stream-loading">
+  <div class="twitch-shell" :class="isDark ? 'tw-dark' : 'tw-light'">
+    <div v-if="!status.checked.value" class="twitch-loading">
       <v-progress-circular indeterminate size="48" width="4" />
     </div>
 
@@ -10,283 +16,257 @@
       :on-started="status.check"
     />
 
-    <div v-else class="stream-view-layout">
-      <!-- 主体：嵌入直播画面（经 vedal 同源代理 /manage/stream/ui/ → stream /ui/） -->
-      <div class="stream-view-stage">
-        <iframe
-          :src="uiUrl"
-          class="stream-view-frame"
-          allow="autoplay"
-          title="Neuro-Sama Stream"
+    <div v-else class="twitch-watch">
+      <!-- 左列：播放器自适应剩余高度（画面在 iframe 内自行 letterbox），
+           频道信息恒显其下，整页无滚动条（Twitch 首屏模型） -->
+      <div class="twitch-watch__main">
+        <TwitchOfflinePanel v-if="isOffline" />
+        <div v-else class="twitch-player">
+          <iframe
+            :src="uiUrl"
+            class="twitch-player__iframe"
+            allow="autoplay"
+            title="Neuro-Sama Stream"
+          />
+        </div>
+
+        <TwitchChannelInfo
+          :title="title"
+          :category="category"
+          :tags="tags"
+          :state="state"
+          :started-at="startedAt"
         />
       </div>
 
-      <!-- 右侧栏：观众消息队列 + 发送 -->
-      <div class="stream-view-side">
-        <div class="d-flex align-center pa-3 pb-1">
-          <div class="text-subtitle-2">Viewer Queue</div>
-          <v-spacer />
-          <v-chip size="x-small" :color="st.queueActive.value ? 'success' : 'grey'" variant="tonal">
-            {{ st.queueActive.value ? '进行中' : '无场次' }}
-          </v-chip>
-        </div>
-        <div v-if="st.error.value" class="px-3">
-          <v-alert type="error" variant="tonal" density="compact" closable @click:close="st.error.value = ''">
-            {{ st.error.value }}
-          </v-alert>
-        </div>
+      <!-- 右列：Twitch 聊天栏（旧 client 离线时整个聊天侧栏隐藏） -->
+      <TwitchChatPanel
+        v-if="!isOffline"
+        v-model:collapsed="chatCollapsed"
+        :messages="chatMessages"
+        :active="chatActive"
+        :connected="chatConnected"
+        :send="sendMessage"
+      />
 
-        <div ref="listEl" class="queue-list">
-          <div v-if="!st.messages.value.length" class="queue-empty">
-            {{ st.queueActive.value ? '队列为空——发送消息开始与 Neuro 对话' : '开始直播后队列可用' }}
-          </div>
-          <div
-            v-for="m in st.messages.value"
-            :key="m.id"
-            class="queue-item"
-            :class="{ 'queue-item--priority': m.priority_type }"
-          >
-            <div class="d-flex align-center">
-              <span class="queue-item__user">{{ m.username }}</span>
-              <v-chip
-                v-if="m.priority_type"
-                size="x-small"
-                :color="m.priority_type === 'bits' ? 'deep-purple' : 'pink'"
-                variant="flat"
-                class="ml-2"
-              >
-                {{ m.value }} {{ m.priority_type }}
-              </v-chip>
-              <v-spacer />
-              <span class="queue-item__time">{{ m.created_at.slice(11, 16) }}</span>
-            </div>
-            <div class="queue-item__content">{{ m.content }}</div>
-          </div>
-        </div>
-
-        <v-divider />
-        <div class="pa-3">
-          <v-text-field
-            v-model="username"
-            label="username"
-            variant="outlined"
-            density="compact"
-            hide-details
-            class="mb-2"
-            :disabled="!st.queueActive.value"
-          />
-          <v-switch
-            v-model="priority"
-            label="优先消息"
-            density="compact"
-            hide-details
-            color="deep-purple"
-            :disabled="!st.queueActive.value"
-            class="mb-2"
-          />
-          <!-- 类型切换：Bits/Points 按钮组（配色与直播画面弹窗一致），测试时一键换型 -->
-          <div v-if="priority" class="d-flex align-center gap-2 mb-2">
-            <v-btn-toggle
-              v-model="priorityType"
-              density="compact"
-              divided
-              :color="priorityType === 'bits' ? 'deep-purple' : 'pink'"
-              :disabled="!st.queueActive.value"
-            >
-              <v-btn value="bits" size="small">Bits</v-btn>
-              <v-btn value="points" size="small">Points</v-btn>
-            </v-btn-toggle>
-            <v-text-field
-              v-model.number="priorityValue"
-              type="number"
-              min="1"
-              label="value"
-              density="compact"
-              variant="outlined"
-              hide-details
-              style="max-width: 110px"
-            />
-          </div>
-          <div class="d-flex gap-2">
-            <v-text-field
-              v-model="content"
-              placeholder="发送观众消息…"
-              variant="outlined"
-              density="compact"
-              hide-details
-              :disabled="!st.queueActive.value"
-              @keydown.enter.prevent="send"
-            />
-            <v-btn
-              color="primary"
-              icon="mdi-send"
-              :disabled="!canSend"
-              :loading="sending"
-              @click="send"
-            />
-          </div>
-        </div>
-      </div>
+      <!-- 折叠后的展开按钮（浮在播放器右上角） -->
+      <button
+        v-if="chatCollapsed && !isOffline"
+        class="twitch-expand-chat"
+        type="button"
+        title="展开聊天"
+        @click="chatCollapsed = false"
+      >
+        <TwitchIcon name="showChat" :size="20" />
+      </button>
     </div>
+
+    <v-snackbar v-model="snackbar" :timeout="4000" color="error" location="bottom">
+      {{ snackbarText }}
+    </v-snackbar>
   </div>
 </template>
 
 <script lang="ts" setup>
-import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import { useTheme } from 'vuetify'
+import ModuleOffline from '@/components/ModuleOffline.vue'
+import TwitchChannelInfo from '@/components/twitch/TwitchChannelInfo.vue'
+import TwitchChatPanel from '@/components/twitch/TwitchChatPanel.vue'
+import TwitchIcon from '@/components/twitch/TwitchIcon.vue'
+import TwitchOfflinePanel from '@/components/twitch/TwitchOfflinePanel.vue'
+import { useChatIdentity } from '@/composables/chatIdentity'
 import { useModuleStatus } from '@/composables/useModuleStatus'
 import { useStream } from '@/composables/useStream'
-import ModuleOffline from '@/components/ModuleOffline.vue'
+import { useStreamChat } from '@/composables/useStreamChat'
 
 const status = useModuleStatus('stream')
-const st = useStream()
+const theme = useTheme()
+
+const { status: streamStatus, error: streamError, refreshStatus, postMessage } = useStream()
+const {
+  messages: chatMessages,
+  state: chatState,
+  metadata: chatMetadata,
+  connected: chatConnected,
+  active: chatSessionActive,
+} = useStreamChat()
+const { username: chatUsername } = useChatIdentity()
 
 const uiUrl = '/manage/stream/ui/'
-const username = ref('viewer')
-const content = ref('')
-const sending = ref(false)
-const listEl = ref<HTMLElement | null>(null)
 
-const priority = ref(false)
-const priorityType = ref<'bits' | 'points'>('bits')
-const priorityValue = ref(100)
+const isDark = computed(() => theme.global.current.value.dark)
 
-const canSend = computed(() => {
-  if (!st.queueActive.value || !content.value.trim()) return false
-  if (priority.value && Number(priorityValue.value) < 1) return false
-  return true
-})
+const state = computed(() => chatState.value || streamStatus.value?.state || 'offline')
+const isOffline = computed(() => state.value === 'offline')
 
-let queueTimer: number | null = null
-
-async function pollQueue() {
-  // 无进行中场次时不请求队列（避免注定 409 的请求刷屏控制台）
-  if (st.status.value?.state === 'offline') {
-    st.resetQueue()
-    return
-  }
-  await st.pollQueue()
-  await nextTick()
-  const el = listEl.value
-  if (el) el.scrollTop = el.scrollHeight
-}
-
-function startTimers() {
-  if (queueTimer !== null) return
-  void (async () => {
-    await st.refreshStatus()
-    await pollQueue()
-  })()
-  queueTimer = window.setInterval(async () => {
-    await st.refreshStatus()
-    await pollQueue()
-  }, 2000)
-}
-
-function stopTimers() {
-  if (queueTimer !== null) {
-    window.clearInterval(queueTimer)
-    queueTimer = null
-  }
-}
-
-async function send() {
-  const text = content.value.trim()
-  if (!text) return
-  sending.value = true
-  const pri = priority.value
-    ? { type: priorityType.value, value: Math.max(1, Math.floor(Number(priorityValue.value) || 1)) }
-    : undefined
-  if (await st.postMessage(username.value.trim() || 'viewer', text, pri)) content.value = ''
-  sending.value = false
-}
-
-watch(
-  () => status.reachable.value,
-  (r) => (r ? startTimers() : stopTimers()),
+const title = computed(
+  () => chatMetadata.value.title || streamStatus.value?.metadata.title || '',
+)
+const category = computed(
+  () => chatMetadata.value.category || streamStatus.value?.metadata.category || 'Just Chatting',
+)
+const tags = computed(() =>
+  chatMetadata.value.tags.length
+    ? chatMetadata.value.tags
+    : (streamStatus.value?.metadata.tags ?? []),
 )
 
-onMounted(() => {
-  if (status.reachable.value) startTimers()
+const startedAt = computed(() => {
+  const persisted = streamStatus.value?.persisted
+  if (!persisted || persisted.state === 'offline') return null
+  return persisted.started_at
 })
-onUnmounted(stopTimers)
+
+const chatActive = computed(
+  () =>
+    chatSessionActive.value ||
+    (Boolean(streamStatus.value?.session) && state.value !== 'offline'),
+)
+
+// 折叠状态与 Twitch 一样持久化
+const COLLAPSE_KEY = 'ns.twitch.chatCollapsed'
+const chatCollapsed = ref(localStorage.getItem(COLLAPSE_KEY) === '1')
+watch(chatCollapsed, (value) => localStorage.setItem(COLLAPSE_KEY, value ? '1' : '0'))
+
+const snackbar = ref(false)
+const snackbarText = ref('')
+
+async function sendMessage(
+  content: string,
+  priority?: { type: 'bits' | 'points'; value: number },
+): Promise<boolean> {
+  const ok = await postMessage(chatUsername.value, content, priority)
+  if (!ok) {
+    snackbarText.value = `发送失败：${streamError.value}`
+    snackbar.value = true
+  }
+  return ok
+}
+
+let statusTimer: number | null = null
+
+onMounted(() => {
+  void refreshStatus()
+  statusTimer = window.setInterval(() => void refreshStatus(), 5000)
+})
+
+onUnmounted(() => {
+  if (statusTimer !== null) window.clearInterval(statusTimer)
+})
 </script>
 
 <style scoped>
-.stream-view-page {
-  height: calc(100vh - 112px);
-  min-height: 480px;
-}
-.stream-loading {
+.twitch-shell {
   display: flex;
-  align-items: center;
-  justify-content: center;
-  min-height: 50vh;
-}
-.stream-view-layout {
-  display: flex;
-  gap: 12px;
-  height: 100%;
-}
-.stream-view-stage {
-  flex: 1 1 auto;
-  min-width: 0;
-  background: #000;
-  border-radius: 8px;
+  flex-direction: column;
+  flex: 1 1 0;
+  min-height: 0;
   overflow: hidden;
+  background: var(--tw-bg-body);
+  color: var(--tw-text);
+}
+
+.twitch-loading {
+  flex: 1;
   display: flex;
   align-items: center;
   justify-content: center;
 }
-.stream-view-frame {
+
+/* Twitch 观看页：左列（播放器 + 信息）+ 右列聊天；两列都不产生整页滚动 */
+.twitch-watch {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-rows: minmax(0, 1fr);
+}
+
+.twitch-watch__main {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  /* 正常窗口内容恰好占满不滚动；极小窗口（离线面板保留旧 client 的
+     500px 下限）时才出现滚动兜底 */
+  overflow-y: auto;
+  overflow-x: hidden;
+  scrollbar-width: thin;
+  scrollbar-color: var(--tw-scrollbar) transparent;
+}
+
+.twitch-watch__main::-webkit-scrollbar {
+  width: 8px;
+}
+
+.twitch-watch__main::-webkit-scrollbar-thumb {
+  background: var(--tw-scrollbar);
+  border-radius: 4px;
+}
+
+/* 播放器占满左列剩余高度；16:9 画面由 stream/ui 的 #stage 在 iframe
+   内部 letterbox（黑边），与 Twitch 播放器容器行为一致 */
+.twitch-player {
+  flex: 1 1 0;
+  min-height: 0;
+  position: relative;
+  background: #000;
+}
+
+.twitch-player__iframe {
+  position: absolute;
+  inset: 0;
   width: 100%;
   height: 100%;
   border: 0;
   background: #000;
 }
-.stream-view-placeholder {
-  color: #888;
-  font-size: 14px;
-}
-.stream-view-side {
-  flex: 0 0 320px;
+
+.twitch-expand-chat {
+  position: absolute;
+  top: 16px;
+  right: 16px;
+  z-index: 5;
   display: flex;
-  flex-direction: column;
-  background: rgb(var(--v-theme-surface));
-  border-radius: 8px;
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  overflow: hidden;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border: 0;
+  border-radius: 50%;
+  background: #333;
+  color: #fff;
+  cursor: pointer;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.4);
 }
-.queue-list {
-  flex: 1 1 auto;
-  overflow-y: auto;
-  padding: 8px 12px;
+
+.twitch-expand-chat:hover {
+  background: #444;
 }
-.queue-empty {
-  color: #888;
-  font-size: 12px;
-  text-align: center;
-  margin-top: 24px;
-}
-.queue-item {
-  margin-bottom: 8px;
-  font-size: 13px;
-  padding: 4px 6px;
-  border-radius: 4px;
-}
-.queue-item--priority {
-  background: rgba(145, 71, 255, 0.08);
-  border-left: 2px solid #b388ff;
-}
-.queue-item__user {
-  color: #b388ff;
-  font-weight: 600;
-}
-.queue-item__time {
-  color: #777;
-  font-size: 11px;
-  margin-left: 6px;
-}
-.queue-item__content {
-  word-break: break-word;
+
+/* 窄屏：聊天栏改为下方 42vh，播放器占满宽度 */
+@media (max-width: 1024px) {
+  .twitch-shell {
+    --tw-sidebar-width: 100%;
+  }
+
+  .twitch-watch {
+    display: flex;
+    flex-direction: column;
+  }
+
+  .twitch-watch__main {
+    flex: 1 1 0;
+    min-height: 0;
+  }
+
+  .twitch-watch > .tw-chat {
+    flex: 0 0 42vh;
+    height: 42vh;
+    border-left: 0;
+    border-top: 1px solid var(--tw-border);
+  }
 }
 </style>
