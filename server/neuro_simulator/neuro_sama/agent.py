@@ -251,6 +251,7 @@ class NeuroAgent:
                 sentence, task = speech_q.popleft()
                 yield {
                     "type": "speech",
+                    "step": step,
                     "index": next(speech_no),
                     "text": sentence,
                     **task.result(),
@@ -263,6 +264,7 @@ class NeuroAgent:
                 result = await task
                 yield {
                     "type": "speech",
+                    "step": step,
                     "index": next(speech_no),
                     "text": sentence,
                     **result,

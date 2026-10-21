@@ -59,6 +59,7 @@ class StreamSettings:
     scene_context: str
     messages_per_round: int
     speech_cooldown_ms: int  # 语音播完后字幕停留 / 下一轮请求等待
+    game_tool_wait_speech: bool  # game 工具执行前等当前语音播完
     empty_queue_behavior: str  # "placeholder" | "silent"
     placeholder_message: str
     default_title: str
@@ -121,6 +122,8 @@ def load() -> StreamSettings:
     raw_cooldown = ns.get("speech_cooldown_ms")
     speech_cooldown_ms = int(raw_cooldown if raw_cooldown is not None else 1000)
     speech_cooldown_ms = max(0, min(speech_cooldown_ms, 60_000))
+    raw_game_wait = ns.get("game_tool_wait_speech", True)
+    game_tool_wait_speech = raw_game_wait if isinstance(raw_game_wait, bool) else True
 
     return StreamSettings(
         neuro_url=neuro_url,
@@ -128,6 +131,7 @@ def load() -> StreamSettings:
         scene_context=str(ns.get("scene_context") or "You are streaming on Twitch now."),
         messages_per_round=int(ns.get("messages_per_round") or 10),
         speech_cooldown_ms=speech_cooldown_ms,
+        game_tool_wait_speech=game_tool_wait_speech,
         empty_queue_behavior=behavior,
         placeholder_message=str(ns.get("placeholder_message") or "No new messages. Say something to your viewers!"),
         default_title=str(ns.get("default_title") or ""),

@@ -24,7 +24,7 @@ import logging
 import random
 import time
 import uuid
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 from ..broadcaster import EventBroadcaster
 from . import media
@@ -75,6 +75,8 @@ class StreamLoop:
         self._task: Optional[asyncio.Task] = None
         self._stop_event = asyncio.Event()
         self._wakeup = asyncio.Event()
+        # game 动作在 stream 内的实际执行串行化（工具请求可能并发到达）
+        self._game_action_lock = asyncio.Lock()
         # intro 场景时间线计时起点（snapshot 供新连接的 UI 续播 intro）
         self._intro_started: Optional[float] = None
         # 当前轮次的 speech 时间线（供 snapshot 断点续播）：
@@ -102,6 +104,7 @@ class StreamLoop:
         for s in self._turn_speech:
             consumed = min(max(now - s["start"], 0.0), s["duration"])
             seg: dict[str, Any] = {
+                "step": s.get("step", 0),
                 "index": s["index"],
                 "text": s["text"],
                 "duration": s["duration"],
@@ -112,6 +115,28 @@ class StreamLoop:
                 seg["mime"] = s.get("mime", "")
             segs.append(seg)
         return {"id": self._turn_id, "active": self._in_turn, "speech": segs}
+
+    async def wait_for_speech_end(self) -> None:
+        """等当前预测的语音时间线播完（game 工具执行前的闸门）。
+
+        用服务端预测的 TTS 时间轴，不依赖任何前端/播放器回报；stop 时立即放行。
+        """
+        while not self._stop_event.is_set():
+            remaining = self._turn_play_head - time.monotonic()
+            if remaining <= 0:
+                return
+            await asyncio.sleep(min(remaining, 0.2))
+
+    async def run_game_action(self, action: Callable[[], dict[str, Any]]) -> dict[str, Any]:
+        """串行执行 game 动作；默认先等语音播完，配置可关闭等待。"""
+        async with self._game_action_lock:
+            try:
+                wait_speech = stream_settings.load().game_tool_wait_speech
+            except RuntimeError:
+                wait_speech = True
+            if wait_speech:
+                await self.wait_for_speech_end()
+            return action()
 
     def ui_settings(self) -> dict[str, Any]:
         """画面端运行参数（snapshot 下发；配置热重载时广播 settings 事件）。"""
@@ -188,6 +213,7 @@ class StreamLoop:
         self._wakeup.clear()
         self.last_scene = "intro"
         self._intro_started = time.monotonic()
+        self._turn_play_head = 0.0
         self.publish({"type": "session_begin", "session_id": session_id, "channel": s.channel,
                       "conversation_id": conversation_id,
                       "title": meta_title, "category": meta_category, "tags": meta_tags})
@@ -430,6 +456,7 @@ class StreamLoop:
         self.state = STATE_OFFLINE
         self._intro_started = None
         self._turn_speech = []
+        self._turn_play_head = 0.0
         self._in_turn = False
         if self.session is not None:
             await self.storage.update_session(
@@ -500,8 +527,28 @@ class StreamLoop:
                 if et == "speech":
                     duration = float(ev.get("duration") or 0)
                     stext = str(ev.get("text") or "").strip()
+                    step = ev.get("step", 0)
                     if stext:
                         turn_text = f"{turn_text} {stext}".strip()
+                    # 同一轮内的不同 LLM step 之间也留出 cooldown：上游可能在上一步
+                    # 语音还没播完时就把工具执行完、进入下一步并吐出 speech。字幕端
+                    # 按 step 边界清空旧文本，如果事件立即下发，旧字幕会在最后一个
+                    # 字符刚出现时被下一步首句覆盖。这里按服务端预测时间线先压住
+                    # 新 step 的首句，等上一步播完 + cooldown 再转发；这样音频与字幕
+                    # 的节拍一致，snapshot 的预测时间线也不会前后矛盾。
+                    if self._turn_speech:
+                        prev = self._turn_speech[-1]
+                        if step != prev.get("step", 0):
+                            wait_until = (
+                                prev["start"]
+                                + prev["duration"]
+                                + s.speech_cooldown_ms / 1000.0
+                            )
+                            wait_s = wait_until - time.monotonic()
+                            if wait_s > 0:
+                                await self._sleep_ms(wait_s * 1000)
+                                if self._stop_event.is_set():
+                                    break
                     # 发声时刻 = max(事件到达, 前句播完)：与 UI 顺序播放模型一致
                     now = time.monotonic()
                     start = max(now, self._turn_play_head)
@@ -509,6 +556,7 @@ class StreamLoop:
                     had_speech = True
                     self._turn_speech.append(
                         {
+                            "step": step,
                             "index": ev.get("index", 0),
                             "text": stext,
                             "duration": duration,
@@ -523,6 +571,7 @@ class StreamLoop:
                     self.publish({
                         "type": "speech",
                         "turn_id": turn_id,
+                        "step": step,
                         "index": ev.get("index", 0),
                         "text": ev.get("text", ""),
                         "audio": ev.get("audio", ""),

@@ -172,6 +172,13 @@
                         <v-col cols="6" sm="4"><v-text-field v-model.number="cfg.stream.messages_per_round" label="Messages / round" type="number" variant="outlined" density="compact" /></v-col>
                         <v-col cols="6" sm="4"><v-text-field v-model.number="cfg.stream.speech_cooldown_ms" label="Speech cooldown (ms，字幕停留 / 下一轮等待)" type="number" variant="outlined" density="compact" /></v-col>
                         <v-col cols="12" sm="4">
+                          <v-switch
+                            v-model="cfg.stream.game_tool_wait_speech"
+                            label="Game 工具等语音播完再执行"
+                            hide-details density="compact" inset color="primary" class="mt-0"
+                          />
+                        </v-col>
+                        <v-col cols="12" sm="4">
                           <v-select
                             v-model="cfg.stream.empty_queue_behavior"
                             :items="['placeholder', 'silent']"
@@ -498,6 +505,7 @@ const normalize = (doc: Record<string, any>) => {
   s.scene_context = s.scene_context ?? 'You are streaming on Twitch now.'
   s.messages_per_round = s.messages_per_round ?? 10
   s.speech_cooldown_ms = s.speech_cooldown_ms ?? 1000
+  s.game_tool_wait_speech = s.game_tool_wait_speech ?? true
   s.empty_queue_behavior = s.empty_queue_behavior ?? 'placeholder'
   s.placeholder_message = s.placeholder_message ?? 'No new messages. Say something to your viewers!'
   s.default_title = s.default_title ?? 'AI VTuber chatting with chat!'

@@ -181,6 +181,7 @@ async function boot(): Promise<void> {
       mime: String(ev.mime ?? ""),
       duration: Number(ev.duration ?? 0),
       turn_id: Number(ev.turn_id ?? 0),
+      step: Number(ev.step ?? 0),
     });
   });
   feed.on("turn_begin", (ev: FeedEvent) => {

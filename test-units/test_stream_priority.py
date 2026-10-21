@@ -2,6 +2,7 @@
 
 import asyncio
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -43,7 +44,7 @@ class _FakeNeuroClient:
             "result": "Spin command sent.",
             "duration_ms": 0,
         }
-        yield {"type": "speech", "index": 0, "text": "ta-da", "duration": 0.01}
+        yield {"type": "speech", "step": 1, "index": 0, "text": "ta-da", "duration": 0.01}
         yield {"type": "done", "content": "ta-da"}
 
 
@@ -57,6 +58,19 @@ class _FakeSlowNeuroClient:
         yield {"type": "speech", "index": 0, "text": "short line", "duration": 0.01}
         await asyncio.sleep(0.05)  # 模拟工具执行 / 下一步生成：此时语音早已播完
         yield {"type": "done", "content": "short line"}
+
+
+class _FakeTwoStepNeuroClient:
+    """第一步的语音还没播完，第二步就立即产出：验证 step 间也留 cooldown。"""
+
+    def __init__(self, url: str) -> None:
+        self.url = url
+
+    async def chat(self, channel: str, conversation_id: str, text: str):
+        yield {"type": "speech", "step": 1, "index": 0, "text": "first", "duration": 0.1}
+        await asyncio.sleep(0.01)
+        yield {"type": "speech", "step": 2, "index": 1, "text": "second", "duration": 0.02}
+        yield {"type": "done", "content": "first second"}
 
 
 class TestPriorityQueue(unittest.IsolatedAsyncioTestCase):
@@ -209,6 +223,38 @@ class TestPriorityQueue(unittest.IsolatedAsyncioTestCase):
         # 不再产生专用 tool_call 事件
         self.assertFalse(any(e["type"] == "tool_call" for e in events))
 
+    async def test_step_change_waits_for_prev_speech_and_cooldown(self):
+        """同一轮内跨 step：第二步 speech 要等第一步播完 + cooldown 才转发。"""
+        await self.storage.append_message(self.queue_row, "viewer", "do a trick")
+        self.settings.speech_cooldown_ms = 80
+        events: list[tuple[float, dict]] = []
+        sleeps: list[float] = []
+        original_publish = self.loop.publish
+
+        def capture(ev: dict) -> None:
+            events.append((time.monotonic(), ev))
+            original_publish(ev)
+
+        async def record_sleep(ms: float) -> None:
+            sleeps.append(float(ms))
+            await asyncio.sleep(float(ms) / 1000.0)
+
+        with patch("neuro_simulator.stream.loop.NeuroClient", _FakeTwoStepNeuroClient):  # noqa: SIM117
+            with patch.object(self.loop, "publish", side_effect=capture):
+                with patch.object(self.loop, "_sleep_ms", new=record_sleep):
+                    await self.loop._run_round(self.settings, self.session)
+
+        speech = [(t, e) for t, e in events if e["type"] == "speech"]
+        self.assertEqual([e["step"] for _, e in speech], [1, 2])
+        gap = speech[1][0] - speech[0][0]
+        # 第一步 duration 0.1s + cooldown 0.08s；允许调度误差
+        self.assertGreaterEqual(gap, 0.15)
+        self.assertTrue(any(ms > 50 for ms in sleeps))
+        self.assertEqual(
+            [e["step"] for _, e in speech],
+            [s.get("step") for s in self.loop._turn_speech],
+        )
+
     async def test_pacing_uses_last_speech_end_not_generation_end(self):
         """语音在 done 之前早已播完时，等待量应为 0（旧实现会再等整整一句时长）。"""
         await self.storage.append_message(self.queue_row, "viewer", "say something")
@@ -219,11 +265,9 @@ class TestPriorityQueue(unittest.IsolatedAsyncioTestCase):
             sleeps.append(float(ms))
             await asyncio.sleep(0)
 
-        with (
-            patch("neuro_simulator.stream.loop.NeuroClient", _FakeSlowNeuroClient),
-            patch.object(self.loop, "_sleep_ms", new=_record_sleep),
-        ):
-            await self.loop._run_round(self.settings, self.session)
+        with patch("neuro_simulator.stream.loop.NeuroClient", _FakeSlowNeuroClient):
+            with patch.object(self.loop, "_sleep_ms", new=_record_sleep):
+                await self.loop._run_round(self.settings, self.session)
 
         # 语音 0.01s，done 前又过了 0.05s：播完 + cooldown 已过，不应再有轮间等待
         self.assertEqual(len(sleeps), 1)
@@ -244,7 +288,10 @@ class TestPriorityQueue(unittest.IsolatedAsyncioTestCase):
         speech = next(e for e in events if e["type"] == "speech")
         self.assertEqual(begin["turn_id"], end["turn_id"])
         self.assertEqual(begin["turn_id"], speech["turn_id"])
-        self.assertEqual(self.loop.turn_snapshot()["id"], begin["turn_id"])
+        self.assertEqual(speech["step"], 1)
+        snap = self.loop.turn_snapshot()
+        self.assertEqual(snap["id"], begin["turn_id"])
+        self.assertEqual(snap["speech"][0]["step"], 1)
 
 
 if __name__ == "__main__":

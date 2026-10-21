@@ -5,7 +5,7 @@
  * state / session_begin{title,category} / session_end / scene_set{id} /
  * settings{speech_cooldown_ms} /
  * element_state{id,payload}（游戏等元素层的全量状态）/
- * stream_metadata{title,category} / speech{turn_id,index,text,audio,mime,duration} /
+ * stream_metadata{title,category} / speech{turn_id,step,index,text,audio,mime,duration} /
  * turn_begin{turn_id} / turn_end{turn_id,reason} / chat_message / priority_message /
  * tool_start / tool_result（neuro 工具事件原样镜像，画面端按 name 自行消费）
  */
@@ -25,6 +25,7 @@ export interface ChatMsg {
 }
 
 export interface TurnSeg {
+  step?: number; // 所属 LLM step（工具链中跨 step 清字幕）
   index: number;
   text: string;
   duration: number;

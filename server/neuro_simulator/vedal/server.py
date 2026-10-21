@@ -429,6 +429,14 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=503, detail=f"module {module} 未配置 host/port 或 external_url")
 
         body = await request.body()
+        # 媒体元素（开场视频）会发 Range 请求做 seek/断点加载；代理必须原样带上，
+        # 并保留上游的 206 / Content-Range 等响应头，否则浏览器只能拿到一个
+        # 被缓冲的 200 全量响应，视频会从头加载、拖动/中途接续失效。
+        forward_headers = {"Content-Type": request.headers.get("content-type", "application/json")}
+        for name in ("range", "if-range", "if-none-match", "if-modified-since"):
+            value = request.headers.get(name)
+            if value:
+                forward_headers[name] = value
         # read 超时置 None：SSE 长连接期间可能较长时间没有新数据
         client = httpx.AsyncClient(timeout=httpx.Timeout(60.0, read=None))
         try:
@@ -437,7 +445,7 @@ def create_app() -> FastAPI:
                 f"{url}/{path}",
                 params=dict(request.query_params),
                 content=body,
-                headers={"Content-Type": request.headers.get("content-type", "application/json")},
+                headers=forward_headers,
             )
             r = await client.send(req, stream=True)
         except httpx.HTTPError as e:
@@ -462,6 +470,36 @@ def create_app() -> FastAPI:
                 headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
             )
 
+        response_headers = {
+            name: r.headers[name]
+            for name in (
+                "content-range",
+                "accept-ranges",
+                "content-length",
+                "etag",
+                "last-modified",
+                "cache-control",
+            )
+            if name in r.headers
+        }
+        # 视频/音频/图片按块透传：媒体元素能边下边播，Range seek 也无需等整个
+        # 文件缓冲完。其它响应保持原来的整体缓冲语义。
+        if ctype.startswith(("video/", "audio/", "image/")):
+            async def pipe_media():
+                try:
+                    async for chunk in r.aiter_bytes():
+                        yield chunk
+                finally:
+                    await r.aclose()
+                    await client.aclose()
+
+            return StreamingResponse(
+                pipe_media(),
+                status_code=r.status_code,
+                media_type=ctype,
+                headers=response_headers,
+            )
+
         try:
             content = await r.aread()
         except httpx.HTTPError as e:
@@ -470,7 +508,12 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=502, detail=f"module {module} 请求失败: {type(e).__name__}: {e}")
         await r.aclose()
         await client.aclose()
-        return Response(content=content, status_code=r.status_code, media_type=ctype)
+        return Response(
+            content=content,
+            status_code=r.status_code,
+            media_type=ctype,
+            headers=response_headers,
+        )
 
     # ---------- dashboard 静态托管（放在最后，避免遮挡 API 路由） ----------
 

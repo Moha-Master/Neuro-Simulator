@@ -14,6 +14,7 @@ export interface SpeechSeg {
   mime?: string;
   duration: number;
   turn_id?: number; // 所属轮次（服务端 turn_id；跨轮字幕不拼在一起）
+  step?: number; // 所属 LLM step（同一轮内的工具链步骤）
   consumed?: number; // 仅快照续播用：已发声秒数
   skip_s?: number; // 续播时音频起播位置（= consumed，秒）
 }
@@ -76,6 +77,7 @@ export class CaptionPlayer {
   private lastIndex = -1;
   private turnId = 0; // 当前轮次（服务端 turn_id）
   private textTurnId = 0; // 当前字幕文本所属轮次：跨轮先清空，避免新旧拼接
+  private textStep = 0; // 当前字幕文本所属 LLM step：同一轮工具链跨 step 清空
   /** speak 完成后字幕停留时长（stream.speech_cooldown_ms，snapshot/settings 下发）。 */
   hideDelayMs = DEFAULT_HIDE_DELAY_MS;
   private turnEnded = false; // 已收到 turn_end（生成侧结束）
@@ -91,7 +93,9 @@ export class CaptionPlayer {
     this.stage = stage;
   }
 
-  /** 一轮新生成开始：取消隐藏计时；空闲状态下清空旧文本。 */
+  /** 一轮新生成开始：保留上一轮字幕剩余的停留时间，等它自己的 hide timer
+   *  结束（或新轮第一句真正开始）再清空，不能因为服务端先发了 turn_begin
+   *  就把还在 cooldown 里的上一轮文本提前抹掉。 */
   beginTurn(turnId?: number): void {
     if (turnId !== undefined && turnId !== this.turnId) {
       this.turnId = turnId;
@@ -99,11 +103,19 @@ export class CaptionPlayer {
     }
     this.turnEnded = false;
     this.idleFired = false;
-    this.cancelHide();
+    const hasText = this.caption.textContent.length > 0;
+    if (!hasText) this.cancelHide();
     if (!this.busy && this.queue.length === 0) {
-      this.clearText();
-      this.textTurnId = this.turnId;
-      this.lastIndex = -1;
+      if (hasText) {
+        // 旧字幕还在淡出计时中：不要重排 timer（否则会延长停留），
+        // 只有 timer 已丢失时才补一个完整 cooldown。
+        if (this.hideTimer === null) this.scheduleHide();
+      } else {
+        this.clearText();
+        this.textTurnId = this.turnId;
+        this.textStep = 0;
+        this.lastIndex = -1;
+      }
     }
   }
 
@@ -140,12 +152,19 @@ export class CaptionPlayer {
       this.clearText();
       this.turnId = turnId;
       this.textTurnId = turnId;
+      this.textStep = 0;
       this.lastIndex = -1;
     }
     this.cancelHide();
     let tailTaken = false;
     for (const s of segs) {
       if (s.index <= this.lastIndex) continue;
+      const step = s.step ?? 0;
+      if (step !== this.textStep) {
+        this.clearText();
+        this.textStep = step;
+        this.textTurnId = turnId;
+      }
       const dur = Math.max(0.3, s.duration);
       if (s.consumed >= dur - 0.05) {
         this.appendText(s.text + " ");
@@ -176,6 +195,7 @@ export class CaptionPlayer {
         if (restText) {
           // 余部以略高的 index 入队：有音频则 seek 到 consumed 续播，无则纯计时轴
           this.enqueue({
+            step,
             index: s.index + 0.001,
             text: restText,
             audio: s.audio,
@@ -186,7 +206,7 @@ export class CaptionPlayer {
           });
         }
       } else {
-        this.enqueue({ index: s.index, text: s.text, duration: dur, turn_id: turnId });
+        this.enqueue({ step, index: s.index, text: s.text, duration: dur, turn_id: turnId });
       }
     }
     if (this.caption.textContent) this.show();
@@ -205,6 +225,7 @@ export class CaptionPlayer {
     this.lastIndex = -1;
     this.turnId = 0;
     this.textTurnId = 0;
+    this.textStep = 0;
     this.turnEnded = false;
     this.idleFired = false;
   }
@@ -237,10 +258,12 @@ export class CaptionPlayer {
 
   private async playSeg(seg: SpeechSeg, gen: number): Promise<void> {
     const segTurn = seg.turn_id ?? this.turnId;
-    if (segTurn !== this.textTurnId) {
-      // 跨轮边界：旧字幕可能还没淡出，新轮第一句开始前先清空，避免新旧拼接
+    const segStep = seg.step ?? 0;
+    if (segTurn !== this.textTurnId || segStep !== this.textStep) {
+      // 跨轮/跨 step 边界：旧字幕可能还没淡出，新消息第一句开始前先清空，避免拼接
       this.clearText();
       this.textTurnId = segTurn;
+      this.textStep = segStep;
     }
     // 旧轮残留队列可能还在播：不能让它覆盖新一轮的去重水位线
     if (segTurn === this.turnId) this.lastIndex = seg.index;

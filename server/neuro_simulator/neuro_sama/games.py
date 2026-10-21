@@ -16,7 +16,7 @@ from ..config import get_config, module_url
 from .tools import Tool
 
 STREAM_MODULE = "stream"
-_REQUEST_TIMEOUT = 15.0
+_REQUEST_TIMEOUT = 120.0  # 等 stream 播完语音再执行 game 动作，留足 TTS 时间
 
 
 async def _act(game: str, action: str, args: Dict[str, Any] | None = None) -> str:

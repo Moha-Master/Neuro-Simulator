@@ -128,6 +128,41 @@ class TestIntroPacing(unittest.IsolatedAsyncioTestCase):
         )
         self.assertFalse(any(e["type"] == "intro" for e in events), events)
 
+    async def test_game_action_waits_for_speech_end(self):
+        self.loop._turn_play_head = time.monotonic() + 0.05
+        started = time.monotonic()
+        with patch(
+            "neuro_simulator.stream.loop.stream_settings.load",
+            return_value=SimpleNamespace(game_tool_wait_speech=True),
+        ):
+            result = await self.loop.run_game_action(lambda: {"ok": True})
+        elapsed = time.monotonic() - started
+        self.assertTrue(result["ok"])
+        self.assertGreaterEqual(elapsed, 0.04)
+
+    async def test_game_actions_are_serialized(self):
+        self.loop._turn_play_head = time.monotonic() + 0.04
+        order: list[str] = []
+
+        def act(name: str):
+            order.append(name)
+            # 让后一个动作必须等前一个动作完成后再过 cooldown/语音窗口
+            self.loop._turn_play_head = time.monotonic() + 0.04
+            return {"ok": True, "name": name}
+
+        started = time.monotonic()
+        with patch(
+            "neuro_simulator.stream.loop.stream_settings.load",
+            return_value=SimpleNamespace(game_tool_wait_speech=True),
+        ):
+            first = asyncio.create_task(self.loop.run_game_action(lambda: act("a")))
+            await asyncio.sleep(0)
+            second = asyncio.create_task(self.loop.run_game_action(lambda: act("b")))
+            await asyncio.gather(first, second)
+        elapsed = time.monotonic() - started
+        self.assertEqual(order, ["a", "b"])
+        self.assertGreaterEqual(elapsed, 0.07)
+
 
 if __name__ == "__main__":
     unittest.main()

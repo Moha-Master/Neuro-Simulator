@@ -456,10 +456,15 @@ def create_app() -> FastAPI:
         if payload.action == "start" and not lp.session:
             raise HTTPException(status_code=409, detail="No stream is running; games only exist on air.")
         hub = lp.games
-        try:
+
+        def execute() -> dict[str, Any]:
             if payload.action == "start":
                 return hub.start(game_id)
             return hub.act(game_id, payload.action, payload.args or {})
+
+        try:
+            # 所有 game 动作在 stream 内串行执行；默认先等当前语音播完再动棋盘。
+            return await lp.run_game_action(execute)
         except GameError as e:
             # 面向模型的"这步不能做"：给明确文本，不要抛成工具异常
             raise HTTPException(status_code=400, detail=str(e)) from e
