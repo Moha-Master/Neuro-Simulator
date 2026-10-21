@@ -234,6 +234,19 @@ def validate_config(data: Dict[str, Any]) -> None:
     if cb is not None and not isinstance(cb, dict):
         raise ValueError("stream.chatbot 必须是对象")
 
+    chess = _get_path(data.get("stream") or {}, "chess")
+    if chess is not None and not isinstance(chess, dict):
+        raise ValueError("stream.chess 必须是对象")
+    if isinstance(chess, dict):
+        for f in ("token", "base_url", "color"):
+            if f in chess and not isinstance(chess[f], str):
+                raise ValueError(f"stream.chess.{f} 必须是字符串")
+        if "enabled" in chess and not isinstance(chess["enabled"], bool):
+            raise ValueError("stream.chess.enabled 必须是布尔值")
+        for f in ("ai_level", "clock_limit", "clock_increment"):
+            if f in chess:
+                _as_int(chess, f, 0)
+
     for name, schema in data.items():
         if name != SERVER_SCHEMA and not isinstance(schema, dict):
             raise ValueError(f"顶层 schema {name} 必须是对象")
@@ -327,7 +340,7 @@ class Config:
         self.PORT: int = _as_int(ns, "port", 8000)
         self.MAX_STEPS: int = _as_int(ns, "max_steps", 10)
         self.MAX_CONTEXT_MESSAGES: int = _as_int(ns, "max_context_messages", 60)
-        self.TOOL_TIMEOUT: float = _as_float(ns, "tool_timeout", 30.0)
+        self.TOOL_TIMEOUT: float = _as_float(ns, "tool_timeout", 60.0)
         self.MEMORY_CHAR_LIMIT: int = _as_int(ns, "memory_char_limit", 4000)
         self.MCP_SERVERS: list = ns.get("mcp_servers", []) or []
         self.NEURO_MODEL_REF: str = str(ns.get("model") or "")

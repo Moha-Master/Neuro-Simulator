@@ -101,7 +101,7 @@ class ScenePayload(BaseModel):
 
 
 class GameActionPayload(BaseModel):
-    """游戏动作：action = start / type / delete / submit / restart / exit / state。"""
+    """游戏动作：action = start / type / delete / submit / restart / move / state / resign / exit。"""
 
     action: str
     args: dict[str, Any] | None = None
@@ -457,10 +457,10 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=409, detail="No stream is running; games only exist on air.")
         hub = lp.games
 
-        def execute() -> dict[str, Any]:
+        async def execute() -> dict[str, Any]:
             if payload.action == "start":
-                return hub.start(game_id)
-            return hub.act(game_id, payload.action, payload.args or {})
+                return await hub.start(game_id)
+            return await hub.act(game_id, payload.action, payload.args or {})
 
         try:
             # 所有 game 动作在 stream 内串行执行；默认先等当前语音播完再动棋盘。

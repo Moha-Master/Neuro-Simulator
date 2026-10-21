@@ -10,7 +10,7 @@ from unittest.mock import patch
 
 from neuro_simulator.stream.chatbot import ChatbotManager
 from neuro_simulator.stream.persona import ChatbotPersonaStore, build_template_store
-from neuro_simulator.stream.settings import ChatbotSettings, StreamSettings
+from neuro_simulator.stream.settings import ChatbotSettings, ChessSettings, StreamSettings
 from neuro_simulator.stream.storage import Storage
 
 
@@ -44,6 +44,15 @@ def _settings(**chatbot_overrides) -> StreamSettings:
         default_category="c",
         default_tags=[],
         chatbot=cb,
+        chess=ChessSettings(
+            enabled=False,
+            token="",
+            base_url="https://example.invalid",
+            ai_level=1,
+            clock_limit=60,
+            clock_increment=0,
+            color="white",
+        ),
     )
 
 

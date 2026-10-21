@@ -339,6 +339,61 @@
           "content": { "kind": "component", "name": "highlight" }
         }
       ]
+    },
+    {
+      "id": "play_chess",
+      "label": "Chess",
+      "icon": "mdi-chess-knight",
+      "prompt_context": "You are playing online Chess on Lichess against a Lichess AI. Prefer UCI moves like e2e4, e7e8q, or e1g1; SAN like Nf3 is also accepted. Take one move at a time and react to the board after the tool result.",
+      "elements": [
+        {
+          "id": "bg_room",
+          "name": "房间背景",
+          "z": 0,
+          "box": { "x": 0, "y": 0, "w": 1, "h": 1 },
+          "content": { "kind": "image", "src": "background.webp", "fit": "cover" },
+          "script": {
+            "enter": { "tween": { "opacity": 1 }, "duration": 600 },
+            "exit": { "tween": { "opacity": 0 }, "duration": 600 }
+          }
+        },
+        {
+          "id": "game_chess",
+          "name": "Chess 棋盘（chessground）",
+          "z": 1,
+          "box": { "x": 0, "y": 0, "w": 0.8677, "h": 0.8324 },
+          "css": { "background": "#000000" },
+          "content": { "kind": "component", "name": "chess.board" }
+        },
+        {
+          "id": "avatar",
+          "name": "立绘",
+          "z": 15,
+          "box": { "x": 0.45, "y": -1.25, "w": 0.5, "edge": { "y": "bottom" } },
+          "content": { "kind": "image", "src": "neurosama.png" }
+        },
+        {
+          "id": "chat",
+          "name": "聊天",
+          "z": 20,
+          "box": { "x": 0, "y": 0, "w": 0.25, "h": 0.5 },
+          "content": { "kind": "component", "name": "chat.overlay" }
+        },
+        {
+          "id": "caption",
+          "name": "字幕",
+          "z": 22,
+          "box": { "x": 0.05, "y": 0.05, "w": 0.9, "edge": { "y": "bottom" } },
+          "content": { "kind": "component", "name": "caption" }
+        },
+        {
+          "id": "highlight",
+          "name": "优先消息",
+          "z": 25,
+          "box": { "x": 0.29, "y": 0, "w": 0.24 },
+          "content": { "kind": "component", "name": "highlight" }
+        }
+      ]
     }
   ]
 }

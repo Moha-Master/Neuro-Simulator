@@ -4,10 +4,12 @@
 规则判定、状态与画面广播都在 stream 侧（`/game/{game}/action`）。
 所以这里不持有游戏状态，stream 没起时工具就返回一句人话，不抛异常打断对话。
 
-工具名统一 `game_<游戏>_<动作>`；将来接第二个游戏就是再加一组同前缀的工具
-（或按规划换成动态工具系统，只暴露当前活跃游戏的一组）。
+工具名统一 `game_<游戏>_<动作>`。当前已接入 Wordle 与在线 Chess（Lichess Bot API）。
+neuro_sama 的 ToolRegistry 会按 stream 当前活跃游戏过滤工具定义，避免多个游戏的
+工具同时塞进小模型上下文。
 """
 
+import time
 from typing import Any, Dict
 
 import httpx
@@ -39,12 +41,60 @@ async def _act(game: str, action: str, args: Dict[str, Any] | None = None) -> st
     return str(data.get("result_text") or "(no result)")
 
 
+class StreamGameProvider:
+    """查询 stream 当前活跃游戏，供 ToolRegistry 动态过滤工具定义。"""
+
+    def __init__(self, ttl: float = 1.0, negative_ttl: float = 0.25) -> None:
+        self.ttl = ttl
+        self.negative_ttl = negative_ttl
+        self._value: str | None = None
+        self._expires_at = 0.0
+        self._known = False
+
+    def invalidate(self) -> None:
+        """游戏工具执行完后强制下一次重新查 stream，避免 1s 缓存吞掉新出现的动作。"""
+        self._expires_at = 0.0
+        self._known = False
+
+    async def active_game(self) -> str | None:
+        now = time.monotonic()
+        if self._known and now < self._expires_at:
+            return self._value
+        base = module_url(get_config(), STREAM_MODULE)
+        if not base:
+            self._value = None
+            self._expires_at = now + self.negative_ttl
+            self._known = True
+            return None
+        try:
+            async with httpx.AsyncClient(timeout=2.0) as client:
+                resp = await client.get(f"{base}/game/state")
+            value = None
+            if resp.status_code < 400:
+                data = resp.json()
+                active = data.get("active")
+                value = str(active) if active else None
+        except (httpx.HTTPError, ValueError):
+            value = None
+        self._value = value
+        self._expires_at = time.monotonic() + (self.ttl if value else self.negative_ttl)
+        self._known = True
+        return value
+
+
 def build_game_tools() -> list[Tool]:
-    def tool(name: str, description: str, parameters: dict, action: str, game: str = "wordle") -> Tool:
+    def tool(
+        name: str,
+        description: str,
+        parameters: dict,
+        action: str,
+        game: str = "wordle",
+        phase: str = "active",
+    ) -> Tool:
         async def handler(**args: Any) -> str:
             return await _act(game, action, args)
 
-        return Tool(name, description, parameters, handler)
+        return Tool(name, description, parameters, handler, game=game, phase=phase)
 
     no_args = {"type": "object", "properties": {}, "required": []}
 
@@ -68,6 +118,16 @@ def build_game_tools() -> list[Tool]:
         },
         "required": [],
     }
+    move_args = {
+        "type": "object",
+        "properties": {
+            "move": {
+                "type": "string",
+                "description": "Chess move in UCI (e2e4, e7e8q, e1g1) or SAN (e4, Nf3, O-O).",
+            },
+        },
+        "required": ["move"],
+    }
 
     return [
         tool(
@@ -76,6 +136,7 @@ def build_game_tools() -> list[Tool]:
             "get six guesses at a hidden word. Use it when you decide to play Wordle with chat.",
             no_args,
             "start",
+            phase="start",
         ),
         tool(
             "game_wordle_type",
@@ -116,5 +177,52 @@ def build_game_tools() -> list[Tool]:
             "Stop playing Wordle: leave the game board and go back to the normal stream scene.",
             no_args,
             "exit",
+        ),
+        tool(
+            "game_chess_start",
+            "Start an online Chess game on Lichess against the Lichess AI. The game appears on Lichess "
+            "and you get a board report with legal moves. Use it when chat convinces you to play chess.",
+            no_args,
+            "start",
+            game="chess",
+            phase="start",
+        ),
+        tool(
+            "game_chess_move",
+            "Play one Chess move in the active Lichess game. Prefer UCI notation like e2e4, e7e8q, or "
+            "e1g1; SAN like Nf3 is also accepted. The result shows the board and your legal replies.",
+            move_args,
+            "move",
+            game="chess",
+        ),
+        tool(
+            "game_chess_state",
+            "Look at the current Chess board again: FEN, side to move, clock, last move, result if any, "
+            "and the legal moves you can choose from.",
+            no_args,
+            "state",
+            game="chess",
+        ),
+        tool(
+            "game_chess_resign",
+            "Resign the current online Chess game. Use it when the position is hopeless or you want to "
+            "end the game dramatically.",
+            no_args,
+            "resign",
+            game="chess",
+        ),
+        tool(
+            "game_chess_restart",
+            "Resign the current online Chess game and start another Lichess AI game.",
+            no_args,
+            "restart",
+            game="chess",
+        ),
+        tool(
+            "game_chess_exit",
+            "Stop playing Chess: leave the online game scene and go back to the normal stream scene.",
+            no_args,
+            "exit",
+            game="chess",
         ),
     ]

@@ -53,6 +53,17 @@ class ChatbotSettings:
 
 
 @dataclass(frozen=True)
+class ChessSettings:
+    enabled: bool
+    token: str
+    base_url: str
+    ai_level: int
+    clock_limit: int
+    clock_increment: int
+    color: str
+
+
+@dataclass(frozen=True)
 class StreamSettings:
     neuro_url: str
     channel: str
@@ -66,6 +77,7 @@ class StreamSettings:
     default_category: str
     default_tags: list[str]
     chatbot: ChatbotSettings
+    chess: ChessSettings
 
 
 def load() -> StreamSettings:
@@ -125,6 +137,29 @@ def load() -> StreamSettings:
     raw_game_wait = ns.get("game_tool_wait_speech", True)
     game_tool_wait_speech = raw_game_wait if isinstance(raw_game_wait, bool) else True
 
+    ch = ns.get("chess") if isinstance(ns.get("chess"), dict) else {}
+    chess_enabled = bool(ch.get("enabled", True))
+    chess_token = str(ch.get("token") or "").strip()
+    chess_base = str(ch.get("base_url") or "https://lichess.org").strip().rstrip("/")
+    chess_level = int(ch.get("ai_level") if ch.get("ai_level") is not None else 3)
+    chess_level = max(1, min(chess_level, 8))
+    chess_clock_limit = int(ch.get("clock_limit") if ch.get("clock_limit") is not None else 900)
+    chess_clock_limit = max(15, min(chess_clock_limit, 10800))
+    chess_clock_increment = int(ch.get("clock_increment") if ch.get("clock_increment") is not None else 15)
+    chess_clock_increment = max(0, min(chess_clock_increment, 60))
+    chess_color = str(ch.get("color") or "white").strip().lower()
+    if chess_color not in ("white", "black", "random"):
+        chess_color = "white"
+    chess_settings = ChessSettings(
+        enabled=chess_enabled,
+        token=chess_token,
+        base_url=chess_base,
+        ai_level=chess_level,
+        clock_limit=chess_clock_limit,
+        clock_increment=chess_clock_increment,
+        color=chess_color,
+    )
+
     return StreamSettings(
         neuro_url=neuro_url,
         channel=str(ns.get("channel") or "stream"),
@@ -138,4 +173,5 @@ def load() -> StreamSettings:
         default_category=str(ns.get("default_category") or ""),
         default_tags=default_tags,
         chatbot=chatbot_settings,
+        chess=chess_settings,
     )

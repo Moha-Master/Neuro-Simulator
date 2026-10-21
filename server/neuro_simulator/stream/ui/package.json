@@ -15,5 +15,8 @@
     "npm-run-all2": "^8.0.4",
     "typescript": "~5.9.2",
     "vite": "^7.1.5"
+  },
+  "dependencies": {
+    "@lichess-org/chessground": "^10.5.0"
   }
 }

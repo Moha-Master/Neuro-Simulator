@@ -15,4 +15,9 @@
 from .base import GAMES, Game, GameError, GameHub, register
 from .wordle import WordleGame  # 导入即注册
 
-__all__ = ["GAMES", "Game", "GameError", "GameHub", "WordleGame", "register"]
+try:
+    from .chess import ChessGame  # 导入即注册；需要可选依赖 esca
+except ImportError:  # pragma: no cover
+    ChessGame = None
+
+__all__ = ["GAMES", "Game", "GameError", "GameHub", "WordleGame", "ChessGame", "register"]

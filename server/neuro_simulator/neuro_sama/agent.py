@@ -186,12 +186,30 @@ class NeuroAgent:
         storage: Storage,
         memory: MemoryStore,
         persona: PersonaStore,
+        active_game_provider=None,
     ) -> None:
         self.client = client
         self.registry = registry
         self.storage = storage
         self.memory = memory
         self.persona = persona
+        self.active_game_provider = active_game_provider
+
+    async def _active_game(self) -> str | None:
+        if self.active_game_provider is None:
+            return None
+        try:
+            return await self.active_game_provider.active_game()
+        except Exception:
+            return None
+
+    def _invalidate_active_game_cache(self) -> None:
+        invalidate = getattr(self.active_game_provider, "invalidate", None)
+        if callable(invalidate):
+            try:
+                invalidate()
+            except Exception:
+                pass
 
     async def run(
         self,
@@ -278,6 +296,8 @@ class NeuroAgent:
             if cancel_event and cancel_event.is_set():
                 yield {"type": "cancelled"}
                 return
+            active_game = await self._active_game()
+            tool_schema = self.registry.openai_schema(active_game)
             llm_messages = [
                 {"role": "system", "content": build_system_prompt(self.persona, self.memory)},
                 *messages,
@@ -295,7 +315,7 @@ class NeuroAgent:
                     self.client.chat.completions.create(
                         model=svc.model,
                         messages=llm_messages,
-                        tools=self.registry.openai_schema() or None,
+                        tools=tool_schema or None,
                         stream=True,
                         stream_options={"include_usage": True},
                         extra_body=svc.extra_body,
@@ -495,6 +515,8 @@ class NeuroAgent:
                 tool_msg = {"role": "tool", "tool_call_id": c["id"], "content": result}
                 await self.storage.append_message(conv_id, tool_msg)
                 messages.append(tool_msg)
+                if c["name"].startswith("game_"):
+                    self._invalidate_active_game_cache()
         else:
             fallback = "Someone tells Vedal there is a problem with my AI."
             await self.storage.append_message(conv_id, {"role": "assistant", "content": fallback})

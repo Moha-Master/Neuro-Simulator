@@ -241,6 +241,45 @@
                           </v-row>
                         </v-card-text>
                       </v-card>
+
+                      <v-card variant="tonal" class="mt-2">
+                        <v-card-title class="text-body-1 py-2 d-flex align-center">
+                          Chess（Lichess Bot API）
+                          <v-spacer />
+                          <v-switch v-model="cfg.stream.chess.enabled" hide-details density="compact" inset color="primary" class="mt-0" />
+                        </v-card-title>
+                        <v-card-text class="pt-0">
+                          <v-row dense>
+                            <v-col cols="12" sm="6">
+                              <v-text-field
+                                v-model="cfg.stream.chess.token"
+                                label="Lichess bot token（bot:play）"
+                                type="password"
+                                variant="outlined" density="compact"
+                              />
+                            </v-col>
+                            <v-col cols="12" sm="6">
+                              <v-text-field v-model="cfg.stream.chess.base_url" label="Base URL" variant="outlined" density="compact" />
+                            </v-col>
+                            <v-col cols="6" sm="3"><v-text-field v-model.number="cfg.stream.chess.ai_level" label="AI level (1-8)" type="number" min="1" max="8" variant="outlined" density="compact" /></v-col>
+                            <v-col cols="6" sm="3"><v-text-field v-model.number="cfg.stream.chess.clock_limit" label="Clock limit (s)" type="number" variant="outlined" density="compact" /></v-col>
+                            <v-col cols="6" sm="3"><v-text-field v-model.number="cfg.stream.chess.clock_increment" label="Increment (s)" type="number" variant="outlined" density="compact" /></v-col>
+                            <v-col cols="6" sm="3">
+                              <v-select
+                                v-model="cfg.stream.chess.color"
+                                :items="['white', 'black', 'random']"
+                                label="Neuro color" variant="outlined" density="compact"
+                              />
+                            </v-col>
+                            <v-col cols="12">
+                              <v-alert type="info" variant="tonal" density="compact">
+                                Chess 画面当前是黑色占位元素；对局通过 Lichess 官方 Bot API 在线进行。
+                                token 需要来自已升级为 BOT 的账号，并勾选 bot:play。
+                              </v-alert>
+                            </v-col>
+                          </v-row>
+                        </v-card-text>
+                      </v-card>
                     </v-window-item>
 
                     <!-- ================= Vedal ================= -->
@@ -489,7 +528,7 @@ const normalize = (doc: Record<string, any>) => {
   n.tts = n.tts ?? 'null'
   n.max_steps = n.max_steps ?? 10
   n.max_context_messages = n.max_context_messages ?? 60
-  n.tool_timeout = n.tool_timeout ?? 30
+  n.tool_timeout = n.tool_timeout ?? 60
   n.memory_char_limit = n.memory_char_limit ?? 4000
   n.mcp_servers = n.mcp_servers || []
   n.host = n.host ?? '127.0.0.1'
@@ -506,6 +545,15 @@ const normalize = (doc: Record<string, any>) => {
   s.messages_per_round = s.messages_per_round ?? 10
   s.speech_cooldown_ms = s.speech_cooldown_ms ?? 1000
   s.game_tool_wait_speech = s.game_tool_wait_speech ?? true
+  s.chess = s.chess || {}
+  const chess = s.chess
+  chess.enabled = chess.enabled ?? true
+  chess.token = chess.token ?? ''
+  chess.base_url = chess.base_url ?? 'https://lichess.org'
+  chess.ai_level = chess.ai_level ?? 3
+  chess.clock_limit = chess.clock_limit ?? 900
+  chess.clock_increment = chess.clock_increment ?? 15
+  chess.color = chess.color ?? 'white'
   s.empty_queue_behavior = s.empty_queue_behavior ?? 'placeholder'
   s.placeholder_message = s.placeholder_message ?? 'No new messages. Say something to your viewers!'
   s.default_title = s.default_title ?? 'AI VTuber chatting with chat!'

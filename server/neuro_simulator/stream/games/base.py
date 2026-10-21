@@ -1,7 +1,8 @@
 """游戏基类与中枢：活跃游戏的唯一持有者 + 状态广播。"""
 
+import inspect
 from abc import ABC, abstractmethod
-from typing import Any, Callable, Dict, Optional, Type
+from typing import Any, Awaitable, Callable, Dict, Optional, Type, Union
 
 # 游戏注册表：子类在各自模块里 register()（避免 __init__ 与子模块循环导入）。
 GAMES: Dict[str, Type["Game"]] = {}
@@ -24,6 +25,8 @@ class Game(ABC):
     - `scene_id`：玩这个游戏时画面该切到的场景（元素清单里含本游戏的棋盘层）。
     - `element_id`：本游戏在场景里的元素 id，状态就以它为 key 广播。
     - `state()` 必须是**全量快照**：画面组件拿它就能画出当前局面（幂等，不做增量）。
+    - `start()` / `act()` / `exit()` 可以返回字符串，也可以返回 awaitable 字符串；
+      在线游戏（如 Lichess）需要异步 HTTP，本地游戏保持同步即可。
     """
 
     id: str = ""
@@ -35,18 +38,18 @@ class Game(ABC):
         self.hub = hub
 
     @abstractmethod
-    def start(self) -> str:
+    def start(self) -> Union[str, Awaitable[str]]:
         """开一局（返回给 LLM 的文本）。"""
 
     @abstractmethod
-    def act(self, action: str, args: Dict[str, Any]) -> str:
+    def act(self, action: str, args: Dict[str, Any]) -> Union[str, Awaitable[str]]:
         """执行一个动作（返回给 LLM 的文本）。未知动作抛 GameError。"""
 
     @abstractmethod
     def state(self) -> Dict[str, Any]:
         """全量状态快照（广播给画面）。"""
 
-    def exit(self) -> str:
+    def exit(self) -> Union[str, Awaitable[str]]:
         return f"Left the {self.label} game."
 
 
@@ -76,27 +79,30 @@ class GameHub:
 
     # ---------- 生命周期 ----------
 
-    def start(self, game_id: str) -> Dict[str, Any]:
+    async def start(self, game_id: str) -> Dict[str, Any]:
         cls = GAMES.get(game_id)
         if cls is None:
             raise GameError(
                 f"Unknown game {game_id!r}. Available: {', '.join(sorted(GAMES)) or 'none'}."
             )
-        self.active = cls(self)
-        text = self.active.start()
-        self._set_scene(self.active.scene_id)
+        if self.active:
+            await self.aclear()
+        game = cls(self)
+        text = await self._resolve(game.start())
+        self.active = game
+        self._set_scene(game.scene_id)
         return self._finish(text)
 
-    def act(self, game_id: str, action: str, args: Dict[str, Any]) -> Dict[str, Any]:
+    async def act(self, game_id: str, action: str, args: Dict[str, Any]) -> Dict[str, Any]:
         if action == "exit":
-            return self.exit(game_id)
+            return await self.exit(game_id)
         game = self._require(game_id)
-        text = game.act(action, args or {})
+        text = await self._resolve(game.act(action, args or {}))
         return self._finish(text)
 
-    def exit(self, game_id: Optional[str] = None) -> Dict[str, Any]:
+    async def exit(self, game_id: Optional[str] = None) -> Dict[str, Any]:
         game = self._require(game_id)
-        text = game.exit()
+        text = await self._resolve(game.exit())
         scene = "room"
         self.active = None
         self._publish(
@@ -109,7 +115,24 @@ class GameHub:
         """场次结束：丢掉活跃游戏（不广播场景切换，session_end 已让画面回黑）。"""
         self.active = None
 
+    async def aclear(self) -> None:
+        """异步清理：给在线游戏机会结束远端对局/关闭长连接；不广播场景切换。"""
+        game = self.active
+        if not game:
+            return
+        self.active = None
+        try:
+            await self._resolve(game.exit())
+        except Exception:
+            pass
+
     # ---------- 内部 ----------
+
+    @staticmethod
+    async def _resolve(value: Union[str, Awaitable[str]]) -> str:
+        if inspect.isawaitable(value):
+            return await value
+        return str(value)
 
     def _require(self, game_id: Optional[str] = None) -> Game:
         if not self.active:

@@ -9,7 +9,7 @@ import unittest
 from pathlib import Path
 
 from neuro_simulator.stream import scenes as scene_catalog
-from neuro_simulator.stream.games import GAMES, GameError, GameHub, WordleGame
+from neuro_simulator.stream.games import GAMES, ChessGame, GameError, GameHub, WordleGame
 from neuro_simulator.stream.games.wordle import MAX_ROWS, evaluate
 from neuro_simulator.stream.games.words import load_banks
 
@@ -169,14 +169,14 @@ class TestWordleGame(unittest.TestCase):
         self.assertEqual(game.guesses_used, 1)
 
 
-class TestGameHub(unittest.TestCase):
+class TestGameHub(unittest.IsolatedAsyncioTestCase):
     def make_hub(self):
         events, scenes = [], []
         return GameHub(publish=events.append, set_scene=scenes.append), events, scenes
 
-    def test_start_switches_scene_and_broadcasts(self):
+    async def test_start_switches_scene_and_broadcasts(self):
         hub, events, scenes = self.make_hub()
-        result = hub.start("wordle")
+        result = await hub.start("wordle")
         self.assertEqual(scenes, ["play_wordle"])
         self.assertEqual(events[0]["type"], "element_state")
         self.assertEqual(events[0]["id"], "game_wordle")
@@ -184,42 +184,48 @@ class TestGameHub(unittest.TestCase):
         self.assertIn("Wordle started", result["result_text"])
         self.assertEqual(hub.element_states()["game_wordle"]["game"], "wordle")
 
-    def test_unknown_game(self):
+    async def test_unknown_game(self):
         hub, _, _ = self.make_hub()
         with self.assertRaises(GameError):
-            hub.start("chess")
+            await hub.start("checkers")
 
-    def test_act_without_game(self):
+    async def test_act_without_game(self):
         hub, _, _ = self.make_hub()
         with self.assertRaises(GameError):
-            hub.act("wordle", "submit", {})
+            await hub.act("wordle", "submit", {})
 
-    def test_wrong_game_name(self):
+    async def test_wrong_game_name(self):
         hub, _, _ = self.make_hub()
-        hub.start("wordle")
+        await hub.start("wordle")
         with self.assertRaises(GameError):
-            hub.act("lichess", "submit", {})
+            await hub.act("lichess", "submit", {})
 
-    def test_exit_returns_to_room_and_clears(self):
+    async def test_exit_returns_to_room_and_clears(self):
         hub, events, scenes = self.make_hub()
-        hub.start("wordle")
-        hub.act("wordle", "type", {"letters": "CR"})
-        result = hub.act("wordle", "exit", {})
+        await hub.start("wordle")
+        await hub.act("wordle", "type", {"letters": "CR"})
+        result = await hub.act("wordle", "exit", {})
         self.assertIsNone(hub.active)
         self.assertEqual(scenes[-1], "room")
         self.assertEqual(events[-1]["payload"]["status"], "idle")
         self.assertIn("Wordle", result["result_text"])
 
-    def test_clear_leaves_no_active_game(self):
+    async def test_clear_leaves_no_active_game(self):
         hub, _, _ = self.make_hub()
-        hub.start("wordle")
+        await hub.start("wordle")
         hub.clear()
         self.assertIsNone(hub.active)
 
-    def test_only_one_active_game(self):
+    async def test_async_clear_leaves_no_active_game(self):
         hub, _, _ = self.make_hub()
-        hub.start("wordle")
-        hub.start("wordle")  # 重开顶掉旧的
+        await hub.start("wordle")
+        await hub.aclear()
+        self.assertIsNone(hub.active)
+
+    async def test_only_one_active_game(self):
+        hub, _, _ = self.make_hub()
+        await hub.start("wordle")
+        await hub.start("wordle")  # 重开顶掉旧的
         self.assertEqual(hub.active_id, "wordle")
 
 
@@ -252,6 +258,79 @@ class TestWordBanks(unittest.TestCase):
     def test_uncovered_length_passes_through(self):
         banks = load_banks()
         self.assertTrue(banks.valid("A" * 16))  # 16 字母没有词表，只能放行
+
+
+class TestChessMirror(unittest.TestCase):
+    def make_game(self, moves: str = "") -> ChessGame:
+        hub = GameHub(publish=lambda ev: None, set_scene=lambda sid: None)
+        game = ChessGame(hub)
+        game.status = "playing"
+        game.my_color = "white"
+        game.color_known = True
+        if moves:
+            game._set_moves(moves)
+        return game
+
+    def test_color_is_detected_from_game_full(self):
+        game = self.make_game()
+        game.bot_username = "files-transfer-bot"
+        game.color_known = False
+        # AI 在白、我方（bot）在黑
+        game._apply_game_full(
+            {
+                "id": "abcd1234",
+                "initialFen": "startpos",
+                "white": {"aiLevel": 3},
+                "black": {"id": "files-transfer-bot", "name": "Files-Transfer-Bot", "title": "BOT"},
+            }
+        )
+        self.assertEqual(game.my_color, "black")
+        self.assertTrue(game.color_known)
+        self.assertEqual(game.white_name, "Stockfish level 3")
+        self.assertEqual(game.black_name, "Files-Transfer-Bot")
+
+    def test_color_falls_back_to_bot_title(self):
+        game = self.make_game()
+        game.bot_username = None
+        game.color_known = False
+        game._apply_game_full(
+            {
+                "id": "abcd1234",
+                "initialFen": "startpos",
+                "white": {"id": "files-transfer-bot", "name": "Bot", "title": "BOT"},
+                "black": {"aiLevel": 1},
+            }
+        )
+        self.assertEqual(game.my_color, "white")
+        self.assertTrue(game.color_known)
+
+    def test_replay_updates_board_and_legal_moves(self):
+        game = self.make_game("e2e4 e7e5")
+        self.assertEqual(game.turn, "white")
+        self.assertIn("f1b5", game._legal_uci())
+        self.assertEqual(game.last_move["san"], "e5")
+        self.assertEqual(game.state()["board"][4][4], "P")  # e4
+        self.assertEqual(game.state()["board"][3][4], "p")  # e5
+        self.assertEqual(game.state()["board"][7][4], "K")  # e1
+
+    def test_resolves_san_and_number(self):
+        game = self.make_game()
+        self.assertEqual(game._resolve_move("Nf3"), "g1f3")
+        self.assertEqual(game._resolve_move("1"), "a2a3")
+        with self.assertRaises(GameError):
+            game._resolve_move("e2e5")
+
+    def test_state_is_full_snapshot(self):
+        game = self.make_game("d2d4")
+        state = game.state()
+        self.assertEqual(state["game"], "chess")
+        self.assertEqual(state["mode"], "lichess")
+        self.assertEqual(state["turn"], "black")
+        self.assertEqual(state["legal_move_count"], len(state["legal_moves"]))
+        self.assertEqual(state["orientation"], "white")
+        self.assertFalse(state["in_check"])
+        self.assertEqual(state["moves"], ["d2d4"])
+        self.assertIn("3P4", state["fen"])
 
 
 class TestSceneCatalogContract(unittest.TestCase):

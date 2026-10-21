@@ -15,6 +15,8 @@ class Tool:
     parameters: dict                       # JSON Schema（OpenAI function calling 直接可用）
     handler: Callable[..., Awaitable[str]] # **args -> str
     origin: str = "builtin"                # "builtin" | "mcp"
+    game: str | None = None                # 游戏工具所属 game id；None = 通用工具
+    phase: str = "all"                     # "all" | "start" | "active"
 
 
 class ToolRegistry:
@@ -29,11 +31,18 @@ class ToolRegistry:
     def get(self, name: str) -> Tool | None:
         return self._tools.get(name)
 
-    def names(self) -> list[str]:
+    def all_names(self) -> list[str]:
         return sorted(self._tools)
 
-    def openai_schema(self) -> list[dict]:
-        """转成 OpenAI chat.completions 的 tools 参数（按名排序以利用 prompt cache）。"""
+    def names(self, active_game: str | None = None) -> list[str]:
+        return sorted(t.name for t in self._tools.values() if self._visible(t, active_game))
+
+    def openai_schema(self, active_game: str | None = None) -> list[dict]:
+        """转成 OpenAI chat.completions 的 tools 参数（按名排序以利用 prompt cache）。
+
+        游戏工具按当前活跃游戏过滤：无活跃游戏时只暴露各游戏的 start；
+        有活跃游戏时只暴露该游戏的工具，避免 Wordle + Chess 同时撑爆上下文。
+        """
         return [
             {
                 "type": "function",
@@ -44,7 +53,16 @@ class ToolRegistry:
                 },
             }
             for t in sorted(self._tools.values(), key=lambda x: x.name)
+            if self._visible(t, active_game)
         ]
+
+    @staticmethod
+    def _visible(tool: Tool, active_game: str | None) -> bool:
+        if tool.game is None:
+            return True
+        if active_game is None:
+            return tool.phase == "start"
+        return tool.game == active_game
 
     async def dispatch(self, name: str, args: dict) -> tuple[bool, str]:
         """执行工具。返回 (ok, 结果文本)；任何异常都转成错误文本回填，不打断 agent loop。"""

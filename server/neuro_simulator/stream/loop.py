@@ -20,11 +20,12 @@ turn_end / chat_message / priority_message / tool_start / tool_result
 
 import asyncio
 import contextlib
+import inspect
 import logging
 import random
 import time
 import uuid
-from typing import Any, Callable, Optional
+from typing import Any, Awaitable, Callable, Optional, Union
 
 from ..broadcaster import EventBroadcaster
 from . import media
@@ -127,7 +128,9 @@ class StreamLoop:
                 return
             await asyncio.sleep(min(remaining, 0.2))
 
-    async def run_game_action(self, action: Callable[[], dict[str, Any]]) -> dict[str, Any]:
+    async def run_game_action(
+        self, action: Callable[[], Union[dict[str, Any], Awaitable[dict[str, Any]]]]
+    ) -> dict[str, Any]:
         """串行执行 game 动作；默认先等语音播完，配置可关闭等待。"""
         async with self._game_action_lock:
             try:
@@ -136,7 +139,10 @@ class StreamLoop:
                 wait_speech = True
             if wait_speech:
                 await self.wait_for_speech_end()
-            return action()
+            result = action()
+            if inspect.isawaitable(result):
+                result = await result
+            return result
 
     def ui_settings(self) -> dict[str, Any]:
         """画面端运行参数（snapshot 下发；配置热重载时广播 settings 事件）。"""
@@ -449,7 +455,7 @@ class StreamLoop:
 
     async def _finalize(self) -> None:
         self.chatbot.stop_session()
-        self.games.clear()
+        await self.games.aclear()
         # 若停止时仍有在途轮次，先按正常轮次结束广播 turn_end（画面据此进入淡出）
         self._end_turn("stopped")
         was = self.state

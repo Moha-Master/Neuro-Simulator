@@ -54,6 +54,7 @@ dev = [
     "black",
     "flake8",
 ]
+chess = ["esca>=0.4"]
 
 # 前端构建 hook：dashboard 恢复构建；client 部分仍保持禁用（待 client 重写后恢复）
 [tool.hatch.build.hooks.custom]

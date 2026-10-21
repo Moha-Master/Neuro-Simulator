@@ -27,6 +27,7 @@ from ..broadcaster import EventBroadcaster
 from ..config import get_config
 from . import tts
 from .agent import NeuroAgent
+from .games import StreamGameProvider
 from .mcp_client import MCPManager
 from .memory import MemoryError, MemoryStore
 from .persona import PLACEHOLDERS, PersonaError, PersonaStore
@@ -180,7 +181,7 @@ async def _hot_reload(app: FastAPI) -> None:
 
     print(
         f"[neuro-sama] hot reload: model={(svc.model if svc else cfg.NEURO_MODEL_REF) or cfg.NEURO_MODEL_REF or None!r} host={cfg.HOST}:{cfg.PORT} "
-        f"tools={agent.registry.names()}",
+        f"tools={agent.registry.all_names()}",
         flush=True,
     )
 
@@ -211,7 +212,7 @@ def create_app() -> FastAPI:
             if svc
             else None
         )
-        agent = NeuroAgent(client, registry, storage, memory, persona)
+        agent = NeuroAgent(client, registry, storage, memory, persona, StreamGameProvider())
         app.state.agent = agent
         app.state.memory = memory
         app.state.persona = persona
@@ -221,7 +222,7 @@ def create_app() -> FastAPI:
         app.state.broadcaster = EventBroadcaster()
         print(
             f"[neuro-sama] ready: model_ref={cfg.NEURO_MODEL_REF!r} "
-            f"model={svc.model if svc else None} db={cfg.DB_PATH} tools={registry.names()}",
+            f"model={svc.model if svc else None} db={cfg.DB_PATH} tools={registry.all_names()}",
             flush=True,
         )
         yield
@@ -244,7 +245,7 @@ def create_app() -> FastAPI:
             "model": svc.model if svc else None,
             "model_service": cfg.NEURO_MODEL_REF or None,
             "model_service_ok": svc is not None,
-            "tools": app.state.agent.registry.names(),
+            "tools": app.state.agent.registry.all_names(),
             "memory_entries": app.state.memory.count,
             "persona": app.state.persona.stats(),
             "tts": tts.tts_state(),

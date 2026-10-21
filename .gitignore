@@ -131,3 +131,4 @@ config.yaml
 
 AGENTS.md
 .playwright-cli/
+references/
