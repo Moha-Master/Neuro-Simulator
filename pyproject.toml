@@ -8,7 +8,8 @@ version = "0.7.0"
 description = "Neuro Simulator Server"
 readme = "README.md"
 authors = [{ name = "Moha-Master", email = "hongkongreporter@outlook.com" }]
-license = "MIT"
+license = "GPL-3.0-or-later"
+license-files = ["LICENSE", "NOTICE"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",

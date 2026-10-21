@@ -264,6 +264,7 @@ class TestChessMirror(unittest.TestCase):
     def make_game(self, moves: str = "") -> ChessGame:
         hub = GameHub(publish=lambda ev: None, set_scene=lambda sid: None)
         game = ChessGame(hub)
+        game.game_id = "testgame"
         game.status = "playing"
         game.my_color = "white"
         game.color_known = True
@@ -331,6 +332,72 @@ class TestChessMirror(unittest.TestCase):
         self.assertFalse(state["in_check"])
         self.assertEqual(state["moves"], ["d2d4"])
         self.assertIn("3P4", state["fen"])
+
+    def test_legal_moves_are_listed_as_san(self):
+        game = self.make_game()
+        sans = game._legal_san()
+        self.assertIn("Nf3", sans)
+        self.assertIn("e4", sans)
+        # 列表里不应再出现 4 字符的 UCI 形式
+        self.assertNotIn("g1f3", sans)
+        self.assertEqual(game.state()["legal_moves_san"], sans)
+        self.assertEqual(len(game.state()["legal_moves"]), len(sans))
+
+    def test_castling_uses_standard_uci(self):
+        game = self.make_game("e2e4 e7e5 g1f3 b8c6 f1c4 f8c5")
+        self.assertIn("O-O", game._legal_san())
+        self.assertIn("e1g1", game._legal_uci())  # 标准 UCI，不是 esca 内部的 e1h1
+        uci = game._resolve_move("O-O")
+        self.assertEqual(uci, "e1g1")
+        # 0-0 / e1g1 两种输入都接受
+        self.assertEqual(game._resolve_move("0-0"), "e1g1")
+        self.assertEqual(game._resolve_move("e1g1"), "e1g1")
+        info = game._move_info(game.board.position.parse_uci(uci))
+        self.assertEqual(info["san"], "O-O")
+        self.assertEqual(info["to"], "g1")  # 王的落点，不是车格 h1
+        self.assertIsNone(info["captured"])  # 不能把自己的车当成被吃
+
+    def test_black_castling(self):
+        game = self.make_game()
+        game.my_color = "black"
+        game.initial_fen = "r3k2r/8/8/8/8/8/8/R3K2R b KQkq - 0 1"
+        game._set_moves("")
+        self.assertIn("O-O", game._legal_san())
+        self.assertEqual(game._resolve_move("O-O"), "e8g8")
+
+    def test_move_labels_capture_and_side(self):
+        game = self.make_game("e2e4 d7d5 e4d5")
+        game.black_name = "Stockfish level 3"
+        text = game.describe()
+        self.assertIn("You are White. Opponent: Stockfish level 3.", text)
+        self.assertIn(
+            "Last move: You played exd5, capturing Black's pawn on d5 (e4d5).", text
+        )
+        self.assertIn("It is Stockfish level 3's turn.", text)
+
+    def test_describe_labels_opponent_move(self):
+        game = self.make_game("e2e4 e7e5")
+        game.black_name = "Stockfish level 3"
+        text = game.describe()
+        self.assertIn("Last move: Stockfish level 3 played e5 (e7e5).", text)
+        self.assertIn("It is your turn to move.", text)
+
+    def test_describe_omits_game_id_and_bot_name(self):
+        game = self.make_game("e2e4 e7e5")
+        game.game_id = "aCJXWdGy"
+        game.white_name = "Files-Transfer-Bot"
+        text = game.describe()
+        self.assertNotIn("aCJXWdGy", text)
+        self.assertNotIn("Files-Transfer-Bot", text)
+
+    def test_illegal_move_reports_legal_san(self):
+        game = self.make_game()
+        with self.assertRaises(GameError) as ctx:
+            game._resolve_move("Bg4")
+        message = str(ctx.exception)
+        self.assertIn("is not a legal move", message)
+        self.assertIn("Nf3", message)
+        self.assertNotIn("g1f3", message)
 
 
 class TestSceneCatalogContract(unittest.TestCase):

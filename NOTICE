@@ -1,0 +1,80 @@
+Neuro Simulator
+Copyright (C) 2025 Moha-Master
+
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU General Public License as published by
+the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License
+along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
+
+======================================================================
+Third-party components
+======================================================================
+
+Bundled into the built frontend shipped inside the Python wheel
+----------------------------------------------------------------------
+
+1. chessground — frontend chess board
+   Package:   @lichess-org/chessground
+   Version:   10.5.0
+   License:   GPL-3.0-or-later
+   Copyright: Lichess contributors
+   Source:    https://github.com/lichess-org/chessground
+
+   stream/ui bundles chessground (including the "cburnett" piece-set SVG
+   artwork embedded in its CSS) into stream/ui/dist, which hatch_build.py
+   force-includes into the wheel as neuro_simulator/stream/ui/.
+
+2. Vuetify — dashboard UI framework / starter template
+   License:   MIT
+   Copyright: 2016-present Vuetify, LLC
+   Source:    https://github.com/vuetifyjs/vuetify
+
+   dashboard/ is derived from the Vuetify starter template. Its original
+   MIT notice is preserved in dashboard/README.md and is NOT relicensed by
+   this project's GPL-3.0-or-later.
+
+Optional Python dependencies (installed separately, not vendored)
+----------------------------------------------------------------------
+
+3. esca — chess rules, move generation, SAN/FEN
+   Version:   0.4.0
+   License:   MIT
+   Copyright: Alexander Myodov
+   Source:    https://github.com/AnglerfishChess/esca
+
+   Installed only when the user asks for the extra:
+   `pip install 'neuro_simulator[chess]'`.
+
+
+Data files
+----------------------------------------------------------------------
+
+4. Wordle word lists
+   Files:   server/neuro_simulator/stream/defaults/wordle_dictionary.txt
+            server/neuro_simulator/stream/defaults/wordle_answers_common.txt
+            server/neuro_simulator/stream/defaults/wordle_answers_neuro.txt
+   License: CC-BY-SA-4.0 for the derived lists
+
+   Sources:
+     - Neurdle (MIT) — https://github.com/Firecrafters/Neurdle
+       English dictionary and Neuro-themed answer words.
+     - FrequencyWords (content: CC-BY-SA-4.0) —
+       https://github.com/hermitdave/FrequencyWords
+       en_50k word-frequency list, used to rank and filter words.
+
+   The word lists above are adaptations of those sources and are distributed
+   under CC-BY-SA-4.0. For the purpose of combining them with this program,
+   CC BY-SA 4.0 is compatible with GPL-3.0-or-later.
+
+5. Wordle visual / interaction reference
+   Project: Neurdle (MIT) — https://github.com/Firecrafters/Neurdle
+   Notes:   colour assignment rules and tile flip animation timing.

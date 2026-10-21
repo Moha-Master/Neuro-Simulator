@@ -3,7 +3,7 @@ name = "neuro-simulator"
 version = "0.2.16"
 description = "Neuro Simulator Tauri Client"
 authors = ["Moha-Master"]
-license = "MIT"
+license = "GPL-3.0-or-later"
 repository = "https://github.com/Moha-Master/Neuro-Simulator"
 edition = "2021"
 [lib]

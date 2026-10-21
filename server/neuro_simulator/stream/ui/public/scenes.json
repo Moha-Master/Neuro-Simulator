@@ -344,7 +344,7 @@
       "id": "play_chess",
       "label": "Chess",
       "icon": "mdi-chess-knight",
-      "prompt_context": "You are playing online Chess on Lichess against a Lichess AI. Prefer UCI moves like e2e4, e7e8q, or e1g1; SAN like Nf3 is also accepted. Take one move at a time and react to the board after the tool result.",
+      "prompt_context": "You are playing online Chess on Lichess against the Lichess AI. Call game_chess_move with one move copied verbatim from the 'Your legal moves' list (SAN like Nf3, O-O, exd5). The result says what you played, how the opponent replied, and your new legal moves. One move per call.",
       "elements": [
         {
           "id": "bg_room",

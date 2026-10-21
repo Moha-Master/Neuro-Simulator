@@ -123,7 +123,7 @@ def build_game_tools() -> list[Tool]:
         "properties": {
             "move": {
                 "type": "string",
-                "description": "Chess move in UCI (e2e4, e7e8q, e1g1) or SAN (e4, Nf3, O-O).",
+                "description": "One move, copied from the 'Your legal moves' list (SAN: e4, Nf3, O-O, exd5, e8=Q). UCI like g1f3 also works.",
             },
         },
         "required": ["move"],
@@ -189,16 +189,17 @@ def build_game_tools() -> list[Tool]:
         ),
         tool(
             "game_chess_move",
-            "Play one Chess move in the active Lichess game. Prefer UCI notation like e2e4, e7e8q, or "
-            "e1g1; SAN like Nf3 is also accepted. The result shows the board and your legal replies.",
+            "Play one Chess move in the active Lichess game. Copy a move verbatim from the 'Your legal moves' "
+            "list (SAN like Nf3, O-O, exd5). The result says what you played, how the opponent replied, "
+            "and your new legal moves.",
             move_args,
             "move",
             game="chess",
         ),
         tool(
             "game_chess_state",
-            "Look at the current Chess board again: FEN, side to move, clock, last move, result if any, "
-            "and the legal moves you can choose from.",
+            "Look at the current Chess board again: your colour, the opponent, the last move, whose turn it is, "
+            "clock, FEN, and your legal moves.",
             no_args,
             "state",
             game="chess",

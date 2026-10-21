@@ -48,6 +48,27 @@ def _format_clock(ms: Optional[int]) -> str:
     return f"{total // 60:02d}:{total % 60:02d}"
 
 
+_PIECE_NAMES = {
+    "p": "pawn",
+    "n": "knight",
+    "b": "bishop",
+    "r": "rook",
+    "q": "queen",
+    "k": "king",
+}
+
+_STATUS_TEXT = {
+    "mate": "checkmate",
+    "resign": "resignation",
+    "outoftime": "timeout",
+    "timeout": "timeout",
+    "draw": "draw",
+    "stalemate": "stalemate",
+    "aborted": "aborted",
+    "cheat": "cheat detected",
+}
+
+
 @register
 class ChessGame(Game):
     id = "chess"
@@ -143,12 +164,12 @@ class ChessGame(Game):
             ),
             timeout=8.0,
         )
-        self._set_flash("info", f"Online Chess started on Lichess ({self.game_id})")
-        return (
-            f"Online Chess started on Lichess against the Lichess AI (level {s.ai_level}). "
-            f"You are {self.my_color}. Game URL: {self.url}. "
-            "Call game_chess_move with UCI like e2e4 or SAN like Nf3."
-        )
+        self._set_flash("info", "Online Chess started")
+        header = [
+            f"Online Chess started on Lichess against {self._opponent_name()}.",
+            "Copy one move from the 'Your legal moves' list below and call game_chess_move with it.",
+        ]
+        return self._state_text(header)
 
     async def act(self, action: str, args: Dict[str, Any]) -> str:
         if action == "move":
@@ -189,6 +210,7 @@ class ChessGame(Game):
             },
             "board": self._board_array(),
             "legal_moves": legal,
+            "legal_moves_san": self._legal_san(),
             "legal_move_count": len(legal),
             "last_move": self.last_move,
             "moves": list(self.moves),
@@ -214,29 +236,42 @@ class ChessGame(Game):
             return self._over_text()
         if not self.color_known:
             raise GameError(
-                "Lichess has not confirmed your color yet. Call game_chess_state to sync the board first."
+                "Lichess has not confirmed your colour yet. Call game_chess_state to sync the board first."
             )
         if self.turn != self.my_color:
-            raise GameError("It is not your turn yet. Wait for the opponent reply or call game_chess_state.")
-        try:
-            uci = self._resolve_move(raw)
-        except GameError:
-            raise
+            raise GameError(
+                f"It is {self._opponent_name()}'s turn. Wait, or call game_chess_state to refresh."
+            )
+        uci = self._resolve_move(raw)
+        info = self._move_info(self.board.position.parse_uci(uci))
         before = len(self.moves)
         try:
-            await self.client.move(self.game_id, uci)
+            await self.client.move(self.game_id, info["uci"])
         except LichessError as e:
             raise GameError(str(e)) from e
 
-        ok = await self._wait_for(
-            lambda: self.error or self.status != "playing" or (len(self.moves) > before and self.turn == self.my_color),
+        await self._wait_for(
+            lambda: (
+                self.error
+                or self.status != "playing"
+                or (len(self.moves) > before + 1 and self.turn == self.my_color)
+            ),
             timeout=45.0,
         )
         if self.error:
             raise GameError(f"Lichess connection failed after {raw}: {self.error}")
-        if not ok:
-            raise GameError("Lichess did not update the game after that move. Check game_chess_state before moving again.")
-        return self.describe()
+        if len(self.moves) <= before:
+            raise GameError(
+                "Lichess did not accept that move. Call game_chess_state and pick one of your legal moves."
+            )
+
+        header = [self._move_line("You played", info)]
+        if len(self.moves) > before + 1 and self.last_move:
+            # 对手已经回棋（哪怕这一手直接把棋局终结，也要写出来）
+            header.append(self._move_line(f"{self._opponent_name()} replied", self.last_move))
+        elif self.status == "playing":
+            header.append(f"{self._opponent_name()} has not replied yet.")
+        return self._state_text(header)
 
     async def _resign(self) -> str:
         if self.status != "playing" or not self.client or not self.game_id:
@@ -387,6 +422,35 @@ class ChessGame(Game):
 
     # ---------- 棋盘镜像 ----------
 
+    def _uci_of(self, mv: Any) -> str:
+        """标准 UCI。esca 的易位是"王吃车"形式（e1h1），对外一律用 e1g1。"""
+        uci = self.board.move_to_uci(mv)
+        san = str(self.board.move_to_san(mv))
+        if not san.startswith("O-O"):
+            return uci
+        rank = str(mv.origin)[1:] or uci[1:2]
+        return f"e{rank}{'g' if san == 'O-O' else 'c'}{rank}"
+
+    def _move_info(self, mv: Any) -> Dict[str, Any]:
+        """把一个合法着法整理成报表用的结构（不改动棋盘）。"""
+        pos = self.board.position
+        san = str(self.board.move_to_san(mv))
+        destination = str(mv.destination)
+        captured = pos.piece_at(destination)
+        uci = self._uci_of(mv)
+        if san.startswith("O-O"):
+            # esca 用"王吃车"表示易位：mv.destination 是车格，不是王落点
+            destination = uci[2:4]
+            captured = None
+        return {
+            "uci": uci,
+            "san": san,
+            "from": str(mv.origin),
+            "to": destination,
+            "by": str(pos.side_to_move),
+            "captured": captured,
+        }
+
     def _set_moves(self, moves_text: str) -> None:
         self.moves = [m for m in moves_text.split() if m]
         self._replay()
@@ -398,46 +462,53 @@ class ChessGame(Game):
         for uci in self.moves:
             try:
                 mv = self.board.position.parse_uci(uci)
-                san = self.board.move_to_san(mv)
+                self.last_move = self._move_info(mv)
                 self.board.play(mv)
-                self.last_move = {
-                    "uci": uci,
-                    "san": san,
-                    "from": str(mv.origin),
-                    "to": str(mv.destination),
-                }
             except Exception as e:
                 self.error = f"Failed to replay Lichess move {uci!r}: {e}"
                 logger.warning(self.error)
                 break
 
     def _resolve_move(self, raw: str) -> str:
-        text = raw.strip()
+        text = raw.strip().strip("`'\"").rstrip(".")
         if not text:
-            raise GameError("No move given. Use UCI like e2e4 or SAN like Nf3.")
-        legal = self._legal_uci()
+            raise GameError("No move given. Copy one from the 'Your legal moves' list, e.g. Nf3 or O-O.")
+        legal_san = self._legal_san()
+        legal_uci = self._legal_uci()
         if text.isdigit():
             idx = int(text) - 1
-            if 0 <= idx < len(legal):
-                return legal[idx]
-            raise GameError(f"No legal move #{text}. Legal moves are: {' '.join(legal)}")
+            if 0 <= idx < len(legal_uci):
+                return legal_uci[idx]
+            raise GameError(f"No legal move #{text}. Your legal moves: {' '.join(legal_san)}")
+        text = text.replace("0-0-0", "O-O-O").replace("0-0", "O-O")
         try:
             mv = self.board.position.parse_uci(text)
-            return self.board.move_to_uci(mv)
+            return self._uci_of(mv)
         except Exception:
             pass
         try:
             mv = self.board.position.parse_san(text)
-            return self.board.move_to_uci(mv)
+            return self._uci_of(mv)
         except Exception:
             pass
-        raise GameError(f"Illegal move {text!r}. Legal moves are: {' '.join(legal)}")
+        raise GameError(
+            f"{text!r} is not a legal move in this position. "
+            f"Your legal moves ({len(legal_san)}): {' '.join(legal_san)}"
+        )
 
     def _legal_uci(self) -> List[str]:
         if self.status != "playing" or not self.color_known or self.turn != self.my_color:
             return []
         try:
-            return [self.board.move_to_uci(m) for m in self.board.legal_moves()]
+            return [self._uci_of(m) for m in self.board.legal_moves()]
+        except Exception:
+            return []
+
+    def _legal_san(self) -> List[str]:
+        if self.status != "playing" or not self.color_known or self.turn != self.my_color:
+            return []
+        try:
+            return [self.board.move_to_san(m) for m in self.board.legal_moves()]
         except Exception:
             return []
 
@@ -458,35 +529,76 @@ class ChessGame(Game):
     # ---------- 文本 ----------
 
     def describe(self) -> str:
+        return self._state_text()
+
+    def _opponent_name(self) -> str:
+        return self.black_name if self.my_color == "white" else self.white_name
+
+    def _capture_text(self, piece: Optional[str], square: str) -> str:
+        if not piece:
+            return ""
+        token = str(piece)
+        name = _PIECE_NAMES.get(token.lower(), "piece")
+        mine = (token.isupper() and self.my_color == "white") or (
+            token.islower() and self.my_color == "black"
+        )
+        owner = "your" if mine else ("White's" if token.isupper() else "Black's")
+        return f", capturing {owner} {name} on {square}"
+
+    def _move_line(self, prefix: str, info: Dict[str, Any]) -> str:
+        return (
+            f"{prefix} {info['san']}"
+            f"{self._capture_text(info.get('captured'), str(info.get('to') or ''))} "
+            f"({info['uci']})."
+        )
+
+    def _clock_line(self) -> str:
+        other = "black" if self.my_color == "white" else "white"
+        mine_ms = self.clock.get(self.my_color + "_ms")
+        other_ms = self.clock.get(other + "_ms")
+        return f"Clock: you {_format_clock(mine_ms)}, opponent {_format_clock(other_ms)}."
+
+    def _result_line(self) -> str:
+        status = _STATUS_TEXT.get(self.lichess_status, self.lichess_status)
+        if self.winner == self.my_color:
+            return f"Game over: {status}. You won ({self.result})."
+        if self.winner:
+            return f"Game over: {status}. You lost ({self.result})."
+        return f"Game over: {status}. No winner ({self.result})."
+
+    def _state_text(self, header: Optional[List[str]] = None) -> str:
         if not self.game_id:
             return "Chess is idle. Start an online game with game_chess_start."
-        lines = [
-            f"Online Chess on Lichess ({self.game_id}).",
-            f"You are {self.my_color}. White: {self.white_name}. Black: {self.black_name}.",
-        ]
-        if self.last_move:
-            lines.append(f"Last move: {self.last_move['san']} ({self.last_move['uci']}).")
+        lines: List[str] = []
+        if header:
+            lines.extend(header)
+            lines.append("")
+        lines.append(f"You are {self.my_color.capitalize()}. Opponent: {self._opponent_name()}.")
+        if self.my_color == "black":
+            lines.append("The board is drawn from White's side; your pieces are the lowercase letters.")
+        if not header and self.last_move:
+            who = "You" if self.last_move.get("by") == self.my_color else self._opponent_name()
+            lines.append(self._move_line(f"Last move: {who} played", self.last_move))
         if self.status == "playing":
             if self.turn == self.my_color:
-                lines.append("It is YOUR turn to move.")
+                lines.append("It is your turn to move.")
             else:
-                lines.append(
-                    f"It is the opponent's turn ({self.turn}). Do not move yet; "
-                    "wait until game_chess_state says it is your turn."
-                )
+                lines.append(f"It is {self._opponent_name()}'s turn. Do not move yet.")
             if self.board.position.in_check:
-                lines.append("Check: yes.")
-            lines.append(f"Clock: White {_format_clock(self.clock.get('white_ms'))}, Black {_format_clock(self.clock.get('black_ms'))}.")
+                lines.append(
+                    "You are in check." if self.turn == self.my_color else "The opponent is in check."
+                )
+            lines.append(self._clock_line())
         else:
-            lines.append(f"Game over: {self.lichess_status}. Result: {self.result}.")
+            lines.append(self._result_line())
         lines.append("")
         lines.append("Board:")
         lines.extend(self._board_text_lines())
         lines.append("")
         lines.append(f"FEN: {self.board.position.fen}")
-        legal = self._legal_uci()
+        legal = self._legal_san()
         if legal:
-            lines.append(f"Legal moves ({len(legal)}): {' '.join(legal)}")
+            lines.append(f"Your legal moves ({len(legal)}): {' '.join(legal)}")
         return "\n".join(lines)
 
     def _board_text_lines(self) -> List[str]:
@@ -497,7 +609,11 @@ class ChessGame(Game):
         return lines
 
     def _over_text(self) -> str:
-        return f"This Chess game is over: {self.result}. Start another game or exit to stop playing."
+        status = _STATUS_TEXT.get(self.lichess_status, self.lichess_status)
+        return (
+            f"This Chess game is over: {status} ({self.result}). "
+            "Call game_chess_restart for a rematch, or game_chess_exit to leave."
+        )
 
     def _set_flash(self, kind: str, text: str) -> None:
         self._flash_seq += 1
