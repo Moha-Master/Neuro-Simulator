@@ -1,10 +1,13 @@
 /** 场景声明格式（纯数据，可序列化为 JSON / 未来直接进 DB 由 dashboard 编辑）。
  *
- * 模型：**场景 = 元素清单 + 可选固定时长脚本 + neuro 窗口层**。每个元素有稳定
- * `id`、内容（图片/视频/纯色/文本/组件）、相对舞台的比例化几何、层级、以及
- * 生命周期脚本（出现/消失/跨场景移动）；场景可声明 `timeline`，由引擎按秒执行。
- * neuro 窗口（背景/立绘/字幕）是单独的一层（`neuro`），由整窗 iframe 承载，
- * 合成器只对它做 translate+scale。
+ * 模型：**场景 = 元素清单 + 前端脚本 + 可选后端脚本 + neuro 窗口层**。每个元素有
+ * 稳定 `id`、内容（图片/视频/纯色/文本/组件）、相对舞台的比例化几何、层级、以及
+ * 生命周期脚本（出现/消失/跨场景移动）。
+ *
+ * **一份数据、两个执行者**（服务端 `stream/scenes.py` 加载时校验这条边界）：
+ * - `timeline`（前端脚本）：由各渲染器的元素引擎按秒执行，只动 DOM；
+ * - `state_script`（后端脚本）：由服务端 `scene_kit.SceneRunner` 执行，只改权威
+ *   状态（`scene.set`），改完广播 `scene_set`，所有渲染器按 `elapsed` 收敛。
  *
  * 关键约定：
  * - **同 id 跨场景 = 同一个 DOM 节点与同一个组件实例**，所以"聊天层从旧位置平滑移动
@@ -14,6 +17,7 @@
  *   `container-type: inline-size`），所以场景改元素的大小，元素里的字号会跟着缩。
  * - `scale` / `rotate` 会写进 `transform`，与内部自己动 transform 的动作互斥；
  *   需要放大用 `w`，别用 scale。
+ * - 元素引擎（`core/elements.ts`）与 neuro 窗口那份**逐字相同**，有测试防漂移。
  */
 
 /** 相对舞台的几何：x/y 是边缘锚点（默认左上），数值为舞台宽/高的比例（0..1，可超出=沉出画面）。 */
@@ -47,29 +51,41 @@ export type Script =
       easing?: string;
     };
 
-/** 场景时间线的一步：进入场景后第 `at` 秒对 `element` 执行动作。
+/** 前端脚本的一步：`at`（或 `at_end`）对 `element` 执行动作。
  *
- * `duration` 是动作占用的秒数（视频播放、补间等）；它既是场景总时长的一部分，
- * 也是中途连接时判断“该步已播到哪”的依据。瞬时动作可省略（0）。
+ * `duration` 是动作占用的秒数（视频播放、补间等），也是中途连接时判断
+ * "该步已播到哪"的依据；`media.play` 省略它 = 播到场景结束。瞬时动作可省略（0）。
  * 内置动作：`element.show` / `element.hide` / `media.play` / `media.pause`；
- * 其余按名字查 `core/action.ts` 的 ACTIONS。
+ * 其余按名字查 `core/action.ts` 的 ACTIONS。**这里不能写 scene.set**。
  */
 export interface TimelineStep {
-  at: number;
+  at?: number;
+  /** 相对场景有效时长的提前量：at = duration - at_end */
+  at_end?: number;
   element: string;
   action: string;
   params?: Record<string, unknown>;
   duration?: number;
 }
 
-/** 场景脚本：固定时长 + 从进入场景开始计时的动作时间线。
- *
- * 当前没有内置场景使用（开播 intro 已移到 neuro 窗口）；保留给未来的固定时长
- * 场景。前端只按这份数据渲染；某个画面卡住不会反过来影响后端。
- */
+/** 前端脚本：从进入场景开始计时的 DOM 时间线。 */
 export interface SceneTimeline {
-  duration: number;
+  /** 数据声明的时长（回退值）；宿主可以用探测值覆盖（`setScene(id,{duration})`） */
+  duration?: number;
   steps: TimelineStep[];
+}
+
+/** 后端脚本的一步：只允许状态动作（服务端校验），由后端按自己的时钟执行。 */
+export interface StateStep {
+  at?: number;
+  at_end?: number;
+  action: "scene.set";
+  scene: string;
+  duration?: number;
+}
+
+export interface StateScript {
+  steps: StateStep[];
 }
 
 export interface ElementDef {
@@ -88,7 +104,7 @@ export interface ElementDef {
 /** neuro 窗口层（iframe）的场景配置：整窗只有 translate+scale，不进入内部。
  *
  * - x/y/w 是相对舞台的比例；w 同时决定整窗缩放（16:9 画布，height 自然为 w）。
- * - hide 是让 neuro 窗口隐藏的层 id（目前主要是 bg_room；媒体场景要露出合成器背景）。
+ * - hide 是让 neuro 窗口隐藏的**层 id** 列表（neuro 加新层不必改合成器代码）。
  * - hidden = 本场景完全不显示 neuro（offline/no-source）。
  */
 export interface NeuroLayerConfig {
@@ -111,8 +127,12 @@ export interface SceneDef {
   /** 默认 false；true = 只能程序化调用（on_scene），不出现在 dashboard /
    *  GET /stream/scenes，且 POST /scene 拒绝。starting_soon 这类内部场景设 true。 */
   hidden?: boolean;
-  /** 固定时长的场景脚本；当前没有内置场景使用（intro 已移到 neuro 窗口） */
+  /** 场景有效时长：秒数，或"按某个 video 元素的轨道时长 + 之后还剩的秒数" */
+  duration?: number | { media: string; after: number };
+  /** 前端脚本（元素引擎执行）；当前没有内置场景使用 */
   timeline?: SceneTimeline;
+  /** 后端脚本（服务端执行，只改状态）；当前没有内置场景使用 */
+  state_script?: StateScript;
   /** neuro 窗口层；缺省 = 本场景不显示 neuro */
   neuro?: NeuroLayerConfig;
   elements: ElementDef[];

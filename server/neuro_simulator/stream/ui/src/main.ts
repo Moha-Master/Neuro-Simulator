@@ -24,7 +24,7 @@ import {
   type NeuroSettings,
   type Snapshot,
 } from "./core/feed";
-import { SCENE_ROOM, SCENE_STARTING_SOON, fetchScenes } from "./scenes";
+import { SCENE_ROOM, SCENE_ROOM_INTRO, SCENE_STARTING_SOON, fetchScenes } from "./scenes";
 import type { SceneDef } from "./scenes/schema";
 
 const VIA_VEDAL = window.location.pathname.includes("/manage/stream/ui");
@@ -96,7 +96,7 @@ async function boot(): Promise<void> {
 
   async function setScene(
     id: string,
-    opts: { instant?: boolean; elapsed?: number } = {},
+    opts: { instant?: boolean; elapsed?: number; duration?: number } = {},
   ): Promise<void> {
     try {
       await engine.setScene(id, opts);
@@ -176,7 +176,12 @@ async function boot(): Promise<void> {
     if (snap.state === "starting" || snap.state === "live" || snap.state === "paused") {
       // 落到 snapshot 声明的实际场景（含循环期间手动切换过的场景），未知则 room。
       // 重连用 instant：不重复播淡入，画面不会因为 SSE 断开重连而闪一下。
-      void setScene(snap.scene || SCENE_ROOM, { instant: true });
+      // elapsed/duration 供场景前端脚本（timeline）断点恢复。
+      void setScene(snap.scene?.id || SCENE_ROOM, {
+        instant: true,
+        elapsed: Number(snap.scene?.elapsed ?? 0),
+        duration: Number(snap.scene?.duration ?? 0),
+      });
     } else {
       void setScene(SCENE_STARTING_SOON, { instant: true });
     }
@@ -193,10 +198,12 @@ async function boot(): Promise<void> {
     streamState = s;
     updateSource();
     if (s === "starting" || s === "live" || s === "paused") {
-      // 后端是唯一时钟：进入 starting/live 时若还停在待机，直接落 room。
-      // 已经在某个直播场景里（含游戏）就别把它拽回 room——暂停/继续不该换画面。
+      // 后端是唯一时钟：若还停在待机，就落到**该阶段**的默认画面——
+      // starting 用 room_intro（chat 不该盖在开场动画上），live/paused 用 room。
+      // 已经在某个直播场景里（含游戏）就别把它拽回去——暂停/继续不该换画面。
+      // 正常路径由 scene_set 驱动，这里只兜"迟到的渲染器"。
       if (!engine.current || engine.current.id === SCENE_STARTING_SOON) {
-        void setScene(SCENE_ROOM);
+        void setScene(s === "starting" ? SCENE_ROOM_INTRO : SCENE_ROOM);
       }
     } else if (s === "offline") {
       chat?.clear();
@@ -206,7 +213,10 @@ async function boot(): Promise<void> {
   });
 
   feed.on("scene_set", (ev: FeedEvent) => {
-    void setScene(String(ev.id ?? ""));
+    void setScene(String(ev.id ?? ""), {
+      elapsed: Number(ev.elapsed ?? 0),
+      duration: Number(ev.duration ?? 0),
+    });
   });
 
   feed.on("element_state", (ev: FeedEvent) => {

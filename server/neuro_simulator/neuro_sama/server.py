@@ -36,7 +36,7 @@ from .memory import MemoryError, MemoryStore
 from .persona import PLACEHOLDERS, PersonaError, PersonaStore
 from .storage import Storage
 from .tools import ToolRegistry, build_builtin_tools
-from .ui_scene import SceneLoopError, SceneRunner
+from .ui_scene import SceneLoopError, make_runner
 from .ui_state import UiState
 
 _DIM = "\033[2m"
@@ -247,7 +247,7 @@ def create_app() -> FastAPI:
         app.state.broadcaster = EventBroadcaster()
         app.state.ui_broadcaster = EventBroadcaster()
         app.state.ui_state = UiState()
-        app.state.ui_scene = SceneRunner(
+        app.state.ui_scene = make_runner(
             app.state.ui_state, app.state.ui_broadcaster.publish
         )
         try:
@@ -288,6 +288,25 @@ def create_app() -> FastAPI:
             "memory_entries": app.state.memory.count,
             "persona": app.state.persona.stats(),
             "tts": tts.tts_state(),
+        }
+
+    # ---------- 状态投影（其他模块消费） ----------
+
+    @app.get("/status")
+    async def status(request: Request):
+        """跨模块的状态投影：当前场景 + 语音节奏 + 在途轮次，**不含音频**。
+
+        与 `/ui/state` 的分工：那边是**画面快照**（逐句 consumed + 正在发声那句的
+        base64 音频，给渲染器断点续播）；这边是**状态投影**，可以被别的模块每半秒
+        拉一次而不拖几 MB。stream 的直播循环用它判"开场是否放完"与下一轮节奏，
+        chatbot 用它判她是不是睡着了。
+        """
+        cfg = get_config()
+        channel = (request.query_params.get("channel") or "").strip() or None
+        return {
+            "module": "neuro_sama",
+            "model_service_ok": cfg.neuro_llm() is not None,
+            **app.state.ui_state.status(channel),
         }
 
     # ---------- 对话 ----------
@@ -668,7 +687,7 @@ def create_app() -> FastAPI:
     async def _switch_scene(scene_id: str) -> dict:
         """切场景的唯一入口：手动端点与 stream 开播都走这里（同一套校验与广播）。"""
         try:
-            info = await app.state.ui_scene.switch(scene_id)
+            info = app.state.ui_scene.switch(scene_id)
         except ui_scenes.UnknownScene as e:
             raise HTTPException(status_code=404, detail=str(e))
         except ui_scenes.SceneError as e:
@@ -692,7 +711,7 @@ def create_app() -> FastAPI:
                 "scenes": ui_scenes.overview(),
                 "default": ui_scenes.default_scene_id(),
                 "refs": ui_scenes.manifest().get("refs") or {},
-                "current": app.state.ui_scene.current(),
+                "current": app.state.ui_state.scene_snapshot(),
             }
         except ui_scenes.SceneError as e:
             raise HTTPException(status_code=500, detail=str(e))

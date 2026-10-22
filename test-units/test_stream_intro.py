@@ -1,8 +1,12 @@
-"""开播 intro 与 stream 合成器场景数据的测试。
+"""开播"开场是否放完"的判定：stream 轮询 neuro 的权威场景，**不倒数任何秒数**。
 
-开播 intro 已移到 neuro 窗口：时长由 neuro 的场景数据（探测视频轨道）给出，
-stream 只调用 POST /ui/intro 并按时长推进 starting→live；stream 的 scenes.json
-不再包含 intro，只声明背景/游戏/chat/highlight + neuro 窗口层。
+链路：`POST neuro /ui/intro` 返回**她切到的场景 id**（不是时长）→ 合成器落
+`room_intro`（neuro 全屏、不显示 chat/highlight）→ stream 每 0.5s 拉 `GET neuro /status`
+→ 她离开那个场景 = 开场放完 → `on_scene("room")` 并同时推进 live。
+
+三条退出路径都有测试：正常放行、人工下播（静默）、硬上限兜底（中止开播 + last_error）。
+硬上限与 neuro 的场景时长无关——只有她永远停在开场（state_script 数据坏、进程假死）
+或状态通道一直读不到时才会走到那里。
 """
 
 import asyncio
@@ -15,11 +19,10 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from neuro_simulator.broadcaster import EventBroadcaster
-from neuro_simulator.neuro_sama import scenes as neuro_scenes
-from neuro_simulator.neuro_sama import ui_media
+from neuro_simulator.stream import loop as loop_module
 from neuro_simulator.stream import scenes as scene_catalog
 from neuro_simulator.stream import settings as stream_settings
-from neuro_simulator.stream.loop import StreamConflict, StreamLoop
+from neuro_simulator.stream.loop import SCENE_ROOM, SCENE_ROOM_INTRO, StreamConflict, StreamLoop
 from neuro_simulator.stream.neuro_client import NeuroError
 from neuro_simulator.stream.persona import ChatbotPersonaStore, build_template_store
 from neuro_simulator.stream.storage import Storage
@@ -27,65 +30,314 @@ from neuro_simulator.stream.storage import Storage
 ROOT = Path(__file__).resolve().parents[1]
 PUBLIC_SCENES = ROOT / "server/neuro_simulator/stream/ui/public/scenes.json"
 NEURO_SCENES = ROOT / "server/neuro_simulator/neuro_sama/ui/public/neuro_scenes.json"
-NEURO_VIDEO = ROOT / "server/neuro_simulator/neuro_sama/ui/public/neuro_start.mp4"
 
 
-def neuro_scenes_data() -> dict:
-    return json.loads(NEURO_SCENES.read_text(encoding="utf-8"))
+def stream_scenes() -> list:
+    return json.loads(PUBLIC_SCENES.read_text(encoding="utf-8"))["scenes"]
 
 
-def scene_of(manifest: dict, sid: str) -> dict:
-    return next(s for s in manifest["scenes"] if s["id"] == sid)
+class _ScriptedNeuro:
+    """neuro 替身：status() 依次吐出预设场景（最后一项会一直重复）。"""
+
+    def __init__(self, scenes: list, fail_first: int = 0) -> None:
+        self.scenes = list(scenes)
+        self.calls = 0
+        self.fail_first = fail_first
+
+    async def health(self) -> dict:
+        return {"status": "ok"}
+
+    async def intro(self) -> str:
+        # 新契约：返回场景 id，不是时长
+        return "intro"
+
+    async def status(self, channel=None) -> dict:
+        self.calls += 1
+        if self.calls <= self.fail_first:
+            raise NeuroError("connection refused")
+        sid = self.scenes[min(self.calls - 1, len(self.scenes) - 1)]
+        return {
+            "module": "neuro_sama",
+            "scene": {"id": sid, "duration": 0.0, "elapsed": 0.0} if sid else None,
+            "speech": {"speaking": False, "remaining_s": 0.0, "text": ""},
+            "turns": {"in_flight": 0},
+        }
+
+    async def stop(self, channel, conversation_id) -> None:
+        return None
 
 
-class TestNeuroIntroData(unittest.TestCase):
-    def test_intro_duration_is_scene_data_probed_by_neuro(self):
-        """开场时长来自 neuro 的场景数据（探测视频轨道 + after），不再写死在 stream。"""
-        video_s = ui_media.probe_mp4_seconds(NEURO_VIDEO)
-        self.assertIsNotNone(video_s)
-        declared = scene_of(neuro_scenes_data(), "intro")["duration"]
-        self.assertAlmostEqual(
-            neuro_scenes.effective_duration("intro"),
-            float(video_s) + declared["after"],
-            delta=0.02,
+class _NoopChatbot:
+    def start_session(self, *args, **kwargs) -> None:
+        pass
+
+    def stop_session(self) -> None:
+        pass
+
+
+def _patch_client(fake):
+    """让 loop 内部 NeuroClient(url) 都拿到同一个替身（跨 start/_main 共享计数）。"""
+    return patch.object(loop_module, "NeuroClient", lambda base_url: fake)
+
+
+class TestIntroSceneData(unittest.TestCase):
+    """场景数据侧：开场画面归 stream 自己声明，neuro 的场景 id 不出现在 stream 清单里。"""
+
+    def test_room_intro_is_a_hidden_neuro_only_scene(self):
+        scenes = {s["id"]: s for s in stream_scenes()}
+        intro = scenes[SCENE_ROOM_INTRO]
+        self.assertTrue(intro["hidden"], "开场画面不该出现在手动/只读场景清单里")
+        self.assertEqual(intro["elements"], [], "开场只有 neuro 窗口层，不叠 chat/highlight")
+        self.assertEqual(intro["neuro"], {"x": 0, "y": 0, "w": 1, "z": 10, "hide": []})
+
+    def test_room_reveals_chat_with_an_enter_script(self):
+        """离开开场后 chat 的出现由数据声明（淡入），不靠前端猜 neuro 的场景。"""
+        room = next(s for s in stream_scenes() if s["id"] == SCENE_ROOM)
+        by_id = {e["id"]: e for e in room["elements"]}
+        for eid in ("chat", "highlight"):
+            enter = by_id[eid].get("script", {}).get("enter")
+            self.assertIsNotNone(enter, f"{eid} 需要 enter 脚本才能在切回 room 时淡入")
+            self.assertIn("opacity", enter.get("tween", {}))
+            self.assertGreater(enter.get("duration", 0), 0)
+
+    def test_neuro_scene_namespace_is_separate(self):
+        """两套场景各自命名：stream 用 room_intro，不把 neuro 的 intro id 搬过来。"""
+        stream_ids = {s["id"] for s in stream_scenes()}
+        neuro_ids = {s["id"] for s in json.loads(NEURO_SCENES.read_text(encoding="utf-8"))["scenes"]}
+        self.assertIn("intro", neuro_ids)
+        self.assertNotIn("intro", stream_ids)
+        self.assertEqual(stream_ids & neuro_ids, set())
+
+    def test_catalog_excludes_room_intro_from_manual_list(self):
+        with patch.object(scene_catalog, "load_scenes", return_value=stream_scenes()):
+            self.assertTrue(scene_catalog.hidden(SCENE_ROOM_INTRO))
+            self.assertNotIn(SCENE_ROOM_INTRO, [s["id"] for s in scene_catalog.overview()])
+            self.assertEqual(scene_catalog.label(SCENE_ROOM_INTRO), "开场")
+
+
+class _LiveOnceLoop(StreamLoop):
+    """到 live 后立刻收工的最小循环，避免真的走一轮对话。"""
+
+    async def _run_round(self, settings, session):
+        self._reached_live = True
+        self._stop_event.set()
+        return None
+
+
+class TestIntroGate(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.storage = Storage(Path(self.tmp.name) / "test.db")
+        await self.storage.init()
+        self.persona = ChatbotPersonaStore(self.storage)
+        await self.persona.load()
+        self.templates = build_template_store(self.storage)
+        await self.templates.load()
+        self.bus = EventBroadcaster()
+        # 订阅必须在发布之前（EventBroadcaster 只把事件送给已存在的订阅者）
+        self.q = self.bus.subscribe()
+        self.loop = _LiveOnceLoop(self.storage, self.bus, self.persona, self.templates)
+        self.loop._reached_live = False
+        queue_row, _ = await self.storage.create_queue("intro test")
+        _, session_id = await self.storage.create_session(queue_row, "stream", "conv-intro")
+        row = await self.storage.get_session(session_id)
+        self.loop.session = {
+            "session_row": row["id"],
+            "session_id": session_id,
+            "queue_row": queue_row,
+            "channel": "stream",
+            "conversation_id": "conv-intro",
+            "cursor": 0,
+            "priority_cursor": 0,
+        }
+        self.loop.state = "starting"
+        self.loop._intro_gate = {
+            "waiting_for": "intro",
+            "neuro_scene": "intro",
+            "polls": 0,
+            "started_at": time.monotonic(),
+            "timeout_s": loop_module.START_READY_TIMEOUT_S,
+        }
+        # 快速轮询：测试里不等 0.5 秒
+        self._patchers = [
+            patch.object(loop_module, "READY_POLL_INTERVAL_S", 0.02),
+            patch.object(
+                stream_settings, "load", return_value=SimpleNamespace(neuro_url="http://x", channel="stream")
+            ),
+            patch.object(scene_catalog, "load_scenes", return_value=stream_scenes()),
+        ]
+        for p in self._patchers:
+            p.start()
+
+    async def asyncTearDown(self):
+        for p in self._patchers:
+            p.stop()
+        await self.storage.close()
+        self.tmp.cleanup()
+
+    def drain(self):
+        out = []
+        while not self.q.empty():
+            out.append(self.q.get_nowait())
+        return out
+
+    async def run_main(self, fake, timeout=2.0, ready_timeout=None):
+        patchers = [_patch_client(fake)]
+        if ready_timeout is not None:
+            patchers.append(patch.object(loop_module, "START_READY_TIMEOUT_S", ready_timeout))
+        for p in patchers:
+            p.start()
+        try:
+            await asyncio.wait_for(self.loop._main(), timeout=timeout)
+        finally:
+            for p in patchers:
+                p.stop()
+
+    async def test_goes_live_when_neuro_leaves_the_intro_scene(self):
+        fake = _ScriptedNeuro(["intro", "intro", "normal"])
+        await self.run_main(fake)
+        self.assertTrue(self.loop._reached_live)
+        self.assertEqual(fake.calls, 3, "离开开场场景的那一刻就该放行")
+        self.assertIsNone(self.loop.last_error)
+        scenes = [e["id"] for e in self.drain() if e["type"] == "scene_set"]
+        self.assertEqual(scenes, [SCENE_ROOM], "开场画面 → 常态画面是这一次真实的场景切换")
+
+    async def test_empty_scene_counts_as_ready(self):
+        """neuro 刚重启/场景数据缺失时 scene 为空——不能因为读不到就一直等。"""
+        fake = _ScriptedNeuro([None])
+        await self.run_main(fake)
+        self.assertTrue(self.loop._reached_live)
+        self.assertIsNone(self.loop.last_error)
+
+    async def test_stalled_intro_aborts_start(self):
+        """她一直停在开场场景（脚本坏了/进程假死）→ 到硬上限中止开播，不硬转 live。"""
+        fake = _ScriptedNeuro(["intro"])
+        await self.run_main(fake, ready_timeout=0.12)
+        self.assertFalse(self.loop._reached_live)
+        self.assertEqual(self.loop.state, "offline")
+        self.assertIsNone(self.loop.session, "中止开播不留半场场次")
+        self.assertEqual(self.loop.last_error["code"], "intro_timeout")
+        detail = self.loop.last_error["detail"]
+        self.assertEqual(detail["waiting_for"], "intro")
+        self.assertEqual(detail["neuro_scene"], "intro")
+        self.assertGreater(detail["polls"], 0)
+        ended = [e for e in self.drain() if e["type"] == "session_end"]
+        self.assertEqual(ended[0]["reason"], "intro_timeout")
+
+    async def test_status_failures_are_tolerated_until_the_deadline(self):
+        """轮询失败（neuro 重启中）不单独终止：先重试，最终仍由硬上限兜住。"""
+        fake = _ScriptedNeuro(["intro"], fail_first=999)
+        await self.run_main(fake, ready_timeout=0.12)
+        self.assertFalse(self.loop._reached_live)
+        self.assertEqual(self.loop.last_error["code"], "intro_timeout")
+        self.assertIn("connection refused", self.loop.last_error["detail"]["status_error"])
+
+    async def test_recovered_polling_still_goes_live(self):
+        """前几次轮询失败（neuro 正在重启），恢复后读到离开开场 → 照常放行。"""
+        fake = _ScriptedNeuro(["intro", "normal"], fail_first=2)
+        await self.run_main(fake, ready_timeout=1.0)
+        self.assertTrue(self.loop._reached_live)
+        self.assertIsNone(self.loop.last_error)
+
+    async def test_stop_during_intro_exits_silently(self):
+        """人工下播：即时退出，不记 last_error（那不是故障）。"""
+        fake = _ScriptedNeuro(["intro"])
+        self.loop._stop_event.set()
+        await self.run_main(fake, ready_timeout=5.0)
+        self.assertFalse(self.loop._reached_live)
+        self.assertIsNone(self.loop.last_error)
+        self.assertEqual(fake.calls, 0, "已经要停了就不再拉状态")
+
+    async def test_intro_status_shape(self):
+        """starting 阶段 dashboard 能看到"在等什么、等了多久、还剩多久"；其他阶段为 null。"""
+        st = self.loop.intro_status()
+        self.assertEqual(st["waiting_for"], "intro")
+        self.assertEqual(st["timeout_s"], loop_module.START_READY_TIMEOUT_S)
+        self.assertIn("waited_s", st)
+        self.assertIn("remaining_s", st)
+        self.assertNotIn("started_at", st, "monotonic 时刻不外泄（跨进程无意义）")
+        self.loop.state = "live"
+        self.assertIsNone(self.loop.intro_status())
+
+
+class TestStartPath(unittest.IsolatedAsyncioTestCase):
+    """start() 侧：开场画面落地 + 把"要等她离开的场景 id"交给闸门。"""
+
+    async def asyncSetUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.storage = Storage(Path(self.tmp.name) / "test.db")
+        await self.storage.init()
+        self.persona = ChatbotPersonaStore(self.storage)
+        await self.persona.load()
+        self.templates = build_template_store(self.storage)
+        await self.templates.load()
+        self.bus = EventBroadcaster()
+        self.loop = StreamLoop(self.storage, self.bus, self.persona, self.templates)
+        # 开播链路只关心"闸门"，chatbot 循环与 fake settings 的字段无关，替身掉
+        self.loop.chatbot = _NoopChatbot()
+        self.q = self.bus.subscribe()
+        self.settings = SimpleNamespace(
+            neuro_url="http://x", channel="stream",
+            default_title="T", default_category="C", default_tags=["a"],
+            messages_per_round=1, speech_cooldown_ms=0, empty_queue_behavior="silent",
+            placeholder_message="",
         )
+        self._patchers = [
+            patch.object(stream_settings, "load", return_value=self.settings),
+            patch.object(scene_catalog, "load_scenes", return_value=stream_scenes()),
+            patch.object(StreamLoop, "_main", lambda self: asyncio.sleep(0)),
+        ]
+        for p in self._patchers:
+            p.start()
 
-    def test_stream_scenes_have_no_intro_and_declare_neuro(self):
-        data = json.loads(PUBLIC_SCENES.read_text(encoding="utf-8"))
-        scenes = {s["id"]: s for s in data["scenes"]}
-        self.assertNotIn("intro", scenes)
-        self.assertNotIn("intro_video", json.dumps(data))
-        self.assertTrue(scenes["starting_soon"].get("hidden"))
-        self.assertTrue(scenes["starting_soon"]["neuro"].get("hidden"))
-        self.assertFalse(scenes["room"]["neuro"].get("hidden", False))
-        self.assertEqual(scenes["room"]["neuro"]["hide"], [])
+    async def asyncTearDown(self):
+        for p in self._patchers:
+            p.stop()
+        await self.storage.close()
+        self.tmp.cleanup()
 
-        chess = scenes["play_chess"]
-        self.assertAlmostEqual(chess["neuro"]["x"], 0.43)
-        self.assertAlmostEqual(chess["neuro"]["y"], 0.40)
-        self.assertAlmostEqual(chess["neuro"]["w"], 0.60)
-        self.assertEqual(chess["neuro"]["hide"], ["bg_room"])
-        self.assertEqual(
-            [e["id"] for e in chess["elements"]],
-            ["bg_media", "game_chess", "chat", "highlight"],
-        )
+    def drain(self):
+        out = []
+        while not self.q.empty():
+            out.append(self.q.get_nowait())
+        return out
 
-    def test_scene_catalog_hides_starting_soon(self):
-        data = json.loads(PUBLIC_SCENES.read_text(encoding="utf-8"))
-        with patch.object(scene_catalog, "load_scenes", return_value=data["scenes"]):
-            self.assertTrue(scene_catalog.hidden("starting_soon"))
-            self.assertNotIn("starting_soon", [s["id"] for s in scene_catalog.overview()])
+    async def test_start_lands_on_room_intro_and_records_the_gate(self):
+        fake = _ScriptedNeuro(["intro"])
+        with _patch_client(fake):
+            await self.loop.start()
+        gate = self.loop._intro_gate
+        self.assertEqual(gate["waiting_for"], "intro", "判据是 neuro 实际切到的场景 id")
+        self.assertEqual(gate["timeout_s"], loop_module.START_READY_TIMEOUT_S)
+        scenes = [e["id"] for e in self.drain() if e["type"] == "scene_set"]
+        self.assertEqual(scenes, [SCENE_ROOM_INTRO], "开播先落开场画面，不是 room")
+        self.assertEqual(self.loop.state, "starting")
+
+    async def test_start_blocked_when_neuro_unreachable(self):
+        class _Down:
+            async def health(self):
+                raise NeuroError("connection refused")
+
+            async def intro(self):
+                raise NeuroError("connection refused")
+
+        with _patch_client(_Down()):
+            with self.assertRaises(StreamConflict) as ctx:
+                await self.loop.start()
+        self.assertIn("neuro", str(ctx.exception))
+        self.assertIsNone(self.loop.session)
+        self.assertEqual(self.loop.state, "offline")
 
 
 class _FakeLoop(StreamLoop):
-    """给 _main 用的最小循环：到 live 后立刻停止，避免真的调 neuro。"""
+    """给 game 闸门用的最小循环。"""
 
     async def _run_round(self, settings, session):
         self._reached_live = True
         self._stop_event.set()
 
 
-class TestIntroPacing(unittest.IsolatedAsyncioTestCase):
+class TestGameSpeechGate(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.storage = Storage(Path(self.tmp.name) / "test.db")
@@ -96,54 +348,10 @@ class TestIntroPacing(unittest.IsolatedAsyncioTestCase):
         await self.templates.load()
         self.bus = EventBroadcaster()
         self.loop = _FakeLoop(self.storage, self.bus, self.persona, self.templates)
-        self.loop._reached_live = False
-        queue_row, _ = await self.storage.create_queue("intro test")
-        _, session_id = await self.storage.create_session(
-            queue_row, "stream", "conv-intro-test"
-        )
-        row = await self.storage.get_session(session_id)
-        self.loop.session = {
-            "session_row": row["id"],
-            "session_id": session_id,
-            "queue_row": queue_row,
-            "channel": "stream",
-            "conversation_id": "conv-intro-test",
-            "cursor": 0,
-            "priority_cursor": 0,
-        }
-        self.loop.state = "starting"
-        self.loop.last_scene = "room"
-        self.loop._intro_duration = 0.05
 
     async def asyncTearDown(self):
         await self.storage.close()
         self.tmp.cleanup()
-
-    async def test_main_goes_live_after_neuro_intro_without_report(self):
-        q = self.bus.subscribe()
-        started = time.monotonic()
-        fake_settings = SimpleNamespace()
-        with patch(
-            "neuro_simulator.stream.loop.stream_settings.load",
-            return_value=fake_settings,
-        ):
-            await asyncio.wait_for(self.loop._main(), timeout=1.0)
-        elapsed = time.monotonic() - started
-
-        self.assertGreaterEqual(elapsed, 0.04)
-        self.assertTrue(self.loop._reached_live)
-
-        events = []
-        while not q.empty():
-            events.append(q.get_nowait())
-        self.assertTrue(
-            any(e["type"] == "scene_set" and e["id"] == "room" for e in events),
-            events,
-        )
-        self.assertTrue(
-            any(e["type"] == "state" and e["state"] == "live" for e in events),
-            events,
-        )
 
     async def test_game_action_waits_for_speech_end(self):
         self.loop._turn_play_head = time.monotonic() + 0.05
@@ -153,9 +361,8 @@ class TestIntroPacing(unittest.IsolatedAsyncioTestCase):
             return_value=SimpleNamespace(game_tool_wait_speech=True),
         ):
             result = await self.loop.run_game_action(lambda: {"ok": True})
-        elapsed = time.monotonic() - started
         self.assertTrue(result["ok"])
-        self.assertGreaterEqual(elapsed, 0.04)
+        self.assertGreaterEqual(time.monotonic() - started, 0.04)
 
     async def test_game_actions_are_serialized(self):
         self.loop._turn_play_head = time.monotonic() + 0.04
@@ -175,56 +382,8 @@ class TestIntroPacing(unittest.IsolatedAsyncioTestCase):
             await asyncio.sleep(0)
             second = asyncio.create_task(self.loop.run_game_action(lambda: act("b")))
             await asyncio.gather(first, second)
-        elapsed = time.monotonic() - started
         self.assertEqual(order, ["a", "b"])
-        self.assertGreaterEqual(elapsed, 0.07)
-
-
-class _UnreachableNeuro:
-    def __init__(self, base_url: str) -> None:
-        self.base_url = base_url
-
-    async def health(self):
-        raise NeuroError("connection refused")
-
-    async def intro(self):
-        raise NeuroError("connection refused")
-
-
-class TestStartGuard(unittest.IsolatedAsyncioTestCase):
-    async def asyncSetUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
-        self.storage = Storage(Path(self.tmp.name) / "test.db")
-        await self.storage.init()
-        self.persona = ChatbotPersonaStore(self.storage)
-        await self.persona.load()
-        self.templates = build_template_store(self.storage)
-        await self.templates.load()
-        self.bus = EventBroadcaster()
-        self.loop = StreamLoop(self.storage, self.bus, self.persona, self.templates)
-
-    async def asyncTearDown(self):
-        await self.storage.close()
-        self.tmp.cleanup()
-
-    async def test_start_blocked_when_neuro_unreachable(self):
-        fake_settings = SimpleNamespace(
-            neuro_url="http://127.0.0.1:1",
-            channel="stream",
-            default_title="t",
-            default_category="c",
-            default_tags=[],
-        )
-        with patch.object(
-            stream_settings, "load", return_value=fake_settings
-        ), patch(
-            "neuro_simulator.stream.loop.NeuroClient", _UnreachableNeuro
-        ):
-            with self.assertRaises(StreamConflict) as ctx:
-                await self.loop.start()
-        self.assertIn("neuro", str(ctx.exception))
-        self.assertIsNone(self.loop.session)
-        self.assertEqual(self.loop.state, "offline")
+        self.assertGreaterEqual(time.monotonic() - started, 0.07)
 
 
 if __name__ == "__main__":

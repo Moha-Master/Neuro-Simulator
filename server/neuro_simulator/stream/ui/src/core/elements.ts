@@ -1,14 +1,24 @@
-/** 元素引擎：把"场景 = 元素清单"（scenes/schema.ts）落成真实的 DOM 与生命周期。
+/** 元素引擎：把"场景 = 元素清单 + 前端脚本（timeline）"落成真实的 DOM 与生命周期。
+ *
+ * ⚠️ 这份文件在 `stream/ui` 与 `neuro_sama/ui` 各有一份**必须逐字相同**的拷贝
+ *    （两个前端是各自独立的 Vite 工程，没有共享包）。防漂移由
+ *    `test-units/test_ui_engine_parity.py` 守着：改一边忘了改另一边，测试会直接
+ *    把两份的差异行打出来。
  *
  * - 几何全部以舞台比例声明，引擎写成 inline style（left/top/bottom/width/height/z-index/transform）。
  * - **同 id 跨场景复用同一个 DOM 节点与同一个组件实例**：切场景只做 diff
  *   （离场 → 跑 exit 后隐藏、不销毁；进场 → 挂载并跑 enter；两边都有且几何变了 → 跑 move）。
  *   不销毁是有意为之：聊天历史、字幕队列、游戏动画状态都要跨场景活着。
  * - 默认无过渡（不写脚本 = 直接出现 / 直接落位）；要淡入或平滑移动就在场景数据里写脚本。
- * - 场景级 `timeline` 由引擎按秒执行（video / show / hide / ACTIONS 动作）；切场景会
- *   取消旧 timer/动画并暂停视频，snapshot 的 `elapsed` 可从断点恢复（intro 靠它续播）。
- * - `update(id, payload)` 是通用元素状态通道（stream 的 element_state 事件 + snapshot.elements），
- *   引擎缓存每层最新 payload，组件首次挂载时立刻回放，中途连接也能渲染出当前状态。
+ * - 场景级 `timeline` 是**前端脚本**：由本引擎按秒执行（show/hide/media/命名动作），
+ *   只动 DOM。改权威状态（换场景）属于后端脚本 `state_script`，不在这里。
+ * - `at_end: N` = 场景有效时长 - N；时长由宿主按 `setScene(id, {duration})` 下发
+ *   （可以是探测视频轨道得到的值），所以数据里不必写死绝对时刻。
+ *   `media.play` 不写 `duration` 时按"一直播到场景结束"处理，换素材不用回去改数据。
+ * - `setHidden(ids)`：外部（父页面 / 宿主）按元素 id 强制隐藏若干层，与场景声明的
+ *   显隐取交集——只能隐藏，不能强制显示脚本管着的层。
+ * - `update(id, payload)` 是通用元素状态通道（缓存最新 payload，元素首次挂载自动回放，
+ *   所以中途连接也能画出当前状态）。
  */
 
 import { asset } from "./assets";
@@ -85,6 +95,8 @@ export class ElementEngine {
   private timelineEls = new Set<HTMLElement>();
   /** 每个元素上一次由场景数据写入的 css 键（换场景时清掉不再声明的覆盖项）。 */
   private appliedCss = new WeakMap<HTMLElement, string[]>();
+  /** 外部（父页面）强制隐藏的层 id；与场景声明的显隐取交集。 */
+  private overrideHidden = new Set<string>();
   current: SceneDef | null = null;
 
   constructor(stage: HTMLElement, scenes: SceneDef[]) {
@@ -105,13 +117,14 @@ export class ElementEngine {
     return this.mounted.get(id)?.el ?? null;
   }
 
-  /** 组件实例（main.ts 用它驱动 chat / caption / highlight 的实时管线） */
+  /** 组件实例（main.ts 用它驱动字幕的实时管线） */
   view<T>(id: string): T | null {
     return (this.mounted.get(id)?.view ?? null) as T | null;
   }
 
   visible(id: string): boolean {
-    return this.mounted.get(id)?.visible ?? false;
+    const m = this.mounted.get(id);
+    return !!m && m.visible && !this.overrideHidden.has(id);
   }
 
   /** 通用元素状态：缓存 + 路由给组件（幂等全量快照，中途连接靠 snapshot 回放） */
@@ -131,22 +144,35 @@ export class ElementEngine {
     return null;
   }
 
-  /** 手动显隐（开播序列的开场视频用） */
+  /** 外部按元素 id 强制隐藏/恢复（`hidden` 里没有的 id 一律交回场景数据决定）。
+   *  这是父页面唯一的显隐入口：新加一层不需要改两边代码。 */
+  setHidden(ids: string[]): void {
+    this.overrideHidden = new Set(ids);
+    for (const [id, m] of this.mounted) this.applyHiddenFlag(id, m);
+  }
+
+  /** 内部显隐 + 外部覆盖一起决定最终是否显示 */
+  private applyHiddenFlag(id: string, m: Mounted): void {
+    const hidden = !m.visible || this.overrideHidden.has(id);
+    m.el.classList.toggle("ns-el--hidden", hidden);
+  }
+
+  /** 手动显隐（场景时间线用） */
   show(id: string): void {
     const m = this.mounted.get(id);
     if (!m) return;
     m.visible = true;
-    m.el.classList.remove("ns-el--hidden");
+    this.applyHiddenFlag(id, m);
   }
 
   hide(id: string): void {
     const m = this.mounted.get(id);
     if (!m) return;
     m.visible = false;
-    m.el.classList.add("ns-el--hidden");
+    this.applyHiddenFlag(id, m);
   }
 
-  /** 对某元素跑命名动作（开播序列的 avatar.rise_in 用） */
+  /** 对某元素跑命名动作（tool_start 的 avatar.spin / zoom_in 用） */
   async run(id: string, action: string, params?: Record<string, unknown>): Promise<void> {
     const m = this.mounted.get(id);
     if (!m) {
@@ -161,13 +187,15 @@ export class ElementEngine {
    * - `instant`：跳过所有过渡（snapshot 校正状态时用，避免每次重连都淡入一遍）。
    * - `elapsed`：场景脚本已过的秒数（snapshot 中途连接续播）；不会补播已过动作，
    *   正在进行的动作按剩余时长收尾，未开始的按剩余延迟排程。
-   * 元素进场/离场过渡与场景时间线都由数据驱动；不再有“开播序列专用”的强制入场参数。
+   * - `duration`：场景有效时长，由后端给（可能来自视频轨道探测）；`at_end` 靠它换算。
+   * 元素进场/离场过渡与时间线都由数据驱动；权威状态（换场景）在 neuro 后端。
    */
   async setScene(
     id: string,
     opts?: {
       instant?: boolean;
       elapsed?: number;
+      duration?: number;
     },
   ): Promise<void> {
     const def = this.defs.get(id);
@@ -212,7 +240,7 @@ export class ElementEngine {
         else this.show(e.id);
         continue;
       }
-      // 场景数据里的 visible 是权威：平时藏着的元素（开场视频、待机场景的立绘）
+      // 场景数据里的 visible 是权威：平时藏着的元素（开场视频、intro 期间的立绘）
       // 不能因为"两边都列出了同一 id"就被复活。
       if (e.visible === false) {
         if (m.visible) transition(e.id, this.runExit(m));
@@ -227,11 +255,29 @@ export class ElementEngine {
     // 只有当前场景还能启动脚本；同步段之后 token 不会变（过渡都是异步的）。
     if (token !== this.timelineToken) return;
     if (def.timeline) {
-      this.startTimeline(def.timeline, Math.max(0, Number(opts?.elapsed ?? 0)), token);
+      this.startTimeline(
+        def.timeline,
+        Math.max(0, Number(opts?.elapsed ?? 0)),
+        this.sceneDuration(def, opts?.duration),
+        token,
+      );
     }
   }
 
-  // ---------- 场景脚本 ----------
+  /** 场景有效时长：后端下发优先，其次数据里写死的秒数；
+   *  `{"media": ...}` 这类需要探测的时长只能由后端给（它是时权的唯一来源）。 */
+  private sceneDuration(def: SceneDef, override?: number): number {
+    if (override !== undefined && override > 0) return override;
+    return typeof def.duration === "number" && def.duration > 0 ? def.duration : 0;
+  }
+
+  /** `at_end: N` → `时长 - N`（与服务端 scenes.resolve_steps 同一规则）。 */
+  private resolveAt(step: TimelineStep, duration: number): number {
+    if (step.at_end !== undefined) return Math.max(0, duration - Number(step.at_end));
+    return Math.max(0, Number(step.at) || 0);
+  }
+
+  // ---------- 场景脚本（前端侧） ----------
 
   /** 取消当前场景脚本：清 timer、停视频、取消它启动的动画。 */
   private resetTimeline(): number {
@@ -256,11 +302,15 @@ export class ElementEngine {
   }
 
   /** 从 elapsed 秒处开始/恢复场景时间线。 */
-  private startTimeline(timeline: SceneTimeline, elapsed: number, token: number): void {
+  private startTimeline(timeline: SceneTimeline, elapsed: number, duration: number, token: number): void {
     for (const step of timeline.steps ?? []) {
-      const at = Math.max(0, Number(step.at) || 0);
-      const duration = Math.max(0, Number(step.duration) || 0);
-      const end = at + duration;
+      const at = this.resolveAt(step, duration);
+      const stepDuration = Math.max(0, Number(step.duration) || 0);
+      // media.play 不写 duration = "一直播到场景结束"（换素材不用回去改数据）
+      const openEnded = step.action === "media.play" && stepDuration === 0;
+      const end = openEnded
+        ? Math.max(at + 0.001, duration > at ? duration : Number.POSITIVE_INFINITY)
+        : at + stepDuration;
       if (end <= elapsed) {
         this.applyTimelineStep(step, "final", 0, token);
       } else if (at <= elapsed) {
@@ -362,13 +412,15 @@ export class ElementEngine {
     else video.addEventListener("loadedmetadata", start, { once: true });
   }
 
-  /** 把视频停在末帧（已过播放段的中途连接 / 动作已完成）。 */
+  /** 把视频停在末帧（已过播放段的中途连接 / 动作已完成）。
+   *  `end <= 0` 表示"数据没写死时长"，用视频自身的时长。 */
   private settleVideo(video: HTMLVideoElement, end: number): void {
     video.pause();
     const seek = (): void => {
       try {
         const duration = video.duration || end;
-        video.currentTime = Math.max(0, Math.min(end, duration) - 0.05);
+        const target = end > 0 ? Math.min(end, duration) : duration;
+        video.currentTime = Math.max(0, target - 0.05);
       } catch {
         /* 忽略 seek 失败 */
       }
@@ -404,7 +456,7 @@ export class ElementEngine {
     return def.box;
   }
 
-  /** 组件实例里实现了通用状态通道的部分（chat/caption 等没有 update，返回后不调用即可） */
+  /** 组件实例里实现了通用状态通道的部分（字幕这类没有 update，返回后不调用即可） */
   private asView(m: Mounted | undefined): ElementView | null {
     return (m?.view ?? null) as ElementView | null;
   }
@@ -420,8 +472,7 @@ export class ElementEngine {
 
   private applyCss(m: Mounted): void {
     const next = m.def.css ?? {};
-    // 清掉换场景后不再声明的覆盖项（如聊天层的 --chat-font-scale，
-    // 回 room 必须恢复默认），否则 inline style 会一直留着上一个场景的值。
+    // 清掉换场景后不再声明的覆盖项，否则 inline style 会一直留着上一个场景的值。
     for (const key of this.appliedCss.get(m.el) ?? []) {
       if (!(key in next)) m.el.style.removeProperty(key);
     }

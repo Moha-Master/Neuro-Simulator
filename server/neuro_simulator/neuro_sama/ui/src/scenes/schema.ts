@@ -68,6 +68,8 @@ export interface TimelineStep {
 
 /** 前端脚本：从进入场景开始计时的 DOM 时间线。 */
 export interface SceneTimeline {
+  /** 数据声明的时长（回退值）；后端下发的探测时长优先 */
+  duration?: number;
   steps: TimelineStep[];
 }
 

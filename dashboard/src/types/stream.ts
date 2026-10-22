@@ -44,10 +44,42 @@ export interface PersistedSession {
   tags?: string[]
 }
 
+/** 开场闸门（仅 state=starting 时有值）：stream 轮询 neuro 的权威场景等她离开开场。 */
+export interface IntroGate {
+  /** neuro 切到的开场场景 id（判据：她离开这个场景 = 开场放完） */
+  waiting_for: string
+  neuro_scene: string | null
+  polls: number
+  timeout_s: number
+  waited_s: number
+  remaining_s: number
+  /** 最近一次读 neuro /status 失败的原因（成功时为 null/缺省） */
+  status_error?: string | null
+}
+
+/** 异常终止开播的原因（下次成功开播时服务端清空）。 */
+export interface StreamLastError {
+  code: string
+  message: string
+  at: string
+  detail?: {
+    waiting_for?: string
+    neuro_scene?: string | null
+    polls?: number
+    status_error?: string | null
+  }
+}
+
 export interface StreamStatus {
   state: string
-  /** 当前画面场景 id（starting 中为 intro） */
+  /** 当前画面场景 id（开场期间是 hidden 的 room_intro） */
   scene: string | null
+  /** hidden 场景不在 GET /stream/scenes 清单里，服务端直接给出名字 */
+  scene_label?: string | null
+  scene_icon?: string | null
+  /** 开场闸门（starting 有值，其他阶段 null） */
+  starting?: IntroGate | null
+  last_error?: StreamLastError | null
   /** 当前活跃游戏 id（无则 null） */
   game: string | null
   session: StreamSession | null

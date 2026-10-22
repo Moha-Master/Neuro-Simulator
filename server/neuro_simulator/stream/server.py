@@ -252,6 +252,13 @@ def create_app() -> FastAPI:
         return {
             "state": lp.state,
             "scene": lp.last_scene,
+            # hidden 场景（如开场的 room_intro）不在 GET /stream/scenes 里，
+            # 所以顺带给 label/icon，dashboard 不必自己猜 id
+            "scene_label": scene_catalog.label(lp.last_scene) if lp.last_scene else None,
+            "scene_icon": scene_catalog.icon(lp.last_scene) if lp.last_scene else None,
+            # 开场闸门（仅 starting 有值）：等 neuro 离开开场场景，stream 不倒数秒数
+            "starting": lp.intro_status(),
+            "last_error": lp.last_error,
             "game": lp.games.active_id,
             "session": lp.session and {k: lp.session[k] for k in (
                 "session_id", "queue_id", "channel", "conversation_id", "cursor",
@@ -426,8 +433,10 @@ def create_app() -> FastAPI:
 
     @app.post("/scene")
     async def scene_set(payload: ScenePayload):
-        # intro 是 hidden 内部脚本场景，只能由 start 等程序化路径触发，不允许手动选中——
-        # 手动切到 intro 后没有“到点回 room”的驱动者，会卡在开场。
+        # hidden 内部场景（如 starting_soon）只能由程序化路径触发，不允许手动选中——
+        # 手动切进去没有"到点回 room"的驱动者，画面会卡住。
+        # 注：dashboard 已不再提供手动切场景按钮（避免与循环/游戏的自动切换打架），
+        # 端点保留给调试与未来的固定时长场景。
         if not scene_catalog.exists(payload.id) or scene_catalog.hidden(payload.id):
             known = ", ".join(s["id"] for s in scene_catalog.overview()) or "（ui 未构建）"
             raise HTTPException(
@@ -630,7 +639,9 @@ def create_app() -> FastAPI:
                 title, category = lp.session_metadata()
                 snapshot = {
                     "state": lp.state,
-                    "scene": lp.last_scene,
+                    # 场景是 {id, duration, elapsed}（与 neuro 窗口同一套契约）；
+                    # 中途连接的画面按 elapsed 恢复场景脚本。无场景时为 null。
+                    "scene": lp.scene_snapshot() or None,
                     "session": session_info,
                     "settings": lp.ui_settings(),
                     "metadata": {

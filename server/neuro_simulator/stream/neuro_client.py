@@ -1,11 +1,15 @@
 """neuro 模块 HTTP/SSE 客户端：stream 作为 /chat 的调用方消费完整响应流。
 
 chat() 是 async generator：解析 SSE（event:/data: 帧），每个事件以 dict 产出
-（type 字段即事件名；speech 事件含 audio/duration，供循环计时与画面转发）。
+（type 字段即事件名；speech 事件含 audio/duration，供循环记轮次节奏）。
+
+短请求：health() 开播守卫、intro() 触发 neuro 的开场场景（返回**要等她离开的场景
+id**，不是时长）、status() 拉轻量状态投影（权威场景 / 语音还剩多久）。
+**stream 不倒数 neuro 的任何秒数**——开场是否放完由轮询 status 判定。
 """
 
 import json
-from typing import AsyncIterator
+from typing import AsyncIterator, Optional
 
 import httpx
 
@@ -89,11 +93,12 @@ class NeuroClient:
         except httpx.HTTPError as e:
             raise NeuroError(f"neuro 健康检查失败: {type(e).__name__}: {e}") from e
 
-    async def intro(self) -> float:
-        """触发 neuro 窗口播放开场场景，返回总时长（秒）。失败抛 NeuroError。
+    async def intro(self) -> str:
+        """触发 neuro 窗口的开场场景，返回**她切到的场景 id**。失败抛 NeuroError。
 
-        neuro 不可达时开播被禁止（由 StreamLoop.start 统一转成 409）；
-        neuro 自己负责视频时长解析、场景广播（scene_set）与放完自动回常态。
+        刻意不返回时长：stream 不倒数任何秒数。开场是否放完由 neuro 自己的
+        `state_script` 决定，stream 只轮询 `/status` 等她**离开这个场景**
+        （neuro 改了场景 id、换了视频素材、调了 `after` 余量，都不需要同步改 stream）。
         """
         try:
             async with httpx.AsyncClient(timeout=10) as client:
@@ -101,7 +106,23 @@ class NeuroClient:
                 if r.status_code != 200:
                     body = (await r.aread()).decode("utf-8", errors="replace")
                     raise NeuroError(f"neuro /ui/intro HTTP {r.status_code}: {body[:300]}")
-                data = r.json()
-                return max(0.0, float(data.get("duration") or 0.0))
-        except (httpx.HTTPError, ValueError) as e:
+                scene_id = str((r.json().get("scene") or {}).get("id") or "").strip()
+                if not scene_id:
+                    raise NeuroError("neuro /ui/intro 未返回场景 id")
+                return scene_id
+        except (httpx.HTTPError, ValueError, AttributeError) as e:
             raise NeuroError(f"neuro 开场启动失败: {type(e).__name__}: {e}") from e
+
+    async def status(self, channel: Optional[str] = None) -> dict:
+        """拉 neuro 的状态投影（权威场景 + 语音节奏 + 在途轮次）。失败抛 NeuroError。
+
+        轻量端点（不含音频），适合每半秒一次的轮询；画面续播才用 `/ui/state`。
+        """
+        params = {"channel": channel} if channel else None
+        try:
+            async with httpx.AsyncClient(timeout=5) as client:
+                r = await client.get(f"{self.base_url}/status", params=params)
+                r.raise_for_status()
+                return r.json()
+        except httpx.HTTPError as e:
+            raise NeuroError(f"neuro /status 失败: {type(e).__name__}: {e}") from e

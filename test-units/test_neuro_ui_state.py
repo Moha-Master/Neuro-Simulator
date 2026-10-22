@@ -7,7 +7,7 @@
 import unittest
 from unittest.mock import patch
 
-from neuro_simulator.neuro_sama.ui_state import TURN_GRACE_S, UiState
+from neuro_simulator.neuro_sama.ui_state import STATUS_TEXT_CHARS, TURN_GRACE_S, UiState
 
 CLOCK = "neuro_simulator.neuro_sama.ui_state.time.monotonic"
 
@@ -127,6 +127,158 @@ class TestScene(unittest.TestCase):
     def test_snapshot_without_scene(self):
         self.assertNotIn("scene", UiState().snapshot())
         self.assertEqual(UiState().scene_snapshot(), {})
+
+
+
+
+class TestStepGapOnServerTimeline(unittest.TestCase):
+    """服务端时间线必须计入 step 间停顿——前端 `speech.ts` 就是按这个节奏播的。
+
+    少算 gap 会让 `status().remaining_s` 比画面短，于是下游消费它的一方
+    （stream 的轮次节奏、chatbot 的睡眠判定）全部提前，表现是"她还在说话，
+    下一条弹幕已经发进去了"。
+    """
+
+    @staticmethod
+    def speech(step: int, index: int, text: str, duration: float = 2.0) -> dict:
+        return {"type": "speech", "step": step, "index": index, "text": text,
+                "duration": duration, "audio": "", "mime": ""}
+
+    def test_step_change_inserts_one_gap(self):
+        st = UiState()
+        with patch(CLOCK, return_value=100.0):
+            tid = st.new_turn("stream")
+        with patch(CLOCK, return_value=101.0):
+            st.observe(self.speech(0, 0, "a"), "stream", tid)  # 101..103
+        with patch(CLOCK, return_value=103.5):
+            st.observe(self.speech(1, 1, "b"), "stream", tid)  # +1s gap → 104..106
+        with patch(CLOCK, return_value=103.6):
+            speech = st.status("stream")["speech"]
+        self.assertAlmostEqual(speech["remaining_s"], 106.0 - 103.6, places=2)
+
+    def test_sentences_in_the_same_step_are_back_to_back(self):
+        st = UiState()
+        with patch(CLOCK, return_value=100.0):
+            tid = st.new_turn("stream")
+        with patch(CLOCK, return_value=101.0):
+            st.observe(self.speech(0, 0, "a"), "stream", tid)
+        with patch(CLOCK, return_value=101.2):
+            st.observe(self.speech(0, 1, "b"), "stream", tid)  # 无 gap：103..105
+        with patch(CLOCK, return_value=103.0):
+            speech = st.status("stream")["speech"]
+        self.assertAlmostEqual(speech["remaining_s"], 2.0, places=2)
+
+    def test_first_sentence_never_waits_for_a_gap(self):
+        """工具链之后的第一轮 speech 可能直接出现在 step 5：那不是"step 变化"。"""
+        st = UiState()
+        with patch(CLOCK, return_value=100.0):
+            tid = st.new_turn("stream")
+        with patch(CLOCK, return_value=101.0):
+            st.observe(self.speech(5, 0, "a"), "stream", tid)
+        with patch(CLOCK, return_value=101.0):
+            speech = st.status("stream")["speech"]
+        self.assertAlmostEqual(speech["remaining_s"], 2.0, places=2)
+
+
+class TestStatusProjection(unittest.TestCase):
+    """`status()` 是给别的模块**高频轮询**的投影：轻量、不含音频。
+
+    画面续播走 `snapshot()`（带 base64，只在连接/重连时取一次）；
+    两者混用会让 0.5s 一次的轮询拖几 MB。
+    """
+
+    def _speaking(self, st: UiState, tid: int) -> None:
+        st.observe(
+            {"type": "speech", "step": 0, "index": 0, "text": "hello there",
+             "duration": 5.0, "audio": "YQ==", "mime": "audio/mp3"},
+            "stream", tid,
+        )
+
+    def test_status_carries_no_audio(self):
+        st = UiState()
+        with patch(CLOCK, return_value=100.0):
+            tid = st.new_turn("stream")
+            self._speaking(st, tid)
+        with patch(CLOCK, return_value=101.0):
+            self.assertIn("audio", str(st.snapshot("stream")["turn"]))  # 画面要能续播
+            status = st.status("stream")
+        self.assertNotIn("audio", str(status))
+        self.assertNotIn("YQ==", str(status))
+
+    def test_status_fields_while_generating_and_speaking(self):
+        st = UiState()
+        with patch(CLOCK, return_value=100.0):
+            tid = st.new_turn("stream")
+            self._speaking(st, tid)
+        with patch(CLOCK, return_value=101.0):
+            status = st.status("stream")
+        speech = status["speech"]
+        self.assertEqual(speech["turn_id"], tid)
+        self.assertTrue(speech["generating"], "本轮还没 done")
+        self.assertTrue(speech["speaking"])
+        self.assertAlmostEqual(speech["remaining_s"], 4.0, places=2)
+        self.assertEqual(speech["text"], "hello there")
+        self.assertEqual(status["turns"], {"in_flight": 1})
+        self.assertIsNone(status["scene"], "没切过场景就是 null，不是空对象")
+
+    def test_ends_at_is_wall_clock(self):
+        """跨进程不能对 monotonic：绝对时刻必须是 unix 秒。"""
+        import time as real_time
+
+        st = UiState()
+        with patch(CLOCK, return_value=100.0):
+            tid = st.new_turn("stream")
+            self._speaking(st, tid)
+        with patch(CLOCK, return_value=101.0):
+            speech = st.status("stream")["speech"]
+        self.assertAlmostEqual(speech["ends_at"], real_time.time() + speech["remaining_s"], delta=1.0)
+
+    def test_finished_turn_stops_speaking_but_keeps_text(self):
+        st = UiState()
+        with patch(CLOCK, return_value=100.0):
+            tid = st.new_turn("stream")
+            self._speaking(st, tid)
+        with patch(CLOCK, return_value=106.0):
+            st.observe({"type": "done"}, "stream", tid)
+            speech = st.status("stream")["speech"]
+        self.assertFalse(speech["generating"])
+        self.assertFalse(speech["speaking"])
+        self.assertEqual(speech["remaining_s"], 0.0)
+        self.assertEqual(speech["text"], "hello there", "chatbot 要拿它说 Neurdle says: ...")
+
+    def test_text_is_capped(self):
+        st = UiState()
+        with patch(CLOCK, return_value=100.0):
+            tid = st.new_turn("stream")
+            for i in range(30):
+                st.observe(
+                    {"type": "speech", "step": 0, "index": i, "text": "x" * 80,
+                     "duration": 0.1, "audio": "", "mime": ""},
+                    "stream", tid,
+                )
+        self.assertEqual(len(st.status("stream")["speech"]["text"]), STATUS_TEXT_CHARS)
+
+    def test_other_channel_does_not_leak(self):
+        st = UiState()
+        with patch(CLOCK, return_value=100.0):
+            tid = st.new_turn("stream")
+            self._speaking(st, tid)
+        with patch(CLOCK, return_value=101.0):
+            speech = st.status("web")["speech"]
+        self.assertIsNone(speech["turn_id"])
+        self.assertFalse(speech["speaking"])
+        self.assertEqual(speech["remaining_s"], 0.0)
+        self.assertEqual(speech["text"], "")
+
+    def test_abort_clears_generating(self):
+        st = UiState()
+        with patch(CLOCK, return_value=100.0):
+            tid = st.new_turn("stream")
+            self._speaking(st, tid)
+            st.abort("stream", tid)
+            speech = st.status("stream")["speech"]
+        self.assertFalse(speech["generating"])
+        self.assertEqual(st.status("stream")["turns"]["in_flight"], 0)
 
 
 if __name__ == "__main__":

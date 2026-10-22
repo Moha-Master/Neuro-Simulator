@@ -1,8 +1,9 @@
 /** stream 模块 /ui/events 合成器事件通道（SSE，只读）。
  *
  * 合成器只关心"场景/背景/游戏/聊天"这些 stream 自己的层：
- *   snapshot{state,scene,session,settings,chat?,metadata?,elements?}
- *   state / session_begin / session_end / scene_set{id} / settings{neuro_*} /
+ *   snapshot{state,scene{id,duration,elapsed},session,settings,chat?,metadata?,elements?}
+ *   state / session_begin / session_end / scene_set{id,duration,elapsed} /
+ *   settings{neuro_*} /
  *   element_state{id,payload} / stream_metadata{title,category} /
  *   chat_message / priority_message
  *
@@ -26,6 +27,13 @@ export interface ChatMsg {
   value?: number;
 }
 
+/** 场景状态（与 neuro 窗口的 scene_set 同一套契约：id + 时长 + 已过秒数）。 */
+export interface SceneInfo {
+  id: string;
+  duration?: number;
+  elapsed?: number;
+}
+
 export interface NeuroSettings {
   neuro_ui_url?: string;
   neuro_health_url?: string;
@@ -34,7 +42,7 @@ export interface NeuroSettings {
 
 export interface Snapshot {
   state: string; // offline | starting | live | paused
-  scene: string | null;
+  scene: SceneInfo | null;
   session: {
     session_id: string;
     queue_id: string;

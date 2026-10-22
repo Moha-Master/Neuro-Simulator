@@ -1,6 +1,7 @@
 """Chatbot 调度测试：消息解析、Neuro 状态判定、固定节拍并发调度与在途上限。"""
 
 import asyncio
+import inspect
 import tempfile
 import time
 import unittest
@@ -74,13 +75,16 @@ class _FakeLLM:
     async def create(self, **kwargs):
         self.last_messages = kwargs.get("messages") or []
         self.calls += 1
+        # 序号必须在 await **之前**取：并发完成时如果之后再读 self.calls，
+        # 多个调用会拿到同一个序号 → 生成的文本相同 → 被产品的去重逻辑丢弃，
+        # 测试就会误判成"消息没入列"。
+        n = self.calls
         self.active += 1
         self.max_active = max(self.max_active, self.active)
         try:
             await asyncio.sleep(self.latency)
         finally:
             self.active -= 1
-        n = self.calls
         body = "\n".join(f"viewer_{i}: hello from call {n} ({i})" for i in range(self.lines))
         return SimpleNamespace(
             choices=[SimpleNamespace(message=SimpleNamespace(content=body))]
@@ -118,6 +122,23 @@ class TestChatbot(unittest.IsolatedAsyncioTestCase):
         """跑一段时间（按调度间隔轮询，避免依赖精确计时）。"""
         deadline = time.monotonic() + seconds
         while time.monotonic() < deadline:
+            await asyncio.sleep(0.02)
+        await mgr.aclose()
+        return fake
+
+    async def _drain_until(self, mgr: ChatbotManager, fake: _FakeLLM, predicate, timeout=8.0):
+        """跑到条件成立为止（而不是固定时间窗）。
+
+        固定窗口 + 断言"至少 N 次"在机器繁忙时会假失败（调度被推迟 → 次数不够）；
+        条件等待只在条件成立时立刻返回，机器慢也只是多等一会儿。
+        """
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            result = predicate()
+            if inspect.isawaitable(result):
+                result = await result
+            if result:
+                break
             await asyncio.sleep(0.02)
         await mgr.aclose()
         return fake
@@ -221,7 +242,12 @@ class TestChatbot(unittest.IsolatedAsyncioTestCase):
         settings = _settings(interval_s=0.1, max_concurrent=4)
         with patch("neuro_simulator.stream.settings.load", return_value=settings):
             mgr = self._manager(queue_row, fake, settings)
-            await self._drain(mgr, fake, 1.1)
+
+            async def _enough():
+                msgs = await self.storage.list_messages(queue_row, limit=5000)
+                return fake.calls >= 3 and len(msgs) >= 6
+
+            await self._drain_until(mgr, fake, _enough, timeout=5.0)
 
         msgs = await self.storage.list_messages(queue_row)
         # 串行时 1.1s / 0.6s ≈ 1 批；并发下至少 3 批（每批 2 条）
@@ -236,9 +262,13 @@ class TestChatbot(unittest.IsolatedAsyncioTestCase):
         settings = _settings(interval_s=0.05, max_concurrent=4, count=3)
         with patch("neuro_simulator.stream.settings.load", return_value=settings):
             mgr = self._manager(queue_row, fake, settings)
-            await self._drain(mgr, fake, 0.9)
 
-        msgs = await self.storage.list_messages(queue_row)
+            async def _enough():
+                return fake.calls >= 3 and mgr.in_flight == 0
+
+            await self._drain_until(mgr, fake, _enough, timeout=4.0)
+
+        msgs = await self.storage.list_messages(queue_row, limit=5000)
         contents = [m["content"] for m in msgs]
         self.assertGreaterEqual(fake.calls, 3)
         self.assertEqual(
@@ -256,7 +286,9 @@ class TestChatbot(unittest.IsolatedAsyncioTestCase):
         settings = _settings(interval_s=0.05, max_concurrent=2)
         with patch("neuro_simulator.stream.settings.load", return_value=settings):
             mgr = self._manager(queue_row, fake, settings)
-            await self._drain(mgr, fake, 1.0)
+            # 先等到确实跑过 tick（否则断言只是空转通过），再让它多跑一会儿积累证据
+            await self._drain_until(mgr, fake, lambda: fake.calls >= 1, timeout=3.0)
+            await self._drain(mgr, fake, 0.8)
             self.assertLessEqual(mgr.in_flight, 2)
 
         self.assertLessEqual(fake.max_active, 2, "并发数超过 max_concurrent")
@@ -270,7 +302,8 @@ class TestChatbot(unittest.IsolatedAsyncioTestCase):
         fake.create = lambda **kw: self._replay_once(fake, kw)  # type: ignore[assignment]
         with patch("neuro_simulator.stream.settings.load", return_value=settings):
             mgr = self._manager(queue_row, fake, settings)
-            await self._drain(mgr, fake, 0.35)
+            # 至少两次调用才能验证"复述没有回灌进历史"（一次调用时历史还是空的）
+            await self._drain_until(mgr, fake, lambda: fake.calls >= 2, timeout=3.0)
 
         msgs = await self.storage.list_messages(queue_row)
         self.assertEqual(len(msgs), 1, f"重复行未被过滤：{[m['content'] for m in msgs]}")

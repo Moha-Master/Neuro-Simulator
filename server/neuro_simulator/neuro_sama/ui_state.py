@@ -1,16 +1,24 @@
-"""neuro 窗口的共享状态：当前场景 + 当前/最近一轮字幕时间线。
+"""neuro 窗口的共享状态：当前场景 + 当前/最近一轮语音（speech）时间线。
 
-`/ui/events` 的 snapshot 从这里取：新连接的画面（OBS 重载、dashboard 预览刷新）
-可以按 `scene.elapsed` 恢复场景时间线、按 `consumed` 续播正在发声的句子。
-时间基准是服务端 `time.monotonic()`，与 stream 的 turn 时间线互相独立——stream
-仍按自己消费到的 speech 事件节奏排下一轮，neuro 只负责"窗口里怎么播"。
+这里对外提供**两个面**，用途和频率不同：
+
+- `snapshot()` → **画面快照**（`/ui/events` 与 `/ui/state`）：逐句带 `consumed`，
+  正在发声那句还带 base64 `audio`，供渲染器（OBS 重载、dashboard 预览）断点续播。
+- `status()` → **状态投影**（`/status`）：只有"当前场景 + 还剩多久说话 + 最近说了什么"，
+  不含音频，供其他模块高频轮询（stream 判开场是否放完、判下一轮节奏；chatbot 判她是否
+  睡着；将来的 Discord/QQ 接入同样消费它）。
+
+时间基准是服务端 `time.monotonic()`；`status()` 里的 `ends_at` 已换算成 unix 秒——
+**跨进程不要对 monotonic 时钟**，所以对外只给"还剩多少秒"和换算后的绝对时刻。
 
 **场景是权威状态**：只有 `SceneRunner`（后端脚本执行器）与管理端点能改，
 渲染器只读快照并如实渲染；`timeline` 是前端脚本、`state_script` 是后端脚本，
 分工见 scenes.py。
 
-turn 时间线的推进方式：收到 speech 事件时，从 max(now, play_head) 开始排，
-play_head += duration。这样断线重连时能估算"这句话现在应该播到哪里"。
+turn 时间线的推进方式：收到 speech 事件时，从 `max(now, play_head + step_gap)` 开始排，
+`play_head += duration`。`step_gap`（`neuro_sama.caption_step_gap_ms`）只在**同一轮的
+step 发生变化**时计入，与前端 `speech.ts` 的实际播放一致——这样"画面里还有多少话没播完"
+在服务端和浏览器里是同一个数。
 """
 
 import time
@@ -21,6 +29,9 @@ from ..config import get_config
 
 # 一轮结束后保留快照的时间窗口：足够覆盖字幕淡出，避免重连时闪出很久以前的字幕。
 TURN_GRACE_S = 10.0
+
+# status() 里"最近说了什么"的截断长度（弹幕/字幕级别的文本，给消费者回看用）
+STATUS_TEXT_CHARS = 400
 
 
 @dataclass
@@ -43,6 +54,7 @@ class _Turn:
     speech: List[_Speech] = field(default_factory=list)
     updated_at: float = 0.0
     ended_at: Optional[float] = None
+    last_step: Optional[int] = None
 
 
 @dataclass
@@ -89,11 +101,20 @@ class UiState:
                 duration = max(0.0, float(ev.get("duration") or 0.0))
             except (TypeError, ValueError):
                 duration = 0.0
-            start = max(now, turn.play_head)
+            step = int(ev.get("step") or 0)
+            # 同一轮的工具链 step 之间，窗口会停 caption_step_gap_ms 再播下一句
+            # （前端 speech.ts 的实际播放就是这样）。服务端时间线必须计入同一个 gap，
+            # 否则 play_head 比画面短，下游消费 remaining_s/ends_at 的一方
+            # （stream 的轮次节奏、chatbot 的睡眠判定）都会提前。
+            gap_s = 0.0
+            if turn.last_step is not None and step != turn.last_step:
+                gap_s = max(0.0, self.settings()["caption"]["step_gap_ms"] / 1000.0)
+            start = max(now, turn.play_head + gap_s)
             turn.play_head = start + duration
+            turn.last_step = step
             turn.speech.append(
                 _Speech(
-                    step=int(ev.get("step") or 0),
+                    step=step,
                     index=int(ev.get("index") or 0),
                     text=str(ev.get("text") or ""),
                     duration=duration,
@@ -164,6 +185,41 @@ class UiState:
         except RuntimeError:
             hide, gap = 1000, 1000
         return {"caption": {"hide_ms": hide, "step_gap_ms": gap}}
+
+    # ---------- status（其他模块消费的精简投影） ----------
+
+    def status(self, channel: Optional[str] = None) -> Dict[str, Any]:
+        """"我在哪个场景 / 还剩多久说话"——给别的模块轮询用，**不含音频**。
+
+        与 `snapshot()` 的分工：snapshot 是**画面快照**（逐句 consumed，正在发声那句还带
+        base64 音频），供渲染器断点续播；status 是**状态投影**，供 stream 的直播循环判
+        定开场是否放完、chatbot 判定她是不是睡着了、将来的 Discord/QQ 接入判节奏。
+        字段可以重叠，但用途和频率不同——status 被 0.5s 一次地拉也不该拖几 MB。
+        """
+        now = time.monotonic()
+        pick = channel or self._last_channel
+        turn = self._turns.get(pick) if pick else None
+        remaining = max(0.0, turn.play_head - now) if turn is not None else 0.0
+        text = ""
+        if turn is not None and turn.speech:
+            text = " ".join(s.text for s in turn.speech if s.text)[:STATUS_TEXT_CHARS]
+        return {
+            "scene": self.scene_snapshot(now) or None,
+            "speech": {
+                "channel": pick,
+                "turn_id": turn.id if turn is not None else None,
+                # generating = 本轮还在生成；speaking = 还有声音/字幕要播
+                "generating": bool(turn and turn.active),
+                "speaking": remaining > 0.05,
+                "remaining_s": round(remaining, 2),
+                # 本轮语音预测播完的 unix 时刻；可能落在过去（= 她上次说完的时刻）
+                "ends_at": round(time.time() + (turn.play_head - now), 3) if turn else None,
+                "text": text,
+            },
+            "turns": {"in_flight": sum(1 for t in self._turns.values() if t.active)},
+        }
+
+    # ---------- snapshot（画面消费） ----------
 
     def snapshot(self, channel: Optional[str] = None) -> Dict[str, Any]:
         now = time.monotonic()

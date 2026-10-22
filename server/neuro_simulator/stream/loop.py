@@ -14,9 +14,14 @@ scene_set / element_state（游戏等元素的全量状态）/ chat_message / pr
 stream_metadata / settings。**speech/tool/turn 事件不再走 stream 画面**——neuro
 窗口（合成器里的 iframe）直接订阅 neuro 自己的 /ui/events 播放字幕/音频/动作。
 
-开播：先探测 neuro 健康，再 POST neuro /ui/intro 拿开场时长；neuro 不可达时
-禁止开播。开场视频/立绘入场由 neuro 窗口自己完成，stream 只按返回时长推进
-starting→live；中途 neuro 掉线由合成器显示 no_source 背景（画面侧健康轮询）。
+开播：先探测 neuro 健康，再 POST neuro /ui/intro 触发开场（拿她切到的**场景 id**，
+不拿时长）；合成器落到 room_intro（只有 neuro 全屏，不叠 chat/highlight），随后
+每 0.5s 轮询 GET neuro /status——**她离开那个场景 = 开场放完** → 切 room 并推进
+starting→live。stream 侧不存在任何秒数倒计时：换素材、调 after 余量、neuro 改了
+场景 id 都不需要同步改这里。到硬上限（START_READY_TIMEOUT_S）仍未放行则中止本次
+开播（落库 ended + session_end{reason:"intro_timeout"} + status.last_error），
+不硬转 live。neuro 不可达时禁止开播；中途 neuro 掉线由合成器显示 no_source 背景
+（画面侧健康轮询）。
 """
 
 import asyncio
@@ -28,9 +33,12 @@ import time
 import uuid
 from typing import Any, Awaitable, Callable, Optional, Union
 
+from .. import scene_kit
 from ..broadcaster import EventBroadcaster
+from ..scene_kit import SceneRunner
 from . import scenes as scene_catalog
 from . import settings as stream_settings
+from .scenes import StreamScenePolicy
 from .chatbot import ChatbotManager
 from .games import GameHub
 from .neuro_client import NeuroClient, NeuroError
@@ -53,6 +61,21 @@ _SESSION_STATE = {
 }
 
 
+# 开播时"开场是否放完"的判定参数。
+#
+# 正常判定靠**轮询 neuro 的权威场景**（她离开开场场景 = 开场放完）；下面的硬上限只是
+# 纯兜底：她永远停在开场场景（state_script 数据坏、进程假死）、或状态通道一直读不到时
+# 才会走到这里，到点**中止本次开播**——而不是硬转 live（那等于开播一个画面卡在开场的
+# 直播）。硬上限与 neuro 的场景时长无关，所以 stream 侧不存在任何秒数。
+START_READY_TIMEOUT_S = 120.0
+READY_POLL_INTERVAL_S = 0.5
+
+# 开场期间合成器落在 room_intro（neuro 全屏、不显示 chat/highlight）；
+# 她离开开场场景后切到 room，并同时推进 live。
+SCENE_ROOM_INTRO = "room_intro"
+SCENE_ROOM = "room"
+
+
 class StreamConflict(Exception):
     """状态不允许该操作（→ 409）。"""
 
@@ -71,6 +94,11 @@ class StreamLoop:
         self.state: str = STATE_OFFLINE
         self.session: Optional[dict[str, Any]] = None
         self.last_scene: Optional[str] = None
+        # 合成器场景的权威状态：进入时刻与时长供 scene_set / snapshot 断点恢复
+        self._scene_started_at: float = 0.0
+        self._scene_duration: float = 0.0
+        # 场景切换走公共机制（scene_kit）：写状态 → 广播 scene_set → 排程后端脚本
+        self._scenes = SceneRunner(self, self.publish, StreamScenePolicy())
         # 直播里可被 Neuro 工具驱动的本地小游戏（同时至多一个活跃游戏）
         self.games = GameHub(publish=self.publish, set_scene=self.on_scene)
         self._task: Optional[asyncio.Task] = None
@@ -78,8 +106,10 @@ class StreamLoop:
         self._wakeup = asyncio.Event()
         # game 动作在 stream 内的实际执行串行化（工具请求可能并发到达）
         self._game_action_lock = asyncio.Lock()
-        # 开播 intro 的时长（neuro /ui/intro 返回；starting→live 的唯一依据）
-        self._intro_duration: float = 0.0
+        # 开场闸门（starting 阶段）：等 neuro 离开她自己的开场场景，**不倒数任何秒数**
+        self._intro_gate: Optional[dict[str, Any]] = None
+        # 最近一次"异常终止开播"的原因（供 dashboard 显示；下次成功开播时清空）
+        self.last_error: Optional[dict[str, Any]] = None
         # 当前轮次的预测发声终点（只用于轮次节奏 / game 工具闸门）
         self._turn_play_head = 0.0
         # 当前 speech 的 LLM step（用于把 neuro 的 caption_step_gap_ms 计入时间线）
@@ -163,7 +193,7 @@ class StreamLoop:
         except NeuroError as e:
             raise StreamConflict(f"neuro 模块不可达，无法开播：{e}") from e
         try:
-            intro_duration = await client.intro()
+            intro_scene = await client.intro()  # 要等她离开的场景 id，不是时长
         except NeuroError as e:
             raise StreamConflict(f"neuro 开场启动失败，无法开播：{e}") from e
 
@@ -202,15 +232,24 @@ class StreamLoop:
         self.state = STATE_STARTING
         self._stop_event.clear()
         self._wakeup.clear()
-        self._intro_duration = max(0.0, intro_duration)
-        self.last_scene = "room"
+        self.last_scene = SCENE_ROOM_INTRO
         self._turn_play_head = 0.0
+        # 上一次开播的异常原因不跨场次留痕（dashboard 关心的是"这一次怎么样了"）
+        self.last_error = None
+        self._intro_gate = {
+            "waiting_for": intro_scene,
+            "neuro_scene": intro_scene,
+            "polls": 0,
+            "started_at": time.monotonic(),
+            "timeout_s": START_READY_TIMEOUT_S,
+        }
         self.publish({"type": "session_begin", "session_id": session_id, "channel": s.channel,
                       "conversation_id": conversation_id,
                       "title": meta_title, "category": meta_category, "tags": meta_tags})
         self._publish_state()
-        # 合成器切到 room：neuro iframe 里的开场视频已经在播放（POST /ui/intro 已触发）。
-        self.on_scene("room")
+        # 合成器切到开场画面：开场视频此刻已经在 neuro iframe 里播放（POST /ui/intro 已触发），
+        # 而 chat/highlight 不该盖在开场动画上（真实开场没有弹幕）。
+        self.on_scene(SCENE_ROOM_INTRO)
 
         # 启动 chatbot 循环（本场标题/分区作为其消息模板的变量来源）
         self.chatbot.start_session(
@@ -223,6 +262,23 @@ class StreamLoop:
         self._task = asyncio.create_task(self._main(), name="stream-loop")
         logger.info("stream started: session=%s conv=%s", session_id, conversation_id[:8])
         return self.session
+
+    def intro_status(self) -> Optional[dict[str, Any]]:
+        """开场闸门快照（供 /stream/status）：只在 starting 阶段有值。
+
+        dashboard 靠它解释"为什么还在开播中"：卡在开场时能看到 neuro 当前到底停在
+        哪个场景、已经轮询了多少次、距离硬上限还有多久。
+        """
+        gate = self._intro_gate
+        if not gate or self.state != STATE_STARTING:
+            return None
+        out = {k: v for k, v in gate.items() if k != "started_at"}
+        out["waited_s"] = round(max(0.0, time.monotonic() - float(gate.get("started_at", 0.0))), 1)
+        out["remaining_s"] = round(
+            max(0.0, float(gate.get("timeout_s", 0.0)) - (time.monotonic() - float(gate.get("started_at", 0.0)))),
+            1,
+        )
+        return out
 
     # ---------- 本场信息（标题 / 分区） ----------
 
@@ -325,9 +381,40 @@ class StreamLoop:
         with contextlib.suppress(Exception):
             await self.chatbot.aclose()
 
-    def on_scene(self, scene_id: str) -> None:
+    # ---------- 场景（SceneRunner 要的 SceneState 实现） ----------
+
+    def set_scene(self, scene_id: str, duration: float) -> dict[str, Any]:
+        """只写权威状态（广播由 SceneRunner 负责）；对外入口是 `on_scene`。"""
         self.last_scene = scene_id
-        self.publish({"type": "scene_set", "id": scene_id})
+        self._scene_duration = max(0.0, float(duration))
+        self._scene_started_at = time.monotonic()
+        return self.scene_snapshot()
+
+    def scene_id(self) -> Optional[str]:
+        return self.last_scene
+
+    def scene_snapshot(self) -> dict[str, Any]:
+        """给 /ui/events 的 snapshot：中途连接的画面按 elapsed 恢复场景脚本。"""
+        if not self.last_scene:
+            return {}
+        return {
+            "id": self.last_scene,
+            "duration": round(self._scene_duration, 3),
+            "elapsed": round(max(0.0, time.monotonic() - self._scene_started_at), 3),
+        }
+
+    def on_scene(self, scene_id: str) -> None:
+        """切合成器场景：交给 SceneRunner（写状态 + 广播 + 排程该场景的后端脚本）。
+
+        未知 id 只降级为"广播一个裸 id"：游戏场景 id 来自 GameHub、手动端点已自行
+        校验，这里抛异常会把直播循环带崩；但一定要留日志，它说明场景数据不一致。
+        """
+        try:
+            self._scenes.switch(scene_id)
+        except scene_kit.SceneError as e:
+            logger.warning("场景不在清单里，仅广播: %s (%s)", scene_id, e)
+            self.set_scene(scene_id, 0.0)
+            self.publish({"type": "scene_set", **self.scene_snapshot()})
 
     def on_new_message(self) -> None:
         """入列唤醒：静默等待模式下立刻推进下一轮。"""
@@ -387,25 +474,78 @@ class StreamLoop:
 
     # ---------- 主循环 ----------
 
+    async def _await_intro_ready(self) -> bool:
+        """等 neuro 离开开场场景（= 开场放完）。返回 True 才允许进 live。
+
+        判据是 neuro 的**权威场景状态**，不是本地倒计时：她换素材、调 `after` 余量、
+        开场期间被人工切走场景，这里都自动跟上，stream 侧不存在任何秒数。
+
+        三条退出路径：
+          - 离开开场场景，或读不到场景（neuro 刚重启 / 场景数据缺失）→ True
+          - stop_event → False（人工下播，静默）
+          - 硬上限 START_READY_TIMEOUT_S → False + last_error（中止本次开播）
+        轮询失败不单独终止：neuro 重启几秒是常见情况，硬上限兜住最坏情形。
+        """
+        gate = self._intro_gate or {}
+        waiting_for = str(gate.get("waiting_for") or "")
+        s = stream_settings.load()
+        client = NeuroClient(s.neuro_url)
+        deadline = time.monotonic() + START_READY_TIMEOUT_S
+        status_error: Optional[str] = None
+
+        while True:
+            if self._stop_event.is_set():
+                return False
+            gate["polls"] = int(gate.get("polls", 0)) + 1
+            try:
+                st = await client.status(s.channel)
+                scene = st.get("scene") if isinstance(st, dict) else None
+                current = str((scene or {}).get("id") or "")
+                gate["neuro_scene"] = current or None
+                status_error = None
+                if not waiting_for or current != waiting_for:
+                    # 空场景也算"没停在开场"：不能因为读不到场景就一直等
+                    gate["ready_via"] = current or None
+                    return True
+            except (NeuroError, RuntimeError) as e:
+                status_error = f"{type(e).__name__}: {e}"
+                gate["status_error"] = status_error
+
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                self.last_error = {
+                    "code": "intro_timeout",
+                    "message": (
+                        f"neuro 停在开场场景超过 {START_READY_TIMEOUT_S:g}s，已中止本次开播"
+                    ),
+                    "at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                    "detail": {
+                        "waiting_for": waiting_for,
+                        "neuro_scene": gate.get("neuro_scene"),
+                        "polls": gate.get("polls", 0),
+                        "status_error": status_error,
+                    },
+                }
+                logger.error(
+                    "开播中止：%s（neuro 场景=%s，轮询 %s 次）",
+                    self.last_error["message"],
+                    gate.get("neuro_scene"),
+                    gate.get("polls", 0),
+                )
+                return False
+            # 短睡且可被 stop 即时打断（睡满整个上限会让下播等十几秒）
+            await self._sleep_ms(min(READY_POLL_INTERVAL_S, remaining) * 1000.0)
+
     async def _main(self) -> None:
         session = self.session
         try:
-            # 开场时长来自 neuro /ui/intro（视频 + rise）；后端按自己的时钟推进，
-            # 不等待任何前端；stop 事件可即时打断等待。视频/立绘的播放由 neuro 窗口负责。
-            duration = max(0.0, self._intro_duration)
-            try:
-                await asyncio.wait_for(self._stop_event.wait(), timeout=duration)
-                return
-            except asyncio.TimeoutError:
-                pass
-            if self._stop_event.is_set():
-                return
+            if not await self._await_intro_ready():
+                return  # 人工下播（静默）或开场超时（已记 last_error），都不进循环
             self.state = STATE_LIVE
-            # 只有没被显式改过（开场期间手动切场景或开了游戏）才落到 room。
-            # 广播 scene_set 是“后端推进画面”的唯一手段：任何前端卡住/迟到，
-            # 都会被这一帧纠正；没有前端也不影响循环。
-            if self.last_scene in (None, "room"):
-                self.on_scene("room")
+            # 开场画面 → 常态画面：切 room 与推进 live 是同一个动作。广播 scene_set
+            # 是后端推进画面的唯一手段（迟到/卡住的前端都会被这一帧纠正，
+            # 没有前端也不影响循环）。
+            self.on_scene(SCENE_ROOM)
             self._publish_state()
 
             while not self._stop_event.is_set():
@@ -429,24 +569,31 @@ class StreamLoop:
         except Exception:
             logger.exception("stream loop crashed, ending session")
         finally:
-            await self._finalize()
+            await self._finalize(self.last_error["code"] if self.last_error else None)
 
-    async def _finalize(self) -> None:
+    async def _finalize(self, reason: Optional[str] = None) -> None:
         self.chatbot.stop_session()
         await self.games.aclear()
         was = self.state
         self.state = STATE_OFFLINE
-        self._intro_duration = 0.0
+        self._intro_gate = None
         self._turn_play_head = 0.0
         self._turn_step = None
         if self.session is not None:
             await self.storage.update_session(
                 self.session["session_row"], state="offline", ended=True
             )
-            self.publish({"type": "session_end", "session_id": self.session["session_id"]})
-            logger.info("stream session ended (from %s)", was)
+            ev: dict[str, Any] = {"type": "session_end", "session_id": self.session["session_id"]}
+            if reason:
+                ev["reason"] = reason
+            self.publish(ev)
+            logger.info(
+                "stream session ended (from %s%s)", was, f", reason={reason}" if reason else ""
+            )
         self.session = None
+        self._scenes.cancel()  # 作废在跑的场景后端脚本
         self.last_scene = None
+        self._scene_duration = 0.0
         self._publish_state()
 
     async def _run_round(self, s: stream_settings.StreamSettings, session: dict) -> str | None:

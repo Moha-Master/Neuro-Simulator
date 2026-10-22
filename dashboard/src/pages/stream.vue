@@ -23,6 +23,25 @@
         {{ st.error.value }}
       </v-alert>
 
+      <!-- 上一次"异常终止开播"的原因：服务端在下次成功开播时清空，所以它只描述
+           刚才那一次为什么没开成（例如 neuro 卡在开场场景、轮询不到状态）。 -->
+      <v-alert
+        v-if="lastError"
+        type="warning"
+        variant="tonal"
+        density="compact"
+        class="mb-4"
+      >
+        {{ lastError.message }}
+        <div class="text-caption mt-1 text-medium-emphasis">
+          neuro 场景 {{ lastError.detail?.neuro_scene ?? '—' }} · 轮询
+          {{ lastError.detail?.polls ?? 0 }} 次
+          <template v-if="lastError.detail?.status_error">
+            · 状态读取失败：{{ lastError.detail.status_error }}
+          </template>
+        </div>
+      </v-alert>
+
       <div class="d-flex align-center mb-4">
         <div class="text-h5">Stream Control</div>
         <v-spacer />
@@ -60,6 +79,17 @@
                 </div>
               </v-col>
             </v-row>
+            <!-- 开场阶段：循环在等 neuro 离开她自己的开场场景（判据是她的权威状态，
+                 不是本地倒计时）。这里把"在等什么、等了多久、还剩多久"摊开，
+                 免得卡在开播中时只能看到一个不动的状态 chip。 -->
+            <div v-if="introGate" class="text-caption text-medium-emphasis mt-2">
+              <v-icon size="x-small" icon="mdi-movie-open" class="mr-1" />
+              等待开场结束 · neuro 场景 {{ introGate.neuro_scene ?? '—' }} · 已等
+              {{ introGate.waited_s }}s / 上限 {{ introGate.timeout_s }}s
+              <template v-if="introGate.status_error">
+                · 状态读取失败：{{ introGate.status_error }}
+              </template>
+            </div>
           </template>
           <div v-else class="text-body-2 text-disabled">
             未在直播。点击下方「开始直播」新建场次（会话 + 消息队列 + 画面入场）。
@@ -167,9 +197,11 @@
         </v-card-actions>
       </v-card>
 
-      <!-- 场景：只读显示。切换由直播循环自动驱动（开播 → room、开局 → 游戏场景、
-           下播 → no-source 待机）；手动切会让画面与循环/游戏状态互相打架，
-           所以 dashboard 不再提供按钮（API 仍然可用）。 -->
+      <!-- 场景：只读显示。切换由直播循环自动驱动（开播 → room_intro、开场放完 → room、
+           开局 → 游戏场景、下播 → no-source 待机）；手动切会让画面与循环/游戏状态
+           互相打架，所以 dashboard 不再提供按钮（API 仍然可用）。
+           room_intro 是 hidden 场景（不在 GET /stream/scenes 清单里），名字与图标
+           由服务端 status.scene_label / scene_icon 给出。 -->
       <v-card class="mb-6">
         <v-card-title class="text-subtitle-1">场景（直播画面）</v-card-title>
         <v-card-text>
@@ -273,9 +305,17 @@ const currentSceneInfo = computed(
 )
 const currentSceneLabel = computed(() => {
   if (currentSceneInfo.value) return currentSceneInfo.value.label
+  // hidden 场景（开场的 room_intro）不在手动清单里 → 用服务端给的 label，别显示裸 id
+  const fromServer = st.status.value?.scene_label
+  if (fromServer) return fromServer
   return currentScene.value ? currentScene.value : '待机（no source）'
 })
-const currentSceneIcon = computed(() => currentSceneInfo.value?.icon ?? 'mdi-television-pause')
+const currentSceneIcon = computed(
+  () => currentSceneInfo.value?.icon ?? st.status.value?.scene_icon ?? 'mdi-television-pause',
+)
+// 开场闸门与"上次为什么没开成"（服务端在下次成功开播时清空 last_error）
+const introGate = computed(() => st.status.value?.starting ?? null)
+const lastError = computed(() => st.status.value?.last_error ?? null)
 
 // 本场信息编辑区：以服务端值为基线；用户有未保存改动时不被轮询覆盖，
 // 但场次切换（开播/下播）会重新对齐（新场次的标题来自上一场或 config 默认值）。

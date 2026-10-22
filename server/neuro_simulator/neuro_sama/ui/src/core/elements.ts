@@ -1,21 +1,24 @@
-/** 元素引擎：把"场景 = 元素清单"（scenes/schema.ts）落成真实的 DOM 与生命周期。
+/** 元素引擎：把"场景 = 元素清单 + 前端脚本（timeline）"落成真实的 DOM 与生命周期。
  *
- * ⚠️ 这份文件是 `stream/ui/src/core/elements.ts` 的**近乎逐字拷贝**（两个前端是各自
- * 独立的 Vite 工程，没有共享包）。差异只有三处，都带注释：
- *   1. `at_end` / 场景时长的解析（neuro 的时长由后端探测视频轨道给出）；
- *   2. `media.play` 不写 duration 时按"播到场景结束"处理（换素材不必改数据）；
- *   3. `setHidden(ids)`：父页面（stream 合成器 / dashboard 预览）按元素 id 强制
- *      隐藏某一层，与场景数据取交集——这样新加一层就能直接被外部寻址。
- * 修 stream 那份引擎的 bug 时请对照同步。
+ * ⚠️ 这份文件在 `stream/ui` 与 `neuro_sama/ui` 各有一份**必须逐字相同**的拷贝
+ *    （两个前端是各自独立的 Vite 工程，没有共享包）。防漂移由
+ *    `test-units/test_ui_engine_parity.py` 守着：改一边忘了改另一边，测试会直接
+ *    把两份的差异行打出来。
  *
  * - 几何全部以舞台比例声明，引擎写成 inline style（left/top/bottom/width/height/z-index/transform）。
  * - **同 id 跨场景复用同一个 DOM 节点与同一个组件实例**：切场景只做 diff
  *   （离场 → 跑 exit 后隐藏、不销毁；进场 → 挂载并跑 enter；两边都有且几何变了 → 跑 move）。
- *   不销毁是有意为之：字幕队列、视频进度、组件内部状态都要跨场景活着。
+ *   不销毁是有意为之：聊天历史、字幕队列、游戏动画状态都要跨场景活着。
  * - 默认无过渡（不写脚本 = 直接出现 / 直接落位）；要淡入或平滑移动就在场景数据里写脚本。
- * - 场景级 `timeline`（前端脚本）由引擎按秒执行；切场景会取消旧 timer/动画并暂停视频，
- *   snapshot 的 `elapsed` 可从断点恢复。后端脚本 `state_script` 不在这里执行。
- * - `update(id, payload)` 是通用元素状态通道（缓存最新 payload，元素首次挂载自动回放）。
+ * - 场景级 `timeline` 是**前端脚本**：由本引擎按秒执行（show/hide/media/命名动作），
+ *   只动 DOM。改权威状态（换场景）属于后端脚本 `state_script`，不在这里。
+ * - `at_end: N` = 场景有效时长 - N；时长由宿主按 `setScene(id, {duration})` 下发
+ *   （可以是探测视频轨道得到的值），所以数据里不必写死绝对时刻。
+ *   `media.play` 不写 `duration` 时按"一直播到场景结束"处理，换素材不用回去改数据。
+ * - `setHidden(ids)`：外部（父页面 / 宿主）按元素 id 强制隐藏若干层，与场景声明的
+ *   显隐取交集——只能隐藏，不能强制显示脚本管着的层。
+ * - `update(id, payload)` 是通用元素状态通道（缓存最新 payload，元素首次挂载自动回放，
+ *   所以中途连接也能画出当前状态）。
  */
 
 import { asset } from "./assets";
