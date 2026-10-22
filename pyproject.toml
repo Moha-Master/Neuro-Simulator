@@ -64,6 +64,6 @@ path = "hatch_build.py"
 [tool.hatch.build.targets.wheel]
 sources = ["server"]
 # stream/ui 源码（工程配置/src/public）不进 wheel，只带构建产物；
-# 旧 client/（已废弃，被 stream/ui 取代）不再随包分发
-exclude = ["server/neuro_simulator/stream/ui"]
-force-include = { "dashboard/dist" = "neuro_simulator/dashboard", "server/neuro_simulator/stream/ui/dist" = "neuro_simulator/stream/ui" }
+# neuro_sama/ui 同理（Neuro 窗口前端）；旧 client/（已废弃）不再随包分发
+exclude = ["server/neuro_simulator/stream/ui", "server/neuro_simulator/neuro_sama/ui"]
+force-include = { "dashboard/dist" = "neuro_simulator/dashboard", "server/neuro_simulator/stream/ui/dist" = "neuro_simulator/stream/ui", "server/neuro_simulator/neuro_sama/ui/dist" = "neuro_simulator/neuro_sama/ui" }

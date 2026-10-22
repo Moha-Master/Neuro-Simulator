@@ -83,6 +83,8 @@ export class ElementEngine {
   private timelineTimers: number[] = [];
   /** 场景脚本触碰过的元素（切场景时取消其动画并暂停视频）。 */
   private timelineEls = new Set<HTMLElement>();
+  /** 每个元素上一次由场景数据写入的 css 键（换场景时清掉不再声明的覆盖项）。 */
+  private appliedCss = new WeakMap<HTMLElement, string[]>();
   current: SceneDef | null = null;
 
   constructor(stage: HTMLElement, scenes: SceneDef[]) {
@@ -417,7 +419,14 @@ export class ElementEngine {
   }
 
   private applyCss(m: Mounted): void {
-    for (const [k, v] of Object.entries(m.def.css ?? {})) m.el.style.setProperty(k, v);
+    const next = m.def.css ?? {};
+    // 清掉换场景后不再声明的覆盖项（如聊天层的 --chat-font-scale，
+    // 回 room 必须恢复默认），否则 inline style 会一直留着上一个场景的值。
+    for (const key of this.appliedCss.get(m.el) ?? []) {
+      if (!(key in next)) m.el.style.removeProperty(key);
+    }
+    for (const [k, v] of Object.entries(next)) m.el.style.setProperty(k, v);
+    this.appliedCss.set(m.el, Object.keys(next));
   }
 
   private buildContent(el: HTMLElement, content: Content): ComponentInstance | null {

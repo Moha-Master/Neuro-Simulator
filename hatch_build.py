@@ -13,6 +13,7 @@ class CustomBuildHook(BuildHookInterface):
     FRONTENDS = [
         ("dashboard", "dashboard"),
         ("stream ui", "server/neuro_simulator/stream/ui"),
+        ("neuro ui", "server/neuro_simulator/neuro_sama/ui"),
     ]
 
     def initialize(self, version, build_data):

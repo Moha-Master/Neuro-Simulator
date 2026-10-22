@@ -1,83 +1,97 @@
-/** /ui 画面入口：纯渲染面。
+/** /ui 合成器入口：实际背景 + game/media + neuro 窗口 iframe + chat/highlight。
  *
- * 舞台里没有任何写死的层：场景与元素来自 scenes.json（见 scenes/schema.ts），
- * 由 ElementEngine 按当前场景挂载/隐藏。事件全部来自 stream 的 /ui/events 通道
- * （字幕/音频 = 转发的 speech；场景 = scene_set；游戏等元素状态 = element_state；
- *  无本地控制面板——手动场景/循环操作属于 dashboard 与 stream API）。
+ * 现实对应关系：
+ * - stream 只提供"其它背景 / 靠后的内容 / 靠前的前景"；
+ * - neuro 窗口（背景/开场/立绘/字幕）是独立进程的整窗捕获，这里用 iframe 承载，
+ *   只做整体 translate+scale，并通过 postMessage 控制内部层显隐；
+ * - 字幕/音频/工具动作不再经过 stream 的 SSE——neuro iframe 自己订阅 neuro 的
+ *   /ui/events。
+ *
+ * 事件（stream /ui/events）只负责：场景、session/state、游戏元素状态、聊天、
+ * 优先消息、settings（neuro UI 地址/channel）。
  */
 
 import "./styles/stream.css";
 
 import { loadFonts } from "./core/assets";
-import { runAction } from "./core/action";
 import { ChatOverlay, HighlightOverlay } from "./core/chat";
 import { ElementEngine } from "./core/elements";
-import { StreamFeed, type ChatMsg, type FeedEvent, type Snapshot } from "./core/feed";
-import { CaptionPlayer } from "./core/speech";
+import { NeuroLayer } from "./core/neuro";
 import {
-  AVATAR_ELEMENT,
-  SCENE_INTRO,
-  SCENE_ROOM,
-  SCENE_STARTING_SOON,
-  fetchScenes,
-} from "./scenes";
+  StreamFeed,
+  type ChatMsg,
+  type FeedEvent,
+  type NeuroSettings,
+  type Snapshot,
+} from "./core/feed";
+import { SCENE_ROOM, SCENE_STARTING_SOON, fetchScenes } from "./scenes";
+import type { SceneDef } from "./scenes/schema";
+
+const VIA_VEDAL = window.location.pathname.includes("/manage/stream/ui");
+
+/** vedal 代理下用同源路径；直连 stream 时用后端给的绝对 URL（external_url/host:port）。 */
+function resolveNeuroSettings(settings?: NeuroSettings): {
+  uiUrl: string;
+  healthUrl: string;
+  channel: string;
+} {
+  return {
+    uiUrl: VIA_VEDAL
+      ? "/manage/neuro_sama/ui/"
+      : settings?.neuro_ui_url || "/manage/neuro_sama/ui/",
+    healthUrl: VIA_VEDAL
+      ? "/manage/neuro_sama/health"
+      : settings?.neuro_health_url || "/manage/neuro_sama/health",
+    channel: settings?.neuro_channel || "stream",
+  };
+}
 
 async function boot(): Promise<void> {
   await loadFonts();
 
   const stage = document.getElementById("stage");
   if (!stage) return;
-  let engine: ElementEngine;
+
+  let scenes: SceneDef[];
   try {
-    engine = new ElementEngine(stage, await fetchScenes());
+    scenes = await fetchScenes();
   } catch (e) {
     console.error("场景清单（scenes.json）加载失败，画面无法渲染", e);
     return;
   }
+  const sceneMap = new Map(scenes.map((s) => [s.id, s]));
+  const engine = new ElementEngine(stage, scenes);
   await engine.setScene(SCENE_STARTING_SOON, { instant: true });
 
-  // 实时管线组件从元素引擎取（元素 id 见 scenes.json）
-  const player = engine.view<CaptionPlayer>("caption");
+  // 实时管线组件从元素引擎取（starting_soon 也声明了 chat/highlight，保证实例先建好）
   const chat = engine.view<ChatOverlay>("chat");
   const highlight = engine.view<HighlightOverlay>("highlight");
-  for (const [id, view] of [["caption", player], ["chat", chat], ["highlight", highlight]] as const) {
-    if (!view) console.warn(`当前场景缺少 ${id} 元素，相关事件将被忽略`);
+  for (const [id, view] of [["chat", chat], ["highlight", highlight]] as const) {
+    if (!view) console.warn(`场景缺少 ${id} 元素，相关事件将被忽略`);
   }
 
-  let avatarZoomed = false;
+  const noSource = document.getElementById("no-source");
+  let neuro: NeuroLayer | null = null;
+  let streamState = "offline";
+  let neuroHealthy = true;
+  let healthUrl = "";
+  let healthTimer: number | null = null;
 
-  /** 结束本轮语音后复位 zoom（旧 client：zoom 持续到整段回答播完）。 */
-  function resetAvatarZoom(immediate = false): void {
-    if (!avatarZoomed) return;
-    avatarZoomed = false;
-    const el = engine.element(AVATAR_ELEMENT);
-    if (!el) return;
-    if (immediate) {
-      el.getAnimations().forEach((a) => a.cancel());
-      el.style.transform = "";
+  /** 当前场景的 neuro 配置（场景切换 / iframe 晚于场景创建时都要对齐）。 */
+  function applySceneNeuro(): void {
+    const current = engine.current;
+    neuro?.setScene(current ? sceneMap.get(current.id)?.neuro : undefined);
+  }
+
+  function ensureNeuro(settings?: NeuroSettings): void {
+    const next = resolveNeuroSettings(settings);
+    if (!neuro) {
+      neuro = new NeuroLayer(stage!, { uiUrl: next.uiUrl, channel: next.channel });
+      applySceneNeuro();
     } else {
-      void runAction("avatar.zoom_out", el);
+      neuro.setSettings({ uiUrl: next.uiUrl, channel: next.channel });
     }
-  }
-  if (player) player.onIdle = () => resetAvatarZoom();
-
-  /** neuro 的画面工具（model_spin / model_zoom）→ 立绘动作。
-   *  其他工具（memory_add / 游戏 / MCP 等）与画面动作无关，静默忽略。 */
-  function onToolCall(ev: FeedEvent): void {
-    const name = String(ev.name ?? "");
-    const el = engine.element(AVATAR_ELEMENT);
-    if (!el) return;
-    if (name === "model_spin") {
-      void runAction("avatar.spin", el);
-    } else if (name === "model_zoom") {
-      // 旧 client 的 class 是幂等的：已经放大时不重复播放 zoom_in
-      if (!avatarZoomed) {
-        avatarZoomed = true;
-        void runAction("avatar.zoom_in", el);
-      }
-    } else if (name.startsWith("model_")) {
-      console.warn(`未处理的画面工具: ${name}`);
-    }
+    startHealth(next.healthUrl);
   }
 
   async function setScene(
@@ -86,6 +100,7 @@ async function boot(): Promise<void> {
   ): Promise<void> {
     try {
       await engine.setScene(id, opts);
+      applySceneNeuro();
     } catch (e) {
       console.warn(`场景切换失败: ${id}`, e);
     }
@@ -97,108 +112,122 @@ async function boot(): Promise<void> {
     for (const [id, payload] of Object.entries(map)) engine.update(id, payload);
   }
 
+  // ---------- neuro 健康轮询：中途掉线 → no_source ----------
+
+  function updateSource(): void {
+    const down = streamState !== "offline" && !neuroHealthy;
+    noSource?.classList.toggle("hidden", !down);
+    neuro?.setAvailable(!down);
+  }
+
+  async function checkHealth(): Promise<void> {
+    if (!healthUrl) return;
+    const ctrl = new AbortController();
+    const timer = window.setTimeout(() => ctrl.abort(), 4000);
+    let ok = false;
+    try {
+      const r = await fetch(healthUrl, { cache: "no-store", signal: ctrl.signal });
+      ok = r.ok;
+    } catch {
+      ok = false;
+    } finally {
+      window.clearTimeout(timer);
+    }
+    if (ok !== neuroHealthy) {
+      neuroHealthy = ok;
+      updateSource();
+    }
+  }
+
+  function startHealth(url: string): void {
+    if (url === healthUrl && healthTimer !== null) return;
+    healthUrl = url;
+    if (healthTimer !== null) {
+      window.clearInterval(healthTimer);
+      healthTimer = null;
+    }
+    if (!url) {
+      neuroHealthy = true;
+      updateSource();
+      return;
+    }
+    void checkHealth();
+    healthTimer = window.setInterval(() => void checkHealth(), 5000);
+  }
+
   const feed = new StreamFeed();
 
   feed.on("snapshot", (ev: FeedEvent) => {
     const snap = ev as unknown as Snapshot;
-    // 画面端运行参数（字幕停留/轮间冷却；配置热重载时另有 settings 事件）
-    player?.setHideDelay(Number(snap.settings?.speech_cooldown_ms ?? 1000));
+    streamState = snap.state;
+    ensureNeuro(snap.settings);
+    updateSource();
+
     // 聊天层：重连时用 snapshot 的最近记录整体恢复；无场次则清空
     if (snap.chat?.length) chat?.replace(snap.chat);
     else chat?.clear();
     applyElements(snap.elements);
+
     if (snap.state === "offline") {
       highlight?.clear();
-      void setScene(SCENE_STARTING_SOON, { instant: true }); // 黑屏等待
-      return;
-    }
-    if (snap.state === "starting" && snap.scene === SCENE_INTRO) {
-      // 中途连上：按场景时间线已过秒数续播（视频 seek、未开始的立绘动作顺延）
-      void setScene(SCENE_INTRO, {
-        instant: true,
-        elapsed: Number(snap.intro_elapsed ?? 0),
-      });
+      void setScene(SCENE_STARTING_SOON, { instant: true });
       return;
     }
     if (snap.state === "starting" || snap.state === "live" || snap.state === "paused") {
       // 落到 snapshot 声明的实际场景（含循环期间手动切换过的场景），未知则 room。
       // 重连用 instant：不重复播淡入，画面不会因为 SSE 断开重连而闪一下。
-      void setScene(snap.scene && snap.scene !== SCENE_INTRO ? snap.scene : SCENE_ROOM, {
-        instant: true,
-      });
-      if (snap.turn?.speech?.length && player) {
-        player.resumeFromSnapshot(snap.turn.speech, Number(snap.turn.id ?? 0));
-        if (!snap.turn.active) player.endOfTurn(Number(snap.turn.id ?? 0)); // 轮间连接：恢复完即进入淡出计时
-      }
+      void setScene(snap.scene || SCENE_ROOM, { instant: true });
     } else {
       void setScene(SCENE_STARTING_SOON, { instant: true });
     }
   });
-  // 新场次开始：清掉上一场残留字幕/聊天（场景本身由 start 广播的 scene_set 驱动）
+
+  // 新场次开始：清掉上一场残留聊天/优先弹窗（场景由 start 广播的 scene_set 驱动）
   feed.on("session_begin", () => {
-    player?.clear();
     chat?.clear();
     highlight?.clear();
-    resetAvatarZoom(true);
   });
+
   feed.on("state", (ev: FeedEvent) => {
     const s = String(ev.state ?? "");
-    if (s === "live" || s === "paused") {
-      // 后端是唯一时钟：进入 live 时若还停在待机/开场，直接落 room。
+    streamState = s;
+    updateSource();
+    if (s === "starting" || s === "live" || s === "paused") {
+      // 后端是唯一时钟：进入 starting/live 时若还停在待机，直接落 room。
       // 已经在某个直播场景里（含游戏）就别把它拽回 room——暂停/继续不该换画面。
-      // 即使本画面的开场视频卡住，也会被这一帧纠正；后端从不等待它。
-      if (
-        !engine.current ||
-        engine.current.id === SCENE_STARTING_SOON ||
-        engine.current.id === SCENE_INTRO
-      ) {
+      if (!engine.current || engine.current.id === SCENE_STARTING_SOON) {
         void setScene(SCENE_ROOM);
       }
     } else if (s === "offline") {
-      player?.clear();
       chat?.clear();
       highlight?.clear();
-      resetAvatarZoom(true);
       void setScene(SCENE_STARTING_SOON);
     }
   });
+
   feed.on("scene_set", (ev: FeedEvent) => {
-    // 场景脚本的取消由 ElementEngine.setScene 负责：旧 intro 的 timer/动画不会
-    // 在 room 上继续跑，因此这里不需要额外的 abort 协议。
     void setScene(String(ev.id ?? ""));
   });
+
   feed.on("element_state", (ev: FeedEvent) => {
     engine.update(String(ev.id ?? ""), ev.payload);
   });
+
   feed.on("settings", (ev: FeedEvent) => {
-    player?.setHideDelay(Number(ev.speech_cooldown_ms ?? 1000));
+    // 配置热重载：neuro UI 地址/channel 可能变了；健康地址一起更新。
+    ensureNeuro(ev as unknown as NeuroSettings);
   });
-  feed.on("speech", (ev: FeedEvent) => {
-    player?.enqueue({
-      index: Number(ev.index ?? 0),
-      text: String(ev.text ?? ""),
-      audio: String(ev.audio ?? ""),
-      mime: String(ev.mime ?? ""),
-      duration: Number(ev.duration ?? 0),
-      turn_id: Number(ev.turn_id ?? 0),
-      step: Number(ev.step ?? 0),
-    });
-  });
-  feed.on("turn_begin", (ev: FeedEvent) => {
-    player?.beginTurn(Number(ev.turn_id ?? 0));
-  });
-  feed.on("turn_end", (ev: FeedEvent) => player?.endOfTurn(Number(ev.turn_id ?? 0)));
+
   feed.on("session_end", () => {
-    player?.clear();
     chat?.clear();
     highlight?.clear();
-    resetAvatarZoom(true);
     void setScene(SCENE_STARTING_SOON);
   });
-  feed.on("tool_start", onToolCall); // 工具语义在前端：目前只处理 model_* 画面动作
+
   feed.on("chat_message", (ev: FeedEvent) => {
     chat?.append(ev as unknown as ChatMsg);
   });
+
   feed.on("priority_message", (ev: FeedEvent) => {
     const msg = ev as unknown as ChatMsg;
     chat?.append(msg); // 与旧 client 一致：优先消息也占一条普通聊天行
@@ -207,7 +236,17 @@ async function boot(): Promise<void> {
 
   // 调试/E2E 句柄：控制台或自动化可直接驱动渲染管线（不影响运行逻辑）
   (window as unknown as Record<string, unknown>).__ns = {
-    engine, player, feed, chat, highlight, setScene, onToolCall, resetAvatarZoom,
+    engine,
+    get neuro() {
+      return neuro;
+    },
+    feed,
+    chat,
+    highlight,
+    noSource,
+    setScene,
+    ensureNeuro,
+    isNeuroHealthy: () => neuroHealthy,
   };
 }
 

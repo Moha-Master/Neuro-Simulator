@@ -459,6 +459,10 @@ def create_app() -> FastAPI:
                 try:
                     async for chunk in r.aiter_bytes():
                         yield chunk
+                except httpx.HTTPError:
+                    # 上游（neuro/stream）中途掉线：客户端 EventSource 会自动重连，
+                    # 这里静默结束，避免 uvicorn 把断管当成未处理异常刷 traceback。
+                    return
                 finally:
                     await r.aclose()
                     await client.aclose()

@@ -1,0 +1,83 @@
+/* Neuro 窗口样式：固定 16:9 舞台，**层本身不在这写**——每一层（背景 / 开场视频 /
+   立绘 / 字幕）都是 neuro_scenes.json 里的数据，几何由元素引擎写成 inline style，
+   这里只留舞台基座与各组件内部的样子（样式按 [data-component="…"] 挂，
+   元素 id 属于场景数据、可改，组件名属于代码）。
+
+   背景必须保持透明：合成器隐藏 bg_room 时，下面 stream 的背景/游戏层要能透出来。
+   独立打开时，舞台外的 letterbox 区域同样透明（OBS 浏览器源同理）。 */
+
+:root {
+  color-scheme: dark;
+  --neuro-shadow-color: #32003c;
+}
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+html,
+body {
+  width: 100%;
+  height: 100%;
+  background: transparent;
+  overflow: hidden;
+}
+
+body {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+
+/* ===== 舞台：16:9，随视口最大化（letterbox 区域透明） ===== */
+#stage {
+  position: relative;
+  aspect-ratio: 16 / 9;
+  width: min(100vw, calc(100vh * 16 / 9));
+  overflow: hidden;
+  container-type: size;
+  container-name: stage;
+}
+
+/* ===== 元素层基座（几何由引擎写成 inline style） ===== */
+.ns-el {
+  position: absolute;
+  pointer-events: none;
+  container-type: inline-size;
+}
+
+.ns-el--hidden {
+  display: none !important;
+}
+
+.ns-el img {
+  display: block;
+  width: 100%;
+}
+
+/* ===== 字幕（TTS 时长驱动的伪流式逐词显示） =====
+   字号写在**元素自身**上：元素那一层的 cqi 解析到祖先容器（= 舞台 1920 基准），
+   所以整窗被合成器缩放时字幕跟着整窗一起缩，与旧 stream 画面的 3cqi 行为一致。 */
+.ns-el[data-component="caption"] {
+  padding: 10px 20px;
+  border-radius: 10px;
+  text-align: center;
+  color: white;
+  opacity: 0;
+  transition: opacity 0.3s ease;
+  text-shadow:
+    0 0 4px var(--neuro-shadow-color),
+    0 0 4px var(--neuro-shadow-color),
+    0 0 4px var(--neuro-shadow-color);
+  font-family: "First Coffee", "Noto Sans SC", cursive, sans-serif;
+  font-weight: normal;
+  font-size: 3cqi;
+  line-height: 1.25;
+}
+
+.ns-el[data-component="caption"].show {
+  opacity: 1;
+}

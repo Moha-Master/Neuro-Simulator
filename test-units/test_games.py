@@ -428,7 +428,12 @@ class TestSceneCatalogContract(unittest.TestCase):
         for sid, scene in self.scenes.items():
             with self.subTest(scene=sid):
                 kinds = [(e["content"] or {}).get("kind") for e in scene["elements"]]
-                self.assertTrue({"image", "color"} & set(kinds), f"{sid} 没有背景层")
+                has_bg = bool({"image", "color"} & set(kinds))
+                # room 的背景由 neuro 窗口自己的 bg_room 提供（合成器不铺背景）；
+                # 媒体场景则是合成器背景 + 隐藏 neuro bg_room。
+                neuro = scene.get("neuro") or {}
+                has_neuro_bg = bool(neuro) and not neuro.get("hidden", False)
+                self.assertTrue(has_bg or has_neuro_bg, f"{sid} 没有背景层")
 
     def test_element_ids_unique_within_scene(self):
         for sid, scene in self.scenes.items():

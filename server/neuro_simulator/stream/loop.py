@@ -1,21 +1,22 @@
 """StreamLoop：直播循环状态机（stream 模块的心脏）。
 
-状态：offline → starting（固定时长的 intro 场景）→ live ⇄ paused → offline
+状态：offline → starting（neuro 窗口播放开场）→ live ⇄ paused → offline
 
 每轮：先查优先轨（有则只消费最早 1 条），否则从普通轨随机抽取 ≤N 条未消费消息
 （按时间正序呈现）→ 拼装场景化 user message 调 neuro /chat → 消费响应
-（speech 转发给 /ui 画面 + 记录预测播放时间线）→ 等“最后一句播完 +
-speech_cooldown_ms”→ 下一轮。
+（记录预测播放时间线，用于轮次节奏）→ 等“最后一句播完 + speech_cooldown_ms”→ 下一轮。
 优先消息在注入时与普通消息完全同格式（对模型只是降噪）；入列即广播
 chat_message / priority_message 给画面。空队列行为可配（占位消息 / 静默等待，
 静默模式下由入列事件即时唤醒，无需轮询）。
 
 对外广播（EventBroadcaster → /ui/events）：session_begin / session_end / state /
-scene_set / element_state（游戏等元素的全量状态）/ speech / turn_begin /
-turn_end / chat_message / priority_message / tool_start / tool_result
-（neuro 事件原样镜像；工具语义由画面端按 name 处理）。
-循环是单 task，控制方法（pause/resume/stop）都只动 Event/标志位，跨 task 安全。
-开播 intro 是普通场景：时长来自 scenes.json，后端到点切 room，不等待任何前端。
+scene_set / element_state（游戏等元素的全量状态）/ chat_message / priority_message /
+stream_metadata / settings。**speech/tool/turn 事件不再走 stream 画面**——neuro
+窗口（合成器里的 iframe）直接订阅 neuro 自己的 /ui/events 播放字幕/音频/动作。
+
+开播：先探测 neuro 健康，再 POST neuro /ui/intro 拿开场时长；neuro 不可达时
+禁止开播。开场视频/立绘入场由 neuro 窗口自己完成，stream 只按返回时长推进
+starting→live；中途 neuro 掉线由合成器显示 no_source 背景（画面侧健康轮询）。
 """
 
 import asyncio
@@ -28,7 +29,6 @@ import uuid
 from typing import Any, Awaitable, Callable, Optional, Union
 
 from ..broadcaster import EventBroadcaster
-from . import media
 from . import scenes as scene_catalog
 from . import settings as stream_settings
 from .chatbot import ChatbotManager
@@ -78,44 +78,31 @@ class StreamLoop:
         self._wakeup = asyncio.Event()
         # game 动作在 stream 内的实际执行串行化（工具请求可能并发到达）
         self._game_action_lock = asyncio.Lock()
-        # intro 场景时间线计时起点（snapshot 供新连接的 UI 续播 intro）
-        self._intro_started: Optional[float] = None
-        # 当前轮次的 speech 时间线（供 snapshot 断点续播）：
-        # 每项 {index, text, duration, start}，start 为预测发声起点（monotonic）
-        self._turn_speech: list[dict[str, Any]] = []
+        # 开播 intro 的时长（neuro /ui/intro 返回；starting→live 的唯一依据）
+        self._intro_duration: float = 0.0
+        # 当前轮次的预测发声终点（只用于轮次节奏 / game 工具闸门）
         self._turn_play_head = 0.0
-        self._in_turn = False
-        # 轮次序号：speech / turn_begin / turn_end / snapshot 共用，画面据此区分轮次
-        self._turn_id = 0
+        # 当前 speech 的 LLM step（用于把 neuro 的 caption_step_gap_ms 计入时间线）
+        self._turn_step: Optional[int] = None
 
     # ---------- 供 snapshot 的中途连接状态 ----------
 
-    def intro_elapsed(self) -> Optional[float]:
-        """starting 阶段已过秒数（UI 续播开场视频用）。"""
-        if self.state == STATE_STARTING and self._intro_started is not None:
-            return time.monotonic() - self._intro_started
-        return None
+    def ui_settings(self) -> dict[str, Any]:
+        """画面端运行参数（snapshot 下发；配置热重载时广播 settings 事件）。
 
-    def turn_snapshot(self) -> dict[str, Any]:
-        """当前/最近一轮的 speech 列表，附 consumed（已发声秒数，含轮间保留期）。
-        仅对"正在发声"的那一句附带音频（供新连接的 UI 从断点 seek 续播）；
-        完成句只回文本（静态显示），未来句由实时事件携带音频到达。"""
-        now = time.monotonic()
-        segs = []
-        for s in self._turn_speech:
-            consumed = min(max(now - s["start"], 0.0), s["duration"])
-            seg: dict[str, Any] = {
-                "step": s.get("step", 0),
-                "index": s["index"],
-                "text": s["text"],
-                "duration": s["duration"],
-                "consumed": round(consumed, 2),
-            }
-            if consumed < s["duration"] - 0.05 and s.get("audio"):
-                seg["audio"] = s["audio"]
-                seg["mime"] = s.get("mime", "")
-            segs.append(seg)
-        return {"id": self._turn_id, "active": self._in_turn, "speech": segs}
+        neuro UI 的地址同时给出绝对 URL（直连 stream 时用）与 channel；
+        合成器在 vedal 代理下会优先使用同源 /manage/neuro_sama/... 路径。
+        """
+        try:
+            s = stream_settings.load()
+        except RuntimeError:
+            return {"neuro_ui_url": "", "neuro_health_url": "", "neuro_channel": "stream"}
+        base = (s.neuro_url or "").rstrip("/")
+        return {
+            "neuro_ui_url": f"{base}/ui/" if base else "",
+            "neuro_health_url": f"{base}/health" if base else "",
+            "neuro_channel": s.channel,
+        }
 
     async def wait_for_speech_end(self) -> None:
         """等当前预测的语音时间线播完（game 工具执行前的闸门）。
@@ -144,25 +131,10 @@ class StreamLoop:
                 result = await result
             return result
 
-    def ui_settings(self) -> dict[str, Any]:
-        """画面端运行参数（snapshot 下发；配置热重载时广播 settings 事件）。"""
-        try:
-            s = stream_settings.load()
-        except RuntimeError:
-            return {"speech_cooldown_ms": 1000}
-        return {"speech_cooldown_ms": s.speech_cooldown_ms}
-
     # ---------- 广播 ----------
 
     def publish(self, ev: dict) -> None:
         self.bus.publish(ev)
-
-    def _end_turn(self, reason: str) -> None:
-        """轮次结束：时间线保留（供中途连接的 UI 续显/淡出），仅标记不在轮中。"""
-        if not self._in_turn:
-            return  # 本轮尚未开始/已结束：不要给上一轮补发迟到的 turn_end
-        self._in_turn = False
-        self.publish({"type": "turn_end", "turn_id": self._turn_id, "reason": reason})
 
     def _publish_state(self) -> None:
         self.publish({"type": "state", "state": self.state, "session_state": _SESSION_STATE[self.state]})
@@ -181,6 +153,19 @@ class StreamLoop:
             s = stream_settings.load()
         except RuntimeError as e:
             raise StreamConflict(str(e)) from e
+
+        # 开播守卫：neuro 不可达 / 开场无法启动时禁止开播。
+        # 先触发开场再建场次：失败不会留下半场 session；健康检查与 intro 调用
+        # 都在任何广播之前，dashboard 可直接看到明确的 409 detail。
+        client = NeuroClient(s.neuro_url)
+        try:
+            await client.health()
+        except NeuroError as e:
+            raise StreamConflict(f"neuro 模块不可达，无法开播：{e}") from e
+        try:
+            intro_duration = await client.intro()
+        except NeuroError as e:
+            raise StreamConflict(f"neuro 开场启动失败，无法开播：{e}") from e
 
         queue_row, queue_id = await self.storage.create_queue(f"stream {time.strftime('%Y-%m-%d %H:%M')}")
         conversation_id = uuid.uuid4().hex
@@ -217,15 +202,15 @@ class StreamLoop:
         self.state = STATE_STARTING
         self._stop_event.clear()
         self._wakeup.clear()
-        self.last_scene = "intro"
-        self._intro_started = time.monotonic()
+        self._intro_duration = max(0.0, intro_duration)
+        self.last_scene = "room"
         self._turn_play_head = 0.0
         self.publish({"type": "session_begin", "session_id": session_id, "channel": s.channel,
                       "conversation_id": conversation_id,
                       "title": meta_title, "category": meta_category, "tags": meta_tags})
         self._publish_state()
-        # intro 是 scenes.json 里的普通场景：广播 scene_set 让画面按数据跑时间线。
-        self.on_scene("intro")
+        # 合成器切到 room：neuro iframe 里的开场视频已经在播放（POST /ui/intro 已触发）。
+        self.on_scene("room")
 
         # 启动 chatbot 循环（本场标题/分区作为其消息模板的变量来源）
         self.chatbot.start_session(
@@ -405,15 +390,9 @@ class StreamLoop:
     async def _main(self) -> None:
         session = self.session
         try:
-            # intro 是固定时长的普通场景：时长首选 scenes.json 的 timeline.duration，
-            # 缺失时按视频+入场动画兜底。后端按自己的时钟推进，不等待任何前端；
-            # stop 事件可即时打断等待。
-            try:
-                duration = scene_catalog.duration("intro") or media.intro_duration_seconds()
-            except RuntimeError:
-                # 场景数据损坏也只能影响画面构建，不能把直播循环拖住/弄崩。
-                logger.warning("intro scene duration unavailable; using media fallback", exc_info=True)
-                duration = media.intro_duration_seconds()
+            # 开场时长来自 neuro /ui/intro（视频 + rise）；后端按自己的时钟推进，
+            # 不等待任何前端；stop 事件可即时打断等待。视频/立绘的播放由 neuro 窗口负责。
+            duration = max(0.0, self._intro_duration)
             try:
                 await asyncio.wait_for(self._stop_event.wait(), timeout=duration)
                 return
@@ -422,10 +401,10 @@ class StreamLoop:
             if self._stop_event.is_set():
                 return
             self.state = STATE_LIVE
-            # 只有没被显式改过（intro 期间手动切场景或开了游戏）才落到 room。
+            # 只有没被显式改过（开场期间手动切场景或开了游戏）才落到 room。
             # 广播 scene_set 是“后端推进画面”的唯一手段：任何前端卡住/迟到，
             # 都会被这一帧纠正；没有前端也不影响循环。
-            if self.last_scene in (None, "intro"):
+            if self.last_scene in (None, "room"):
                 self.on_scene("room")
             self._publish_state()
 
@@ -440,7 +419,6 @@ class StreamLoop:
                 except Exception:
                     # 单轮异常不终结整场直播：退避后继续
                     logger.exception("round failed, backing off 3s")
-                    self._end_turn("error")
                     await self._sleep_ms(3000)
                     continue
                 if outcome == "wait":  # 静默等待新消息
@@ -456,14 +434,11 @@ class StreamLoop:
     async def _finalize(self) -> None:
         self.chatbot.stop_session()
         await self.games.aclear()
-        # 若停止时仍有在途轮次，先按正常轮次结束广播 turn_end（画面据此进入淡出）
-        self._end_turn("stopped")
         was = self.state
         self.state = STATE_OFFLINE
-        self._intro_started = None
-        self._turn_speech = []
+        self._intro_duration = 0.0
         self._turn_play_head = 0.0
-        self._in_turn = False
+        self._turn_step = None
         if self.session is not None:
             await self.storage.update_session(
                 self.session["session_row"], state="offline", ended=True
@@ -518,12 +493,8 @@ class StreamLoop:
         round_failed = False
         had_speech = False
         turn_text = ""
-        self._turn_id += 1
-        turn_id = self._turn_id
-        self._turn_speech = []
         self._turn_play_head = time.monotonic()
-        self._in_turn = True
-        self.publish({"type": "turn_begin", "turn_id": turn_id})
+        self._turn_step = None
         client = NeuroClient(s.neuro_url)
         try:
             async for ev in client.chat(session["channel"], session["conversation_id"], text):
@@ -533,68 +504,30 @@ class StreamLoop:
                 if et == "speech":
                     duration = float(ev.get("duration") or 0)
                     stext = str(ev.get("text") or "").strip()
-                    step = ev.get("step", 0)
+                    step = int(ev.get("step") or 0)
                     if stext:
                         turn_text = f"{turn_text} {stext}".strip()
-                    # 同一轮内的不同 LLM step 之间也留出 cooldown：上游可能在上一步
-                    # 语音还没播完时就把工具执行完、进入下一步并吐出 speech。字幕端
-                    # 按 step 边界清空旧文本，如果事件立即下发，旧字幕会在最后一个
-                    # 字符刚出现时被下一步首句覆盖。这里按服务端预测时间线先压住
-                    # 新 step 的首句，等上一步播完 + cooldown 再转发；这样音频与字幕
-                    # 的节拍一致，snapshot 的预测时间线也不会前后矛盾。
-                    if self._turn_speech:
-                        prev = self._turn_speech[-1]
-                        if step != prev.get("step", 0):
-                            wait_until = (
-                                prev["start"]
-                                + prev["duration"]
-                                + s.speech_cooldown_ms / 1000.0
-                            )
-                            wait_s = wait_until - time.monotonic()
-                            if wait_s > 0:
-                                await self._sleep_ms(wait_s * 1000)
-                                if self._stop_event.is_set():
-                                    break
-                    # 发声时刻 = max(事件到达, 前句播完)：与 UI 顺序播放模型一致
+                    # 发声时刻 = max(事件到达, 前句播完)：用于轮次节奏 / game 工具闸门。
+                    # 字幕与音频的实际播放由 neuro 窗口负责（它自己处理 step 间停顿）；
+                    # 这里把同一个 caption_step_gap_ms 也计入预测时间线，保证下一轮/
+                    # chatbot 的等待与 neuro 的实际播放一致。
+                    if self._turn_step is not None and step != self._turn_step:
+                        gap_ms = getattr(s, "caption_step_gap_ms", 0) or 0
+                        if gap_ms > 0:
+                            self._turn_play_head += gap_ms / 1000.0
                     now = time.monotonic()
                     start = max(now, self._turn_play_head)
                     self._turn_play_head = start + duration
+                    self._turn_step = step
                     had_speech = True
-                    self._turn_speech.append(
-                        {
-                            "step": step,
-                            "index": ev.get("index", 0),
-                            "text": stext,
-                            "duration": duration,
-                            "start": start,
-                            "audio": str(ev.get("audio") or ""),
-                            "mime": str(ev.get("mime") or ""),
-                        }
-                    )
                     # 睡眠判定从“这句预测播完”开始计时：字幕还在播时 chatbot 不会
                     # 把 Neuro 判成空闲；长工具轮里也不会等整轮结束才更新。
                     self.chatbot.note_neuro_speech(turn_text, self._turn_play_head)
-                    self.publish({
-                        "type": "speech",
-                        "turn_id": turn_id,
-                        "step": step,
-                        "index": ev.get("index", 0),
-                        "text": ev.get("text", ""),
-                        "audio": ev.get("audio", ""),
-                        "mime": ev.get("mime", ""),
-                        "duration": ev.get("duration", 0),
-                    })
-                elif et in ("tool_start", "tool_result"):
-                    # 与普通 Chat 一致：工具事件原样镜像（type 已在事件里），
-                    # 是否消费由画面端按 name 自行判断（如 model_spin/model_zoom）。
-                    self.publish(ev)
                 elif et in ("done", "cancelled", "error"):
                     round_failed = et in ("cancelled", "error")
-                    self._end_turn(et)
                     break
         except NeuroError as e:
             logger.error("neuro 轮次失败: %s", e)
-            self._end_turn("error")
             round_failed = True
 
         if last_id is not None:

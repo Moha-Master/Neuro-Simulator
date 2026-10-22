@@ -1,12 +1,10 @@
-/* Neuro-Sama 直播画面样式。
+/* Neuro-Sama 直播合成器样式。
    舞台（16:9 letterbox + 容器查询单位）与旧 client 规格一致；
-   舞台里的每一层都是元素引擎按 scenes.json 建的 `.ns-el`，
+   场景层（背景/游戏/chat/highlight）由元素引擎按 scenes.json 建的 `.ns-el`，
    **位置/大小/层级来自场景数据（inline style）**，这里只写各层内部的样子。
-   组件样式按 [data-component="…"] 挂（组件名由代码拥有，元素 id 属于场景数据）。
-   元素根带 container-type: inline-size，所以层内的 cqi = 该元素自身宽度的 1%。 */
+   neuro 窗口是单独的 iframe（core/neuro.ts），#no-source 是掉线覆盖层。 */
 
 :root {
-  --neuro-shadow-color: #32003c;
   /* 优先消息弹窗配色（旧 client 规格：bits=紫 / points=粉） */
   --sc-pink-bg-color: #f68795;
   --sc-purple-bg-color: #b97ad5;
@@ -80,7 +78,9 @@ body {
 }
 /* 字号写在子节点上：元素自身就是查询容器，写在它自己身上只会解析到舞台宽度 */
 .chat-lines {
-  font-size: 6cqi;
+  /* 场景可通过元素 css 覆盖字号比例：媒体场景的聊天层更宽更矮，
+     等比缩字后仍保持与 25% 宽聊天层相近的绝对字号 */
+  font-size: calc(6cqi * var(--chat-font-scale, 1));
   font-weight: 800;
   -webkit-text-stroke: 0.11em #000;
   /* stroke 居中绘制；不先把 fill 画在上层时细字形的白色会被描边吃光 */
@@ -110,27 +110,15 @@ body {
   color: #fff;
 }
 
-/* ===== 字幕（TTS 时长驱动的伪流式逐词显示） ===== */
-.ns-el[data-component="caption"] {
-  padding: 10px 20px;
-  border-radius: 10px;
-  text-align: center;
-  color: white;
-  opacity: 0;
-  transition: opacity 0.3s ease;
-  text-shadow:
-    0 0 4px var(--neuro-shadow-color),
-    0 0 4px var(--neuro-shadow-color),
-    0 0 4px var(--neuro-shadow-color);
-  font-family: "First Coffee", "Noto Sans SC", cursive, sans-serif;
-  font-weight: normal;
-  /* 元素自身的 cqi 解析到祖先容器（舞台），所以这里保持旧值 3cqi 不变；
-     字幕层在每个场景都是 90% 宽，不需要随元素缩放 */
-  font-size: 3cqi;
-  line-height: 1.25;
-}
-.ns-el[data-component="caption"].show {
-  opacity: 1;
+/* ===== no source：neuro 中途掉线时整屏覆盖（chat/highlight 在它上面） ===== */
+#no-source {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  z-index: 18;
+  pointer-events: none;
 }
 
 /* ===== 优先消息弹窗（Super Chat 风格） =====
@@ -368,25 +356,27 @@ body {
   overflow: hidden;
 }
 
+/* 元素 = 16:9 媒体矩形（黑底）；内部排版对齐 references/room_v1_bg_game_lichess：
+   棋盘在左侧 53.1%×93.7%，状态/时钟文字放右上角（对应原布局的右侧栏）。 */
 .chess {
+  position: relative;
   width: 100%;
   height: 100%;
 }
 
 .chess-panel {
-  width: 100%;
-  height: 100%;
-  display: flex;
-  flex-direction: column;
-  gap: 1.2cqi;
+  position: absolute;
+  inset: 0;
   color: #fff;
   font-family: "Inter", system-ui, sans-serif;
 }
 
 .chess-board-area {
-  flex: 1 1 auto;
-  min-width: 0;
-  min-height: 0;
+  position: absolute;
+  left: 9.98%;
+  top: 1.92%;
+  width: 53.13%;
+  height: 93.7%;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -399,15 +389,29 @@ body {
   background: #161512;
 }
 
+/* chessground 的 base.css 只给棋盘留了透明底（方格由上层的 board 主题绘制），
+   不补这一层的话画面只有悬浮的棋子、黑棋在深色底上直接隐形。
+   conic-gradient 四等分 = 2×2 方格，平铺 25%×25% 得到标准 8×8 棋盘。 */
+.chess-ground cg-board {
+  background-color: #f0d9b5;
+  background-image: conic-gradient(
+    #b58863 0 25%,
+    #f0d9b5 0 50%,
+    #b58863 0 75%,
+    #f0d9b5 0
+  );
+  background-size: 25% 25%;
+}
+
 .chess-status {
-  flex: 0 0 auto;
-  height: 3.2cqi;
-  line-height: 3.2cqi;
-  font-size: 2.2cqi;
+  position: absolute;
+  top: 3.2%;
+  right: 3.2%;
+  max-width: 38%;
+  text-align: right;
+  font-size: 1.9cqi;
+  line-height: 1.35;
   font-weight: 600;
-  text-align: center;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  text-shadow: 0 0 4px rgba(0, 0, 0, 0.75);
+  overflow-wrap: anywhere;
+  text-shadow: 0 0 6px rgba(0, 0, 0, 0.85);
 }

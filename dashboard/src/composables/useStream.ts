@@ -84,6 +84,8 @@ export function useStream() {
     }
   }
 
+  /** 手动切场景：dashboard 暂不提供按钮（避免与循环/游戏的自动切换打架），
+   *  端点仍然可用，需要时把按钮加回 Control 页即可。 */
   async function setScene(id: string) {
     error.value = ''
     try {

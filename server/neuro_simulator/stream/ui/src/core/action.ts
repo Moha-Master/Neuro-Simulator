@@ -9,7 +9,7 @@ export type ActionParams = Record<string, unknown>;
 export type ActionFn = (el: HTMLElement, params?: ActionParams) => Promise<void>;
 
 const AVATAR_RISE_FROM = "-207%"; // 旧 client 标定：只露头顶（起始位）
-const AVATAR_RISE_MS = 3000; // 与 stream/media.py 的 RISE_ANIM_S / scenes.json 的 intro 时间线一致
+const AVATAR_RISE_MS = 3000; // 与 neuro 场景数据里 avatar.rise_in 的时长一致（合成器自身当前没有用到立绘动作）
 
 function commit(el: HTMLElement, prop: string, value: string): void {
   el.style.setProperty(prop, value);

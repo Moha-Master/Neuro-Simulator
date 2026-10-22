@@ -167,31 +167,31 @@
         </v-card-actions>
       </v-card>
 
-      <!-- 场景切换（清单来自画面侧 scenes.json，前端加场景这里自动多一个按钮） -->
+      <!-- 场景：只读显示。切换由直播循环自动驱动（开播 → room、开局 → 游戏场景、
+           下播 → no-source 待机）；手动切会让画面与循环/游戏状态互相打架，
+           所以 dashboard 不再提供按钮（API 仍然可用）。 -->
       <v-card class="mb-6">
         <v-card-title class="text-subtitle-1">场景（直播画面）</v-card-title>
-        <v-card-actions class="flex-wrap gap-2 pa-4">
-          <v-btn
-            v-for="sc in st.scenes.value"
-            :key="sc.id"
-            size="small"
-            :variant="sc.id === currentScene ? 'flat' : 'outlined'"
-            :color="sc.id === currentScene ? 'primary' : undefined"
-            :prepend-icon="sc.icon"
-            :title="sc.elements.map((e) => `${e.name}(${e.id})`).join(' · ')"
-            @click="st.setScene(sc.id)"
-          >
-            {{ sc.label }}
-          </v-btn>
-          <div v-if="!st.scenes.value.length" class="text-caption text-disabled" style="width: 100%">
-            没有读到场景清单：请确认 stream/ui 已构建（scenes.json 在构建产物里）。
+        <v-card-text>
+          <div class="d-flex align-center flex-wrap ga-2">
+            <v-chip size="small" color="primary" variant="tonal" :prepend-icon="currentSceneIcon">
+              {{ currentSceneLabel }}
+            </v-chip>
+            <v-chip
+              v-if="st.status.value?.game"
+              size="small"
+              variant="tonal"
+              prepend-icon="mdi-gamepad-variant"
+            >
+              游戏：{{ st.status.value.game }}
+            </v-chip>
           </div>
-          <div class="text-caption text-disabled" style="width: 100%">
-            手动广播 scene_set 到 /ui 画面；开播 intro 是内部脚本场景（不出现在按钮里），
-            由「开始直播」自动触发并按固定时长进入 room。
-            <span v-if="st.status.value?.game">当前游戏：{{ st.status.value.game }}</span>
+          <div class="text-caption text-disabled mt-3">
+            场景由直播循环自动切换：开播进 room（开场由 neuro 窗口播放），
+            开局切到对应游戏场景，下播回到 no-source 待机。神经窗口自身的场景
+            （常态 / 开场）在 <b>Neuro Sama → View</b> 的侧栏切换。
           </div>
-        </v-card-actions>
+        </v-card-text>
       </v-card>
 
       <!-- 场次史 -->
@@ -268,6 +268,14 @@ const conv = computed(() => st.status.value?.session?.conversation_id ?? '')
 const rounds = computed(() => st.status.value?.persisted?.rounds ?? 0)
 const live = computed(() => Boolean(st.status.value?.metadata?.live))
 const currentScene = computed(() => st.status.value?.scene ?? '')
+const currentSceneInfo = computed(
+  () => st.scenes.value.find((s) => s.id === currentScene.value) ?? null,
+)
+const currentSceneLabel = computed(() => {
+  if (currentSceneInfo.value) return currentSceneInfo.value.label
+  return currentScene.value ? currentScene.value : '待机（no source）'
+})
+const currentSceneIcon = computed(() => currentSceneInfo.value?.icon ?? 'mdi-television-pause')
 
 // 本场信息编辑区：以服务端值为基线；用户有未保存改动时不被轮询覆盖，
 // 但场次切换（开播/下播）会重新对齐（新场次的标题来自上一场或 config 默认值）。

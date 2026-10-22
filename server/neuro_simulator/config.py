@@ -221,7 +221,7 @@ def validate_config(data: Dict[str, Any]) -> None:
         raise ValueError("neuro_sama 配置必须是对象")
     _check_ref(data, "neuro_sama", "model", REF_LLM)
     _check_ref(data, "neuro_sama", "tts", REF_TTS)
-    for f in ("max_steps", "max_context_messages", "memory_char_limit"):
+    for f in ("max_steps", "max_context_messages", "memory_char_limit", "caption_hide_ms", "caption_step_gap_ms"):
         if f in ns:
             _as_int(ns, f, 0)
     if "tool_timeout" in ns:
@@ -342,6 +342,8 @@ class Config:
         self.MAX_CONTEXT_MESSAGES: int = _as_int(ns, "max_context_messages", 60)
         self.TOOL_TIMEOUT: float = _as_float(ns, "tool_timeout", 60.0)
         self.MEMORY_CHAR_LIMIT: int = _as_int(ns, "memory_char_limit", 4000)
+        self.CAPTION_HIDE_MS: int = _as_int(ns, "caption_hide_ms", 1000)
+        self.CAPTION_STEP_GAP_MS: int = _as_int(ns, "caption_step_gap_ms", 1000)
         self.MCP_SERVERS: list = ns.get("mcp_servers", []) or []
         self.NEURO_MODEL_REF: str = str(ns.get("model") or "")
         self.NEURO_TTS_REF: str = str(ns.get("tts") or "")

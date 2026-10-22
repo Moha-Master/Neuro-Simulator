@@ -10,6 +10,8 @@
     "max_context_messages": 60,
     "tool_timeout": 60.0,
     "memory_char_limit": 4000,
+    "caption_hide_ms": 1000,
+    "caption_step_gap_ms": 1000,
     "mcp_servers": [],
     "host": "127.0.0.1",
     "port": 8000,

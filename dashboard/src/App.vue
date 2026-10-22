@@ -19,7 +19,7 @@
           <template #activator="{ props }">
             <v-list-item
               v-bind="props"
-              :active="$route.path.startsWith('/neuro-sama')"
+              :active="$route.path.startsWith('/neuro-sama') || $route.path.startsWith('/neuro-view')"
             >
               <template #prepend>
                 <v-icon>mdi-brain</v-icon>
@@ -38,6 +38,12 @@
               <v-icon>mdi-account-details</v-icon>
             </template>
             <v-list-item-title>Persona</v-list-item-title>
+          </v-list-item>
+          <v-list-item to="/neuro-view" :active="$route.path === '/neuro-view'">
+            <template #prepend>
+              <v-icon>mdi-television-play</v-icon>
+            </template>
+            <v-list-item-title>View</v-list-item-title>
           </v-list-item>
         </v-list-group>
         <v-list-group v-model="streamOpen" value="stream">
@@ -123,11 +129,13 @@ onMounted(() => {
 })
 
 // Neuro Sama 侧边栏分组：进入其路由时自动展开（仍可手动收起）
-const neuroOpen = ref(route.path.startsWith('/neuro-sama'))
+const neuroOpen = ref(
+  route.path.startsWith('/neuro-sama') || route.path.startsWith('/neuro-view'),
+)
 watch(
   () => route.path,
   (p) => {
-    if (p.startsWith('/neuro-sama')) neuroOpen.value = true
+    if (p.startsWith('/neuro-sama') || p.startsWith('/neuro-view')) neuroOpen.value = true
   },
 )
 

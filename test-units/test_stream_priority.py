@@ -2,7 +2,6 @@
 
 import asyncio
 import tempfile
-import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -15,7 +14,7 @@ from neuro_simulator.stream.storage import Storage
 
 
 class _FakeNeuroClient:
-    """只回放固定事件序列，用于验证 stream 对 tool_start 的转发/过滤。"""
+    """固定事件序列：用于验证 stream 不再镜像 tool/speech 事件。"""
 
     def __init__(self, url: str) -> None:
         self.url = url
@@ -61,7 +60,7 @@ class _FakeSlowNeuroClient:
 
 
 class _FakeTwoStepNeuroClient:
-    """第一步的语音还没播完，第二步就立即产出：验证 step 间也留 cooldown。"""
+    """两步 speech 快速产出：验证 stream 的预测时间线仍然顺序累加。"""
 
     def __init__(self, url: str) -> None:
         self.url = url
@@ -198,7 +197,7 @@ class TestPriorityQueue(unittest.IsolatedAsyncioTestCase):
         names = [t["name"] for t in self.templates.list()]
         self.assertEqual(names, ["neuro_user", "chatbot_user"])
 
-    async def test_mirrors_all_tool_events_without_filtering(self):
+    async def test_does_not_mirror_tool_or_speech_events(self):
         await self.storage.append_message(self.queue_row, "viewer", "do a trick")
         self.settings.scene_context = "ctx"
         self.settings.neuro_url = "http://fake"
@@ -210,29 +209,23 @@ class TestPriorityQueue(unittest.IsolatedAsyncioTestCase):
         events = []
         while not q.empty():
             events.append(q.get_nowait())
-        # stream 不再解释工具语义：所有 tool_start/tool_result 原样镜像，
-        # 由画面端按 name 自行决定是否消费（当前只处理 model_*）。
-        tool_starts = [e for e in events if e["type"] == "tool_start"]
-        self.assertEqual([e["name"] for e in tool_starts], ["model_spin", "memory_add"])
-        self.assertTrue(
-            any(
-                e["type"] == "tool_result" and e["name"] == "model_spin"
-                for e in events
-            )
-        )
-        # 不再产生专用 tool_call 事件
-        self.assertFalse(any(e["type"] == "tool_call" for e in events))
+        # 字幕/音频/工具动作由 neuro iframe 自己订阅 /ui/events，stream 不再镜像。
+        self.assertFalse(any(e["type"] in ("tool_start", "tool_result") for e in events))
+        self.assertFalse(any(e["type"] == "speech" for e in events))
+        self.assertFalse(any(e["type"] in ("turn_begin", "turn_end") for e in events))
+        # 但预测播放时间线仍然推进（供轮次节奏 / game 工具闸门使用）
+        self.assertGreater(self.loop._turn_play_head, 0.0)
 
-    async def test_step_change_waits_for_prev_speech_and_cooldown(self):
-        """同一轮内跨 step：第二步 speech 要等第一步播完 + cooldown 才转发。"""
+    async def test_step_speech_updates_timeline_without_forwarding(self):
+        """两个 step 的 speech 顺序累加进 _turn_play_head；不再延迟转发。"""
         await self.storage.append_message(self.queue_row, "viewer", "do a trick")
         self.settings.speech_cooldown_ms = 80
-        events: list[tuple[float, dict]] = []
+        events: list[dict] = []
         sleeps: list[float] = []
         original_publish = self.loop.publish
 
         def capture(ev: dict) -> None:
-            events.append((time.monotonic(), ev))
+            events.append(ev)
             original_publish(ev)
 
         async def record_sleep(ms: float) -> None:
@@ -244,16 +237,10 @@ class TestPriorityQueue(unittest.IsolatedAsyncioTestCase):
                 with patch.object(self.loop, "_sleep_ms", new=record_sleep):
                     await self.loop._run_round(self.settings, self.session)
 
-        speech = [(t, e) for t, e in events if e["type"] == "speech"]
-        self.assertEqual([e["step"] for _, e in speech], [1, 2])
-        gap = speech[1][0] - speech[0][0]
-        # 第一步 duration 0.1s + cooldown 0.08s；允许调度误差
-        self.assertGreaterEqual(gap, 0.15)
+        self.assertFalse(any(e["type"] == "speech" for e in events))
+        # 0.1 + 0.02 两句；轮间等待至少覆盖最后一句播完 + cooldown
         self.assertTrue(any(ms > 50 for ms in sleeps))
-        self.assertEqual(
-            [e["step"] for _, e in speech],
-            [s.get("step") for s in self.loop._turn_speech],
-        )
+        self.assertGreater(self.loop._turn_play_head, 0.0)
 
     async def test_pacing_uses_last_speech_end_not_generation_end(self):
         """语音在 done 之前早已播完时，等待量应为 0（旧实现会再等整整一句时长）。"""
@@ -273,8 +260,8 @@ class TestPriorityQueue(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(sleeps), 1)
         self.assertLess(sleeps[0], 1.0)
 
-    async def test_turn_id_is_stable_within_round(self):
-        """speech / turn_begin / turn_end 共用 turn_id；下一轮递增（画面跨轮去重依据）。"""
+    async def test_no_turn_or_speech_events_are_emitted(self):
+        """speech/turn 事件已移出 stream：neuro 窗口直接从 neuro /ui/events 消费。"""
         await self.storage.append_message(self.queue_row, "viewer", "do a trick")
         q = self.bus.subscribe()
         with patch("neuro_simulator.stream.loop.NeuroClient", _FakeNeuroClient):
@@ -283,15 +270,8 @@ class TestPriorityQueue(unittest.IsolatedAsyncioTestCase):
         events = []
         while not q.empty():
             events.append(q.get_nowait())
-        begin = next(e for e in events if e["type"] == "turn_begin")
-        end = next(e for e in events if e["type"] == "turn_end")
-        speech = next(e for e in events if e["type"] == "speech")
-        self.assertEqual(begin["turn_id"], end["turn_id"])
-        self.assertEqual(begin["turn_id"], speech["turn_id"])
-        self.assertEqual(speech["step"], 1)
-        snap = self.loop.turn_snapshot()
-        self.assertEqual(snap["id"], begin["turn_id"])
-        self.assertEqual(snap["speech"][0]["step"], 1)
+        self.assertFalse(any(e["type"] in ("turn_begin", "turn_end", "speech") for e in events))
+        self.assertGreater(self.loop._turn_play_head, 0.0)
 
 
 if __name__ == "__main__":

@@ -69,7 +69,8 @@ class StreamSettings:
     channel: str
     scene_context: str
     messages_per_round: int
-    speech_cooldown_ms: int  # 语音播完后字幕停留 / 下一轮请求等待
+    speech_cooldown_ms: int  # 上一轮说完后到发下一条 user message 的等待
+    caption_step_gap_ms: int  # neuro 窗口同轮工具 step 间的字幕停顿（计入预测时间线）
     game_tool_wait_speech: bool  # game 工具执行前等当前语音播完
     empty_queue_behavior: str  # "placeholder" | "silent"
     placeholder_message: str
@@ -134,6 +135,12 @@ def load() -> StreamSettings:
     raw_cooldown = ns.get("speech_cooldown_ms")
     speech_cooldown_ms = int(raw_cooldown if raw_cooldown is not None else 1000)
     speech_cooldown_ms = max(0, min(speech_cooldown_ms, 60_000))
+    # neuro 窗口的字幕 step 停顿也要计入 stream 的预测时间线，否则下一轮/
+    # chatbot 的等待会比 neuro 实际播放早一个 gap。
+    neuro_ns = cfg.module("neuro_sama")
+    raw_gap = neuro_ns.get("caption_step_gap_ms")
+    caption_step_gap_ms = int(raw_gap if raw_gap is not None else 1000)
+    caption_step_gap_ms = max(0, min(caption_step_gap_ms, 60_000))
     raw_game_wait = ns.get("game_tool_wait_speech", True)
     game_tool_wait_speech = raw_game_wait if isinstance(raw_game_wait, bool) else True
 
@@ -166,6 +173,7 @@ def load() -> StreamSettings:
         scene_context=str(ns.get("scene_context") or "You are streaming on Twitch now."),
         messages_per_round=int(ns.get("messages_per_round") or 10),
         speech_cooldown_ms=speech_cooldown_ms,
+        caption_step_gap_ms=caption_step_gap_ms,
         game_tool_wait_speech=game_tool_wait_speech,
         empty_queue_behavior=behavior,
         placeholder_message=str(ns.get("placeholder_message") or "No new messages. Say something to your viewers!"),

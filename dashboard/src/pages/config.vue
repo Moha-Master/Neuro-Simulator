@@ -129,6 +129,8 @@
                         <v-col cols="6" sm="3"><v-text-field v-model.number="cfg.neuro_sama.max_context_messages" label="Max context messages" type="number" variant="outlined" density="compact" /></v-col>
                         <v-col cols="6" sm="3"><v-text-field v-model.number="cfg.neuro_sama.tool_timeout" label="Tool timeout (s)" type="number" step="any" variant="outlined" density="compact" /></v-col>
                         <v-col cols="6" sm="3"><v-text-field v-model.number="cfg.neuro_sama.memory_char_limit" label="Memory char limit" type="number" variant="outlined" density="compact" /></v-col>
+                        <v-col cols="6" sm="3"><v-text-field v-model.number="cfg.neuro_sama.caption_hide_ms" label="Caption hide (ms)" type="number" variant="outlined" density="compact" /></v-col>
+                        <v-col cols="6" sm="3"><v-text-field v-model.number="cfg.neuro_sama.caption_step_gap_ms" label="Caption step gap (ms)" type="number" variant="outlined" density="compact" /></v-col>
                         <v-col cols="12" sm="4"><v-text-field v-model="cfg.neuro_sama.host" label="Host（改后需重启）" variant="outlined" density="compact" /></v-col>
                         <v-col cols="6" sm="4"><v-text-field v-model.number="cfg.neuro_sama.port" label="Port（改后需重启）" type="number" variant="outlined" density="compact" /></v-col>
                         <v-col cols="6" sm="4"><v-text-field v-model="cfg.neuro_sama.external_url" label="External URL（可选）" variant="outlined" density="compact" /></v-col>
@@ -530,6 +532,8 @@ const normalize = (doc: Record<string, any>) => {
   n.max_context_messages = n.max_context_messages ?? 60
   n.tool_timeout = n.tool_timeout ?? 60
   n.memory_char_limit = n.memory_char_limit ?? 4000
+  n.caption_hide_ms = n.caption_hide_ms ?? 1000
+  n.caption_step_gap_ms = n.caption_step_gap_ms ?? 1000
   n.mcp_servers = n.mcp_servers || []
   n.host = n.host ?? '127.0.0.1'
   n.port = n.port ?? 8000

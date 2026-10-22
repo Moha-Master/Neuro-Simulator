@@ -1,13 +1,13 @@
 """场景清单的服务端视角：读 ui 构建产物里的 `scenes.json`。
 
-场景（元素清单 + 固定时长脚本）由画面侧拥有（`stream/ui/public/scenes.json` →
-构建到 `dist/scenes.json`），服务端做四件事：
+场景（背景/游戏/chat/highlight + neuro 窗口配置）由画面侧拥有
+（`stream/ui/public/scenes.json` → 构建到 `dist/scenes.json`），服务端做三件事：
 1. 校验手动切场景的 id 是否存在且不是 `hidden` 内部场景（`POST /scene`）；
 2. 把清单（id/label/icon + 元素概览）交给 dashboard 渲染场景按钮，**加场景只改一处**；
 3. 提供场景的 `prompt_context`，让 `{{scene_context}}` 随场景变（玩 Wordle 时她知道自己
-   在猜词，但棋盘细节仍只从工具返回里看）；
-4. 读取场景脚本的固定时长（如 intro），让直播循环按后端时钟推进，不等任何前端。
+   在猜词，但棋盘细节仍只从工具返回里看）。
 
+开播 intro 已移到 neuro 窗口（`POST /ui/intro`），服务端不再读取 stream 场景时长。
 文件按 mtime 缓存，重新构建前端后无需重启进程。
 """
 
@@ -64,21 +64,6 @@ def hidden(scene_id: str) -> bool:
     """是否为内部场景：只能程序化 on_scene，不允许 dashboard/API 手动选择。"""
     scene = find(scene_id)
     return bool(scene and scene.get("hidden") is True)
-
-
-def duration(scene_id: Optional[str]) -> Optional[float]:
-    """场景脚本的固定时长（秒）。没有脚本/时长非法时返回 None。"""
-    scene = find(scene_id)
-    if not scene:
-        return None
-    timeline = scene.get("timeline")
-    if not isinstance(timeline, dict):
-        return None
-    try:
-        value = float(timeline.get("duration"))
-    except (TypeError, ValueError):
-        return None
-    return value if value > 0 else None
 
 
 def prompt_context(scene_id: Optional[str]) -> str:

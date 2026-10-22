@@ -12,7 +12,6 @@
 
 import { ChatOverlay, HighlightOverlay } from "./chat";
 import { ChessBoardView } from "./chess";
-import { CaptionPlayer } from "./speech";
 import { WordleGameView } from "./wordle";
 import type { Box } from "../scenes/schema";
 
@@ -32,7 +31,6 @@ export type ComponentFactory = (el: HTMLElement, props: Record<string, unknown>,
 
 export const COMPONENTS: Record<string, ComponentFactory> = {
   "chat.overlay": (el) => new ChatOverlay(el),
-  "caption": (el, _props, stage) => new CaptionPlayer(el, stage),
   "highlight": (el) => new HighlightOverlay(el),
   "wordle.game": (el) => new WordleGameView(el),
   "chess.board": (el) => new ChessBoardView(el),

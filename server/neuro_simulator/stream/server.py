@@ -643,13 +643,6 @@ def create_app() -> FastAPI:
                 elements = lp.games.element_states()
                 if elements:
                     snapshot["elements"] = elements
-                # 中途连接的续播依据：intro 已过时长 / 当前轮 speech 时间线
-                ie = lp.intro_elapsed()
-                if ie is not None:
-                    snapshot["intro_elapsed"] = round(ie, 2)
-                turn = lp.turn_snapshot()
-                if turn["speech"]:
-                    snapshot["turn"] = turn
                 # 聊天层恢复：最近 N 条（含优先消息，带 type/value 供样式区分）
                 if lp.session:
                     storage: Storage = app.state.storage

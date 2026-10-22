@@ -37,6 +37,7 @@ def _settings(**chatbot_overrides) -> StreamSettings:
         scene_context="ctx",
         messages_per_round=10,
         speech_cooldown_ms=0,
+        caption_step_gap_ms=0,
         game_tool_wait_speech=True,
         empty_queue_behavior="placeholder",
         placeholder_message="idle",

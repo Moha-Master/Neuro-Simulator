@@ -3,8 +3,10 @@
  *
  * 逐词推进：token 按字符长度比例分摊 duration（CJK 逐字、拉丁逐词）；
  * 有音频时以音频 ended 为句尾锚点（防止音字漂移），无音频（虚拟 TTS）纯计时。
- * 行为对齐旧 neuroCaption：文本跨句累积、播完后按 speech_cooldown_ms 淡出清空、
- * 超高自动缩字号；跨轮先清空，避免新旧字幕拼接。
+ * 行为对齐旧 neuroCaption：文本跨句累积、播完后按 neuro 配置的 caption_hide_ms
+ * 淡出清空、超高自动缩字号；跨轮先清空，避免新旧字幕拼接。
+ * 同一轮的工具链 step 之间插一个 caption_step_gap_ms 的停顿（旧实现由 stream
+ * 延迟转发 speech 事件完成，现在画面端自己掌握节奏）。
  */
 
 export interface SpeechSeg {
@@ -78,8 +80,10 @@ export class CaptionPlayer {
   private turnId = 0; // 当前轮次（服务端 turn_id）
   private textTurnId = 0; // 当前字幕文本所属轮次：跨轮先清空，避免新旧拼接
   private textStep = 0; // 当前字幕文本所属 LLM step：同一轮工具链跨 step 清空
-  /** speak 完成后字幕停留时长（stream.speech_cooldown_ms，snapshot/settings 下发）。 */
+  /** speak 完成后字幕停留时长（neuro_sama.caption_hide_ms，snapshot/settings 下发）。 */
   hideDelayMs = DEFAULT_HIDE_DELAY_MS;
+  /** 同一轮内工具链 step 之间的停顿（neuro_sama.caption_step_gap_ms）。 */
+  stepGapMs = DEFAULT_HIDE_DELAY_MS;
   private turnEnded = false; // 已收到 turn_end（生成侧结束）
   private idleFired = false; // 本轮 idle 回调已触发
   muted = false;
@@ -236,6 +240,12 @@ export class CaptionPlayer {
     this.hideDelayMs = Math.max(0, ms);
   }
 
+  /** 更新同一轮内工具链 step 之间的停顿。 */
+  setStepGap(ms: number): void {
+    if (!Number.isFinite(ms)) return;
+    this.stepGapMs = Math.max(0, ms);
+  }
+
   private async drain(): Promise<void> {
     this.busy = true;
     const gen = this.gen;
@@ -259,11 +269,17 @@ export class CaptionPlayer {
   private async playSeg(seg: SpeechSeg, gen: number): Promise<void> {
     const segTurn = seg.turn_id ?? this.turnId;
     const segStep = seg.step ?? 0;
-    if (segTurn !== this.textTurnId || segStep !== this.textStep) {
+    const stepChanged = segTurn === this.textTurnId && segStep !== this.textStep;
+    if (segTurn !== this.textTurnId || stepChanged) {
       // 跨轮/跨 step 边界：旧字幕可能还没淡出，新消息第一句开始前先清空，避免拼接
       this.clearText();
       this.textTurnId = segTurn;
       this.textStep = segStep;
+    }
+    if (stepChanged && this.stepGapMs > 0) {
+      // 同一轮内上一步的语音播完后停一下，再开始下一步的字幕/音频
+      await sleep(this.stepGapMs);
+      if (gen !== this.gen) return;
     }
     // 旧轮残留队列可能还在播：不能让它覆盖新一轮的去重水位线
     if (segTurn === this.turnId) this.lastIndex = seg.index;

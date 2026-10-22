@@ -80,7 +80,28 @@ class NeuroClient:
             return False
 
     async def health(self) -> dict:
-        async with httpx.AsyncClient(timeout=5) as client:
-            r = await client.get(f"{self.base_url}/health")
-            r.raise_for_status()
-            return r.json()
+        """探测 neuro 是否可达（开播前守卫）。失败抛 NeuroError。"""
+        try:
+            async with httpx.AsyncClient(timeout=5) as client:
+                r = await client.get(f"{self.base_url}/health")
+                r.raise_for_status()
+                return r.json()
+        except httpx.HTTPError as e:
+            raise NeuroError(f"neuro 健康检查失败: {type(e).__name__}: {e}") from e
+
+    async def intro(self) -> float:
+        """触发 neuro 窗口播放开场场景，返回总时长（秒）。失败抛 NeuroError。
+
+        neuro 不可达时开播被禁止（由 StreamLoop.start 统一转成 409）；
+        neuro 自己负责视频时长解析、场景广播（scene_set）与放完自动回常态。
+        """
+        try:
+            async with httpx.AsyncClient(timeout=10) as client:
+                r = await client.post(f"{self.base_url}/ui/intro")
+                if r.status_code != 200:
+                    body = (await r.aread()).decode("utf-8", errors="replace")
+                    raise NeuroError(f"neuro /ui/intro HTTP {r.status_code}: {body[:300]}")
+                data = r.json()
+                return max(0.0, float(data.get("duration") or 0.0))
+        except (httpx.HTTPError, ValueError) as e:
+            raise NeuroError(f"neuro 开场启动失败: {type(e).__name__}: {e}") from e
