@@ -25,15 +25,13 @@ from contextlib import asynccontextmanager
 from typing import Any
 
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import JSONResponse, StreamingResponse
-from fastapi.staticfiles import StaticFiles
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from ..broadcaster import EventBroadcaster
 from ..config import get_config, module_url
 from ..persona import PersonaError
 from ..templates import TemplateError
-from . import media
 from . import scenes as scene_catalog
 from . import settings as stream_settings
 from .games import GameError
@@ -193,7 +191,7 @@ def create_app() -> FastAPI:
                 f"[stream] 清理遗留场次（进程重启所致）: {stale['session_id']}",
                 flush=True,
             )
-        print(f"[stream] ready: ui_dist={media.ui_dist_dir()}", flush=True)
+        print("[stream] ready", flush=True)
         yield
         await loop.shutdown()
         await storage.close()
@@ -620,6 +618,15 @@ def create_app() -> FastAPI:
 
     # ---------- /ui 画面事件通道 ----------
 
+    @app.get("/ui/manifest")
+    async def ui_manifest():
+        """完整场景清单（画面渲染器用：元素/box/css/script/neuro 块都在里面）。
+
+        数据归后端：这份 json 曾放在前端 public/ 里，服务端读它要依赖前端构建产物。
+        现在由模块自己提供，`GET /stream/scenes` 则是给 dashboard 的概览视图。
+        """
+        return scene_catalog.manifest()
+
     @app.get("/ui/events")
     async def ui_events():
         """画面只读事件流：连接即推 snapshot（state/scene/session），随后实时广播。"""
@@ -676,21 +683,6 @@ def create_app() -> FastAPI:
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
-
-    # ---------- 静态托管（放在最后，避免遮挡 API 路由） ----------
-
-    ui_dist = media.ui_dist_dir()
-    if ui_dist is not None:
-        app.mount("/ui", StaticFiles(directory=ui_dist, html=True), name="ui")
-    else:
-
-        @app.get("/ui", include_in_schema=False)
-        @app.get("/ui/", include_in_schema=False)
-        async def _no_ui():
-            return JSONResponse(
-                status_code=404,
-                content={"detail": "ui dist 未找到：请在 server/neuro_simulator/stream/ui/ 下运行 npm run build"},
-            )
 
     return app
 

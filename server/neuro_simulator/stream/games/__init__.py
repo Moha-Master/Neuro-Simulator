@@ -9,7 +9,7 @@
   动画（翻牌、逐字）是渲染细节，由组件对比前后状态自己推导。
 
 新增一个游戏 = 写一个 Game 子类（自带 register）+ 画面侧加一个元素组件
-+ 场景数据里给它一层元素（见 ui/public/scenes.json）。
++ 场景数据里给它一层元素（见 stream/defaults/scenes.json）。
 """
 
 from .base import GAMES, Game, GameError, GameHub, register

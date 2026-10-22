@@ -405,7 +405,7 @@ class TestSceneCatalogContract(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        path = Path("server/neuro_simulator/stream/ui/public/scenes.json")
+        path = Path("server/neuro_simulator/stream/defaults/scenes.json")
         if not path.is_file():  # 兼容从别处跑测试
             path = (
                 Path(scene_catalog.__file__).parent

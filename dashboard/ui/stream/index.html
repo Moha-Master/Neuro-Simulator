@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="dark" />
+    <title>Neuro-Sama 合成器</title>
+  </head>
+  <body>
+    <!-- 直播合成器舞台：16:9 letterbox。
+         场景层（背景/游戏/chat/highlight）由元素引擎按场景数据挂载；
+         neuro 窗口是单独的一层 iframe（整窗 translate+scale）。
+         #no-source 在 neuro 中途掉线时整屏覆盖（chat/highlight 仍在它上面）。
+
+         data-module-base：stream 模块 API 的基址（经 vedal 代理的同源路径）；
+         data-neuro-module-base：neuro 模块 API 的基址（健康检查用）。 -->
+    <div
+      id="stage"
+      data-module-base="/manage/stream/"
+      data-neuro-module-base="/manage/neuro_sama/"
+    >
+      <img id="no-source" class="hidden" src="/no_source.webp" alt="" />
+    </div>
+
+    <script type="module" src="/src/ui/stream/entry.ts"></script>
+  </body>
+</html>

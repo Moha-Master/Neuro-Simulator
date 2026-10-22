@@ -93,7 +93,8 @@ const {
 } = useStreamChat()
 const { username: chatUsername } = useChatIdentity()
 
-const uiUrl = '/manage/stream/ui/'
+// 合成器是 dashboard 构建里的独立页面（与 neuro 窗口同一个构建）
+const uiUrl = '/ui/stream/'
 
 const isDark = computed(() => theme.global.current.value.dark)
 

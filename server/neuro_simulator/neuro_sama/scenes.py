@@ -1,8 +1,12 @@
 """neuro 窗口场景清单的服务端视角（机制在 `..scene_kit`，这里只写 neuro 的策略）。
 
-一份数据（`ui/public/neuro_scenes.json`）、两个执行者：`timeline` 由渲染器的元素
-引擎执行（只动 DOM），`state_script` 由 `ui_scene.SceneRunner` 执行（只改权威状态）。
-两边的边界校验、`at_end` 解析、manifest 缓存都来自 scene_kit。
+一份数据（`neuro_sama/defaults/neuro_scenes.json`，包内数据文件）、两个执行者：
+`timeline` 由渲染器的元素引擎执行（只动 DOM），`state_script` 由 `ui_scene.SceneRunner`
+执行（只改权威状态）。两边的边界校验、`at_end` 解析、manifest 缓存都来自 scene_kit。
+
+**数据归后端、前端只是渲染器**：这份 json 曾放在前端 `public/` 里、靠构建拷进 dist，
+服务端为了读它不得不依赖前端构建产物——那是反向耦合。现在完整清单通过
+`GET /ui/manifest` 下发给窗口页面。
 
 neuro 特有的策略：
 
@@ -27,10 +31,7 @@ FALLBACK_VIDEO_S = ui_media.FALLBACK_VIDEO_S
 
 
 def _scenes_path() -> Optional[Path]:
-    dist = ui_media.ui_dist_dir()
-    if dist is None:
-        return None
-    p = dist / "neuro_scenes.json"
+    p = Path(__file__).parent / "defaults" / "neuro_scenes.json"
     return p if p.is_file() else None
 
 

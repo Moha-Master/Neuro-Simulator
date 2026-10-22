@@ -37,7 +37,7 @@
           <iframe
             ref="frame"
             class="neuro-view__frame"
-            src="/manage/neuro_sama/ui/"
+            src="/ui/neuro/"
             title="Neuro window"
             allow="autoplay; fullscreen"
             @load="sendVisibility"
@@ -50,7 +50,7 @@
             <v-card-title class="text-body-2 font-weight-medium">场景</v-card-title>
             <v-card-text class="pt-0">
               <div v-if="!scenes.length" class="text-caption text-grey-darken-1">
-                没读到场景清单：确认 neuro/ui 已构建（neuro_scenes.json 在产物里）。
+                没读到场景清单：确认 neuro 模块在运行（场景数据由 neuro 提供）。
               </div>
               <v-btn
                 v-for="sc in scenes"
@@ -129,7 +129,7 @@
 
       <div class="neuro-view__hint text-caption text-grey-darken-1">
         这一页是 neuro.exe 的窗口预览（背景 / 开场 / 立绘 / 字幕）。层的几何与场景都来自
-        <code>neuro_scenes.json</code>；合成后的直播画面在 Stream → View。
+        neuro 模块的场景数据；合成后的直播画面在 Stream → View。
       </div>
     </template>
 
@@ -279,7 +279,7 @@ function onIframeMessage(event: MessageEvent): void {
 }
 
 function openStandalone(): void {
-  window.open('/manage/neuro_sama/ui/', '_blank', 'noopener')
+  window.open('/ui/neuro/', '_blank', 'noopener')
 }
 
 // 场景被后端换掉（开播 intro / 自动回常态）时，层清单跟着变

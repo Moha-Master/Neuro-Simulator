@@ -1,18 +1,24 @@
 """stream 场景清单的服务端视角（机制在 `..scene_kit`，这里只写 stream 的策略）。
 
-场景（背景/游戏/chat/highlight + neuro 窗口配置）由画面侧拥有
-（`stream/ui/public/scenes.json` → 构建到 `dist/scenes.json`），服务端做四件事：
+场景（背景/游戏/chat/highlight + neuro 窗口配置）是**服务端的数据**
+（`stream/defaults/scenes.json`，包内数据文件），服务端做五件事：
 
 1. 校验切场景的 id 是否存在且不是 `hidden` 内部场景（`POST /scene`、`on_scene`）；
 2. 把清单（id/label/icon + 元素概览）交给 dashboard 渲染只读预览，**加场景只改一处**；
 3. 提供场景的 `prompt_context`，让 `{{scene_context}}` 随场景变（玩 Wordle 时她知道
    自己在猜词，但棋盘细节仍只从工具返回里看）；
-4. 供 `scene_kit.SceneRunner` 用的策略：有效时长、后端脚本步骤。
+4. 供 `scene_kit.SceneRunner` 用的策略：有效时长、后端脚本步骤；
+5. 通过 `GET /ui/manifest` 把**完整**清单下发给画面（渲染器要的是元素/box/css/script，
+   不是 dashboard 用的概览）。
+
+**数据归后端、前端只是渲染器**：这份 json 曾经放在前端 `public/` 里、靠构建拷进
+dist，服务端为了读它不得不依赖前端构建产物——那是反向耦合。现在它与 prompt 模板、
+人设一样属于服务端数据，前端来取。
 
 stream 特有的策略：时长只能是数据里写的秒数（合成器不拥有素材，不做轨道探测——
 开场视频的时长归 neuro）。开播 intro 已移到 neuro 窗口，stream 的 starting→live
 由直播循环自己按 neuro 返回的时长推进，**不是**场景脚本（那是会话阶段，不是画面场景）。
-文件按 mtime 缓存，重新构建前端后无需重启进程。
+文件按 mtime 缓存，改完数据无需重启进程。
 """
 
 from pathlib import Path
@@ -20,27 +26,28 @@ from typing import Any, Dict, List, Optional
 
 from .. import scene_kit
 from ..scene_kit import SceneError, UnknownScene, resolve_steps  # noqa: F401  (re-export)
-from . import media
 
 
-def _dist_scenes_path() -> Optional[Path]:
-    dist = media.ui_dist_dir()
-    if dist is None:
-        return None
-    p = dist / "scenes.json"
+def _defaults_path() -> Optional[Path]:
+    p = Path(__file__).parent / "defaults" / "scenes.json"
     return p if p.is_file() else None
 
 
-_cache = scene_kit.ManifestCache(_dist_scenes_path, lambda data: _validate(data))
+_cache = scene_kit.ManifestCache(_defaults_path, lambda data: _validate(data))
 
 
 def clear_cache() -> None:
     _cache.clear()
 
 
+def manifest() -> Dict[str, Any]:
+    """完整场景清单（给画面渲染器：`GET /ui/manifest`）。"""
+    return _cache.load()
+
+
 def load_scenes() -> List[Dict[str, Any]]:
-    """场景清单；**没有构建前端时返回空表**（模块要能照常跑，只是画面/校验降级）。"""
-    if _dist_scenes_path() is None:
+    """场景清单；**数据文件缺失时返回空表**（模块要能照常跑，只是画面/校验降级）。"""
+    if _defaults_path() is None:
         return []
     return _cache.load().get("scenes") or []
 

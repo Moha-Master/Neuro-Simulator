@@ -38,7 +38,7 @@ async def _wait_until(predicate, timeout=5.0, message="条件未在超时前成�
 
 
 ROOT = Path(__file__).resolve().parents[1]
-PUBLIC_SCENES = ROOT / "server/neuro_simulator/stream/ui/public/scenes.json"
+PUBLIC_SCENES = ROOT / "server/neuro_simulator/stream/defaults/scenes.json"
 
 ROOM = {
     "id": "room",
@@ -68,6 +68,43 @@ MANIFEST = {"version": 1, "scenes": [ROOM, BUMPER]}
 def _with_scenes(scenes):
     """把内存里的场景清单喂给 stream 的服务端视角（各函数都走 load_scenes）。"""
     return patch.object(scene_catalog, "load_scenes", return_value=scenes)
+
+
+class TestManifestOwnership(unittest.TestCase):
+    """场景数据归后端：包内 defaults/ 是唯一来源。
+
+    这份 json 曾经放在前端 `public/` 里靠构建拷进 dist，服务端为了读它不得不
+    依赖前端构建产物——反向耦合。现在由模块自己提供（`GET /ui/manifest`），
+    前端来取。这几条守住这个归属。
+    """
+
+    def test_manifest_lives_in_package_defaults(self):
+        self.assertTrue(PUBLIC_SCENES.is_file(), PUBLIC_SCENES)
+        legacy = ROOT / "server/neuro_simulator/stream/ui/public/scenes.json"
+        self.assertFalse(legacy.exists(), "场景数据不该再放在前端 public/ 里")
+
+    def test_frontend_fetches_manifest_from_module_api(self):
+        """前端不再拉静态 json，而是问模块要（`apiUrl` 拼出模块 API 地址）。"""
+        src = (
+            ROOT / "dashboard/src/ui/stream/scenes.ts"
+        ).read_text(encoding="utf-8")
+        self.assertIn('apiUrl("ui/manifest")', src)
+        self.assertNotIn('asset("scenes.json")', src)
+
+    def test_manifest_returns_full_data_for_renderer(self):
+        """渲染器要的是完整定义（元素/box/script/neuro），不是 dashboard 的概览。"""
+        data = scene_catalog.manifest()
+        room = next(s for s in data["scenes"] if s["id"] == "room")
+        self.assertTrue(room.get("elements"))
+        self.assertIn("neuro", room)
+        self.assertIn("box", room["elements"][0], "完整清单要带 box（渲染器要摆位）")
+        overview = next(s for s in scene_catalog.overview() if s["id"] == "room")
+        self.assertNotIn("box", overview["elements"][0], "概览是子集，不带 box")
+
+    def test_dashboard_overview_stays_a_subset(self):
+        ids = {s["id"] for s in scene_catalog.overview()}
+        self.assertIn("room", ids)
+        self.assertNotIn("room_intro", ids, "hidden 内部场景不进 dashboard 清单")
 
 
 class TestSceneValidation(unittest.TestCase):

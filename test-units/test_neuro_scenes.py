@@ -33,8 +33,8 @@ async def _wait_until(predicate, timeout=5.0, message="条件未在超时前成�
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SCENES_JSON = ROOT / "server/neuro_simulator/neuro_sama/ui/public/neuro_scenes.json"
-NEURO_VIDEO = ROOT / "server/neuro_simulator/neuro_sama/ui/public/neuro_start.mp4"
+SCENES_JSON = ROOT / "server/neuro_simulator/neuro_sama/defaults/neuro_scenes.json"
+NEURO_VIDEO = ROOT / "server/neuro_simulator/neuro_sama/assets/neuro_start.mp4"
 
 
 def load_data() -> dict:
@@ -47,6 +47,36 @@ def scene_of(manifest: dict, sid: str) -> dict:
 
 def element_ids(scene: dict) -> list:
     return [e["id"] for e in scene["elements"]]
+
+
+class TestManifestOwnership(unittest.TestCase):
+    """场景数据归后端：包内 defaults/ 是唯一来源。
+
+    这份 json 曾经放在前端 `public/` 里靠构建拷进 dist，服务端为了读它不得不
+    依赖前端构建产物——反向耦合。现在由模块自己提供（`GET /ui/manifest`），
+    前端来取。这几条守住这个归属。
+    """
+
+    def test_manifest_lives_in_package_defaults(self):
+        self.assertTrue(SCENES_JSON.is_file(), SCENES_JSON)
+        legacy = ROOT / "server/neuro_simulator/neuro_sama/ui/public/neuro_scenes.json"
+        self.assertFalse(legacy.exists(), "场景数据不该再放在前端 public/ 里")
+
+    def test_frontend_fetches_manifest_from_module_api(self):
+        src = (
+            ROOT / "dashboard/src/ui/neuro/scenes.ts"
+        ).read_text(encoding="utf-8")
+        self.assertIn('apiUrl("ui/manifest")', src)
+        self.assertNotIn('asset("neuro_scenes.json")', src)
+
+    def test_module_manifest_is_the_full_data(self):
+        """模块下发的清单 = 完整数据（渲染器要 default_scene 与 refs）。"""
+        from neuro_simulator.neuro_sama import scenes as ui_scenes
+
+        data = ui_scenes.manifest()
+        self.assertEqual(data["default_scene"], "normal")
+        self.assertTrue(data.get("refs"))
+        self.assertIn("intro", {s["id"] for s in data["scenes"]})
 
 
 class TestSceneDataContract(unittest.TestCase):

@@ -8,12 +8,12 @@ from hatchling.builders.hooks.plugin.interface import BuildHookInterface  # type
 
 
 class CustomBuildHook(BuildHookInterface):
-    # 需要随包构建的前端：(名称, 目录)。产物路径由 pyproject force-include/exclude 决定。
-    # 注：旧 client/（仿 Twitch 整页）已被 stream 模块的 /ui 内嵌前端取代，不再构建。
+    # 需要随包构建的前端：(名称, 目录)。产物路径由 pyproject force-include 决定。
+    # 注：**只有一个前端工程**——dashboard。神经窗口（/ui/neuro/）与直播合成器
+    # （/ui/stream/）是同一个构建里的两个独立 HTML 入口，代码在 dashboard/src/ui/。
+    # 旧的 client/（仿 Twitch 整页）已被 stream 合成器取代，不再构建。
     FRONTENDS = [
         ("dashboard", "dashboard"),
-        ("stream ui", "server/neuro_simulator/stream/ui"),
-        ("neuro ui", "server/neuro_simulator/neuro_sama/ui"),
     ]
 
     def initialize(self, version, build_data):

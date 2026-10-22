@@ -1,4 +1,4 @@
-"""neuro 窗口的媒体资产：定位 ui 构建产物 + 探测视频轨道时长（纯标准库）。
+"""neuro 窗口的媒体资产：定位模块持有的媒体文件 + 探测视频轨道时长（纯标准库）。
 
 场景时长是数据驱动的：`neuro_scenes.json` 里写
 `"duration": {"media": "<元素 id>", "after": <秒>}`，本模块负责把那个视频元素的
@@ -7,6 +7,10 @@
 真实时长取"所有 trak 的 mdhd duration 最大值"——与浏览器 video.duration
 和 ffprobe 一致。不能用顶层 mvhd：剪辑过的 mp4 常出现 mvhd 头部未更新
 （残留原始时长）而只有轨道被截断，二者会严重不符。
+
+**媒体文件为什么在模块包里、而不是前端构建产物里**：后端要读它来决定
+`intro` 场景的后端脚本什么时候执行——那件事发生在服务端，文件就得在服务端
+手里。前端（neuro 窗口页）通过 `GET /ui/media/{name}` 取同一个文件。
 """
 
 import struct
@@ -19,30 +23,23 @@ FALLBACK_VIDEO_S = 20.0
 _video_s: Dict[str, float] = {}
 
 
-def _ui_base() -> Path:
-    return Path(__file__).parent / "ui"
+def media_dir() -> Path:
+    """模块持有的媒体目录（包内 `neuro_sama/assets/`）。"""
+    return Path(__file__).parent / "assets"
 
 
-def ui_dist_dir() -> Optional[Path]:
-    """neuro/ui 构建产物目录（editable 在 ui/dist，wheel 在 ui/）。"""
-    base = _ui_base()
-    for cand in (base / "dist", base):
-        if (cand / "index.html").is_file():
-            return cand
-    return None
+def media_path(name: str) -> Optional[Path]:
+    """按媒体名定位文件（只允许纯文件名，不许穿目录）。"""
+    clean = (name or "").strip()
+    if not clean or "/" in clean or "\\" in clean or clean.startswith("."):
+        return None
+    p = media_dir() / clean
+    return p if p.is_file() else None
 
 
 def video_path(src: str) -> Optional[Path]:
-    """按 ui 里的相对素材名（如 `neuro_start.mp4`）定位实际文件。"""
-    name = (src or "").lstrip("./")
-    if not name:
-        return None
-    base = _ui_base()
-    for cand in (base / "dist", base):
-        p = cand / name
-        if p.is_file():
-            return p
-    return None
+    """兼容旧名：按 ui 里的相对素材名（如 `neuro_start.mp4`）定位实际文件。"""
+    return media_path((src or "").lstrip("./"))
 
 
 def video_seconds(src: str) -> Optional[float]:
@@ -83,24 +80,19 @@ def _iter_boxes(buf: bytes, start: int, end: int):
 
 
 def _parse_tfhd_like(buf: bytes, body: int) -> Optional[float]:
-    """解析 mvhd/mdhd 公共结构：version 后按 v0(4字节)/v1(8字节) 取 timescale+duration。"""
+    """解析 mvhd/mdhd 公共结构：version 与 timescale/duration 的位置随 version 变。"""
     version = buf[body]
-    try:
-        if version == 1:
-            # version+flags(4) + creation(8) + modification(8) → timescale @ +20
-            timescale, duration = struct.unpack_from(">IQ", buf, body + 20)
-        else:
-            # version+flags(4) + creation(4) + modification(4) → timescale @ +12
-            timescale, duration = struct.unpack_from(">II", buf, body + 12)
-    except struct.error:
+    if version == 1:
+        ts, dur = struct.unpack_from(">IQ", buf, body + 20)
+    else:
+        ts, dur = struct.unpack_from(">II", buf, body + 12)
+    if ts <= 0:
         return None
-    if timescale <= 0:
-        return None
-    return duration / timescale
+    return dur / ts
 
 
 def _max_track_duration(buf: bytes, moov_start: int, moov_end: int) -> Optional[float]:
-    """递归 trak→mdia(hdlr,mdhd)，返回**音视频媒体轨**时长的最大值（=真实呈现时长）。
+    """递归 trak→mdia(hdlr,mdhd)，生成**音视频媒体轨**时长的最大值（=真实呈现时长）。
     跳过 text/subt/hint/meta 轨——它们可能携带剪辑后未更新的陈旧时长。"""
     best: Optional[float] = None
     for typ, bs, be in _iter_boxes(buf, moov_start, moov_end):

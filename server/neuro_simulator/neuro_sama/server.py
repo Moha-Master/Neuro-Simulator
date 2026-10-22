@@ -20,8 +20,7 @@ import uuid
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import JSONResponse, StreamingResponse
-from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse, StreamingResponse
 from openai import AsyncOpenAI
 from pydantic import BaseModel
 
@@ -699,6 +698,18 @@ def create_app() -> FastAPI:
         )
         return {"status": "ok", "scene": info, "duration": info["duration"]}
 
+    @app.get("/ui/manifest")
+    async def ui_manifest():
+        """完整场景清单（窗口渲染器用：元素/box/content/script/refs 都在里面）。
+
+        数据归后端：这份 json 曾放在前端 public/ 里，服务端读它要依赖前端构建产物。
+        现在由模块自己提供，`GET /ui/scenes` 则是给 dashboard 的概览视图。
+        """
+        try:
+            return ui_scenes.manifest()
+        except ui_scenes.SceneError as e:
+            raise HTTPException(status_code=500, detail=str(e))
+
     @app.get("/ui/scenes")
     async def ui_scenes_list():
         """场景清单 + 当前场景。
@@ -738,19 +749,18 @@ def create_app() -> FastAPI:
         """
         return await _switch_scene(ui_scenes.INTRO_SCENE_ID)
 
-    # 静态托管放在最后，避免遮挡 /ui/events、/ui/intro 等 API 路由。
-    ui_dist = ui_media.ui_dist_dir()
-    if ui_dist is not None:
-        app.mount("/ui", StaticFiles(directory=ui_dist, html=True), name="ui")
-    else:
+    @app.get("/ui/media/{name}")
+    async def ui_media_file(name: str):
+        """模块持有的媒体（开场视频等）。
 
-        @app.get("/ui", include_in_schema=False)
-        @app.get("/ui/", include_in_schema=False)
-        async def _no_ui():
-            return JSONResponse(
-                status_code=404,
-                content={"detail": "neuro ui dist 未找到：请在 server/neuro_simulator/neuro_sama/ui/ 下运行 npm run build"},
-            )
+        **为什么视频不跟前端资产放在一起**：后端要探测它的轨道时长来决定
+        `intro` 场景的后端脚本什么时候触发——那件事发生在服务端，文件就必须
+        在服务端手里。前端（neuro 窗口页）通过 `/ui/media/{name}` 取它。
+        """
+        path = ui_media.media_path(name)
+        if path is None:
+            raise HTTPException(status_code=404, detail=f"没有这个媒体文件: {name}")
+        return FileResponse(path, media_type="video/mp4")
 
     return app
 

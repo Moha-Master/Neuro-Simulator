@@ -28,8 +28,8 @@ from neuro_simulator.stream.persona import ChatbotPersonaStore, build_template_s
 from neuro_simulator.stream.storage import Storage
 
 ROOT = Path(__file__).resolve().parents[1]
-PUBLIC_SCENES = ROOT / "server/neuro_simulator/stream/ui/public/scenes.json"
-NEURO_SCENES = ROOT / "server/neuro_simulator/neuro_sama/ui/public/neuro_scenes.json"
+PUBLIC_SCENES = ROOT / "server/neuro_simulator/stream/defaults/scenes.json"
+NEURO_SCENES = ROOT / "server/neuro_simulator/neuro_sama/defaults/neuro_scenes.json"
 
 
 def stream_scenes() -> list:
