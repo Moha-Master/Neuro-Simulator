@@ -16,6 +16,7 @@ neuro 特有的策略：
 - `INTRO_SCENE_ID`：`POST /ui/intro` 是"切到这个场景"的语义化别名。
 """
 
+import json
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -35,16 +36,69 @@ def _scenes_path() -> Optional[Path]:
     return p if p.is_file() else None
 
 
-_cache = scene_kit.ManifestCache(_scenes_path, lambda data: _validate(data))
+# 存储（管理器在 scene_kit 里共用，数据各模块各的）：启动时绑定一次，之后
+# **DB 里的那份就是权威**（人工可编辑）；没绑定时退回包内默认（测试/脚本直接用）。
+_store: Optional[scene_kit.SceneStore] = None
+_default_cache: Optional[Dict[str, Any]] = None
 
 
-def clear_cache() -> None:
-    """测试用：丢掉 mtime 缓存。"""
-    _cache.clear()
+def set_store(store: Optional[scene_kit.SceneStore]) -> None:
+    """绑定 DB 存储（启动时调用一次）。"""
+    global _store
+    _store = store
+
+
+def store() -> Optional[scene_kit.SceneStore]:
+    """已绑定的存储；None = 还没初始化（此时读包内默认）。"""
+    return _store
+
+
+def _default_manifest() -> Dict[str, Any]:
+    """包内默认清单（未绑定 DB 时的兜底；结果缓存）。"""
+    global _default_cache
+    if _default_cache is None:
+        path = _scenes_path()
+        if path is None:
+            raise SceneError("找不到包内默认场景清单")
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except ValueError as e:
+            raise SceneError(f"场景清单 JSON 解析失败: {e}") from e
+        _validate(data)
+        _default_cache = data
+    return _default_cache
 
 
 def manifest() -> Dict[str, Any]:
-    return _cache.load()
+    """完整场景清单（给窗口渲染器：`GET /ui/manifest`）。"""
+    if _store is not None:
+        return _store.manifest()
+    return _default_manifest()
+
+
+def manifest_source() -> Dict[str, Any]:
+    """元信息：是不是默认值 / 什么时候改的 / 多少字符（给 UI）。"""
+    if _store is not None:
+        return _store.source()
+    return {
+        "is_default": True,
+        "updated_at": "",
+        "chars": len(json.dumps(manifest(), ensure_ascii=False, indent=2)),
+    }
+
+
+async def save_manifest(text: str) -> None:
+    """保存场景清单（校验 → 落库 → 刷新缓存）。"""
+    if _store is None:
+        raise SceneError("场景清单尚未绑定数据库")
+    await _store.save(text)
+
+
+async def reset_manifest() -> None:
+    """恢复包内默认清单。"""
+    if _store is None:
+        raise SceneError("场景清单尚未绑定数据库")
+    await _store.reset()
 
 
 def scenes() -> List[Dict[str, Any]]:

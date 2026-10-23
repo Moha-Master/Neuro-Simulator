@@ -4,11 +4,11 @@
  * color-scheme 恒为 dark（iframe 内外色系不一致时 Chromium 会强制给 iframe
  * 一个不透明底色，媒体场景就会露白）。
  */
-import { bootstrapNeuro } from "./main";
+import { bootstrapNeuro } from './main'
 
-const stage = document.getElementById("stage");
+const stage = document.querySelector<HTMLElement>('#stage')
 if (stage) {
-  void bootstrapNeuro(stage);
+  void bootstrapNeuro(stage)
 } else {
-  console.error("找不到 #stage 容器，neuro 窗口无法启动");
+  console.error('找不到 #stage 容器，neuro 窗口无法启动')
 }

@@ -28,9 +28,11 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
+from .. import scene_kit
 from ..broadcaster import EventBroadcaster
 from ..config import get_config, module_url
 from ..persona import PersonaError
+from ..scene_kit import SceneError
 from ..templates import TemplateError
 from . import scenes as scene_catalog
 from . import settings as stream_settings
@@ -72,6 +74,12 @@ class MetadataPayload(BaseModel):
 
 
 class PromptPayload(BaseModel):
+    content: str
+
+
+class ManifestPayload(BaseModel):
+    """场景清单（整份 JSON 文本；服务端校验后存进模块自己的 DB）。"""
+
     content: str
 
 
@@ -176,6 +184,12 @@ def create_app() -> FastAPI:
         await persona.load()
         templates = build_template_store(storage)
         await templates.load()
+        # 场景清单：DB 里的那份是权威（包内 defaults/scenes.json 只做首次播种）
+        scene_store = scene_kit.SceneStore(
+            storage, scene_catalog._defaults_path(), scene_catalog._validate
+        )
+        await scene_store.load()
+        scene_catalog.set_store(scene_store)
         bus = EventBroadcaster()
         loop = StreamLoop(storage, bus, persona, templates)
         app.state.storage = storage
@@ -622,10 +636,36 @@ def create_app() -> FastAPI:
     async def ui_manifest():
         """完整场景清单（画面渲染器用：元素/box/css/script/neuro 块都在里面）。
 
-        数据归后端：这份 json 曾放在前端 public/ 里，服务端读它要依赖前端构建产物。
-        现在由模块自己提供，`GET /stream/scenes` 则是给 dashboard 的概览视图。
+        数据存在**模块自己的 DB** 里（包内 `defaults/scenes.json` 只是首次播种的
+        模板），人工可以在 dashboard 里编辑（`PUT /ui/manifest`）。
         """
         return scene_catalog.manifest()
+
+    @app.get("/ui/manifest/source")
+    async def ui_manifest_source():
+        """清单的元信息：是不是默认值 / 什么时候改的 / 多少字符。"""
+        return scene_catalog.manifest_source()
+
+    @app.put("/ui/manifest")
+    async def ui_manifest_save(payload: ManifestPayload):
+        """保存场景清单（校验 → 落库 → 刷新缓存 → 通知画面重载）。"""
+        try:
+            await scene_catalog.save_manifest(payload.content)
+        except SceneError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        # 画面页启动时拉一次清单：改了要让它重新拉（重载页面最省事，也最不容易出偏）
+        app.state.bus.publish({"type": "manifest_changed"})
+        return {"status": "ok", "source": scene_catalog.manifest_source()}
+
+    @app.post("/ui/manifest/reset")
+    async def ui_manifest_reset():
+        """恢复包内默认清单。"""
+        try:
+            await scene_catalog.reset_manifest()
+        except SceneError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        app.state.bus.publish({"type": "manifest_changed"})
+        return {"status": "ok", "source": scene_catalog.manifest_source()}
 
     @app.get("/ui/events")
     async def ui_events():

@@ -9,15 +9,17 @@
  * **加一个 neuro 场景只改这一处**。
  */
 
-import { apiUrl } from "../engine/base";
-import type { SceneManifest } from "../engine/schema";
+import type { SceneManifest } from '../engine/schema'
+import { apiUrl } from '../engine/base'
 
-export async function fetchScenes(): Promise<SceneManifest> {
-  const resp = await fetch(apiUrl("ui/manifest"), { cache: "no-store" });
-  if (!resp.ok) throw new Error(`场景清单读取失败: HTTP ${resp.status}`);
-  const data = (await resp.json()) as SceneManifest;
-  if (!Array.isArray(data.scenes) || !data.default_scene) {
-    throw new Error("场景清单结构不合法（缺 scenes / default_scene）");
+export async function fetchScenes (): Promise<SceneManifest> {
+  const resp = await fetch(apiUrl('ui/manifest'), { cache: 'no-store' })
+  if (!resp.ok) {
+    throw new Error(`场景清单读取失败: HTTP ${resp.status}`)
   }
-  return data;
+  const data = (await resp.json()) as SceneManifest
+  if (!Array.isArray(data.scenes) || !data.default_scene) {
+    throw new Error('场景清单结构不合法（缺 scenes / default_scene）')
+  }
+  return data
 }

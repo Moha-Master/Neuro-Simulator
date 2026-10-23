@@ -24,6 +24,7 @@ from fastapi.responses import FileResponse, StreamingResponse
 from openai import AsyncOpenAI
 from pydantic import BaseModel
 
+from .. import scene_kit
 from ..broadcaster import EventBroadcaster
 from ..config import get_config
 from . import tts, ui_media
@@ -58,6 +59,7 @@ _UI_EVENT_TYPES = {
     "tool_start",
     "scene_set",
     "settings",
+    "manifest_changed",
 }
 
 
@@ -145,6 +147,12 @@ class PromptPayload(BaseModel):
     content: str
 
 
+class ManifestPayload(BaseModel):
+    """场景清单（整份 JSON 文本；服务端校验后存进模块自己的 DB）。"""
+
+    content: str
+
+
 class PreviewPayload(BaseModel):
     content: str | None = None  # 可选：预览未保存的草稿
 
@@ -215,12 +223,22 @@ def create_app() -> FastAPI:
     async def lifespan(app: FastAPI):
         cfg = get_config()
 
+        # 媒体素材：包内那份是模板，复制到工作目录后**只从工作目录读**
+        # （用户换开场视频不用动 site-packages；与 config.json 同一套做法）。
+        ui_media.deploy_assets(cfg.DATA_DIR)
+
         storage = Storage(cfg.DB_PATH)
         await storage.init()
         persona = PersonaStore(storage)
         await persona.load()
         memory = MemoryStore(storage, cfg.MEMORY_CHAR_LIMIT)
         await memory.load()
+        # 场景清单：DB 里的那份是权威（包内 defaults/neuro_scenes.json 只做首次播种）
+        scene_store = scene_kit.SceneStore(
+            storage, ui_scenes._scenes_path(), ui_scenes._validate
+        )
+        await scene_store.load()
+        ui_scenes.set_store(scene_store)
 
         registry = ToolRegistry()
         for tool in build_builtin_tools(memory):
@@ -702,13 +720,41 @@ def create_app() -> FastAPI:
     async def ui_manifest():
         """完整场景清单（窗口渲染器用：元素/box/content/script/refs 都在里面）。
 
-        数据归后端：这份 json 曾放在前端 public/ 里，服务端读它要依赖前端构建产物。
-        现在由模块自己提供，`GET /ui/scenes` 则是给 dashboard 的概览视图。
+        数据存在**模块自己的 DB** 里（包内 `defaults/neuro_scenes.json` 只是首次
+        播种的模板），人工可以在 dashboard 里编辑（`PUT /ui/manifest`）。
         """
         try:
             return ui_scenes.manifest()
         except ui_scenes.SceneError as e:
             raise HTTPException(status_code=500, detail=str(e))
+
+    @app.get("/ui/manifest/source")
+    async def ui_manifest_source():
+        """清单的元信息：是不是默认值 / 什么时候改的 / 多少字符。"""
+        try:
+            return ui_scenes.manifest_source()
+        except ui_scenes.SceneError as e:
+            raise HTTPException(status_code=500, detail=str(e))
+
+    @app.put("/ui/manifest")
+    async def ui_manifest_save(payload: ManifestPayload):
+        """保存场景清单（校验 → 落库 → 刷新缓存 → 通知窗口重载）。"""
+        try:
+            await ui_scenes.save_manifest(payload.content)
+        except ui_scenes.SceneError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        app.state.ui_broadcaster.publish({"type": "manifest_changed"})
+        return {"status": "ok", "source": ui_scenes.manifest_source()}
+
+    @app.post("/ui/manifest/reset")
+    async def ui_manifest_reset():
+        """恢复包内默认清单。"""
+        try:
+            await ui_scenes.reset_manifest()
+        except ui_scenes.SceneError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        app.state.ui_broadcaster.publish({"type": "manifest_changed"})
+        return {"status": "ok", "source": ui_scenes.manifest_source()}
 
     @app.get("/ui/scenes")
     async def ui_scenes_list():

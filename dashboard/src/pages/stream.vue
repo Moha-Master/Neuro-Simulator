@@ -217,6 +217,15 @@
             >
               游戏：{{ st.status.value.game }}
             </v-chip>
+            <v-spacer />
+            <v-btn
+              size="x-small"
+              variant="text"
+              prepend-icon="mdi-code-json"
+              @click="sceneEditor = true"
+            >
+              编辑场景数据
+            </v-btn>
           </div>
           <div class="text-caption text-disabled mt-3">
             场景由直播循环自动切换：开播进 room（开场由 neuro 窗口播放），
@@ -275,10 +284,14 @@ import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useModuleStatus } from '@/composables/useModuleStatus'
 import { useStream } from '@/composables/useStream'
 import ModuleOffline from '@/components/ModuleOffline.vue'
+import SceneManifestEditor from '@/components/scene/SceneManifestEditor.vue'
 import TagInput from '@/components/tags/TagInput.vue'
 
 const status = useModuleStatus('stream')
 const st = useStream()
+
+/** 场景数据编辑器（存的是 stream 模块自己 DB 里的那份） */
+const sceneEditor = ref(false)
 
 /** 常用 Twitch 分区（可自由输入其它值） */
 const CATEGORIES = [

@@ -88,8 +88,11 @@ class TestManifestOwnership(unittest.TestCase):
         src = (
             ROOT / "dashboard/src/ui/stream/scenes.ts"
         ).read_text(encoding="utf-8")
-        self.assertIn('apiUrl("ui/manifest")', src)
-        self.assertNotIn('asset("scenes.json")', src)
+        # 断言不依赖引号风格（eslint 可能把双引号改成单引号）
+        self.assertIn("ui/manifest", src)
+        self.assertIn("apiUrl", src)
+        # 不再拉静态 json（asset(...) 拼出来的地址）：只问模块要
+        self.assertNotIn("asset(", src)
 
     def test_manifest_returns_full_data_for_renderer(self):
         """渲染器要的是完整定义（元素/box/script/neuro），不是 dashboard 的概览。"""

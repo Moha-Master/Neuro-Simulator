@@ -51,41 +51,116 @@ class SceneLoopError(RuntimeError):
     """场景在短时间内被切换过多——通常是 state_script 写成了环。"""
 
 
-# ---------- manifest 缓存 ----------
+# ---------- 场景清单的存储 ----------
 
 
-class ManifestCache:
-    """按 (路径, mtime) 缓存并校验一份场景 manifest。
+class SceneStore:
+    """场景清单的存储（机制层）：**DB 是权威**，包内 defaults 只是播种模板。
 
-    `path_fn` 每次重新求值（editable / wheel 两种产物目录由调用方决定）；
-    `validate` 抛 SceneError 即视为数据不可用。
+    - `load()`：读 DB；没有行就用包内默认播种（播种之后不再自动覆盖——
+      用户改过就以 DB 为准，要回到默认走 `reset()`）。
+    - `manifest()`：同步返回**已校验**的清单（内存缓存）——各模块的
+      `find/require/overview` 都是同步读缓存，不需要 await。
+    - `save(text)`：校验 → 落库 → 刷新缓存；不合法直接抛 SceneError。
+    - `reset()`：恢复包内默认。
+    - `set_data(data)`：测试用——直接注入清单（不落库）。
+
+    存的是**规范化后的 JSON**（`indent=2`），所以 UI 读到的永远是同一个格式，
+    "是不是默认值"也比的是数据而不是文本。
     """
 
-    def __init__(self, path_fn: Callable[[], Optional[Path]], validate: Callable[[Any], None]) -> None:
-        self._path_fn = path_fn
+    def __init__(
+        self,
+        storage: Any,
+        default_path: Path,
+        validate: Callable[[Any], None],
+        name: str = "scenes",
+    ) -> None:
+        self._storage = storage
+        self._default_path = Path(default_path)
         self._validate = validate
-        self._key: Any = None
-        self._manifest: Any = None
+        self._name = name
+        self._data: Optional[Dict[str, Any]] = None
+        self._updated_at = ""
+        self._lock = asyncio.Lock()
 
-    def load(self) -> Any:
-        path = self._path_fn()
-        if path is None:
-            raise SceneError("找不到场景清单：请先构建对应前端（npm run build-only）")
-        key = (str(path), path.stat().st_mtime_ns)
-        if self._key != key:
-            try:
-                data = json.loads(path.read_text(encoding="utf-8"))
-            except OSError as e:
-                raise SceneError(f"场景清单读取失败: {e}") from e
-            except ValueError as e:
-                raise SceneError(f"场景清单 JSON 解析失败: {e}") from e
-            self._validate(data)
-            self._key, self._manifest = key, data
-        return self._manifest
+    # ---------- 加载 / 播种 ----------
 
-    def clear(self) -> None:
-        self._key = None
-        self._manifest = None
+    async def load(self) -> None:
+        row = await self._storage.get_scene(self._name)
+        if row is None:
+            await self._storage.upsert_scene(self._default_text(), self._name)
+            row = await self._storage.get_scene(self._name)
+        self._apply(
+            row["content"] if row else self._default_text(),
+            row["updated_at"] if row else "",
+        )
+
+    def _default_text(self) -> str:
+        try:
+            return self._default_path.read_text(encoding="utf-8")
+        except OSError as e:
+            raise SceneError(f"包内默认场景清单读取失败: {e}") from e
+
+    def _apply(self, text: str, updated_at: str) -> None:
+        try:
+            data = json.loads(text)
+        except ValueError as e:
+            raise SceneError(f"场景清单 JSON 解析失败: {e}") from e
+        self._validate(data)
+        self._data = data
+        self._updated_at = updated_at
+
+    def set_data(self, data: Dict[str, Any], updated_at: str = "") -> None:
+        """测试用：直接注入清单（校验但不落库）。"""
+        self._validate(data)
+        self._data = data
+        self._updated_at = updated_at
+
+    # ---------- 读 ----------
+
+    def manifest(self) -> Dict[str, Any]:
+        if self._data is None:
+            raise SceneError("场景清单尚未加载")
+        return self._data
+
+    def is_default(self) -> bool:
+        try:
+            default = json.loads(self._default_text())
+        except (OSError, ValueError):
+            return False
+        return json.dumps(self.manifest(), sort_keys=True, ensure_ascii=False) == json.dumps(
+            default, sort_keys=True, ensure_ascii=False
+        )
+
+    def source(self) -> Dict[str, Any]:
+        """给 UI 的元信息：是不是默认值 / 什么时候改的 / 多少字符。"""
+        return {
+            "is_default": self.is_default(),
+            "updated_at": self._updated_at,
+            "chars": len(json.dumps(self.manifest(), ensure_ascii=False, indent=2)),
+        }
+
+    # ---------- 写 ----------
+
+    async def save(self, text: str) -> None:
+        """校验后落库（存规范化 JSON）；不合法抛 SceneError，调用方转 400。"""
+        raw = (text or "").strip()
+        if not raw:
+            raise SceneError("场景清单不能为空")
+        try:
+            data = json.loads(raw)
+        except ValueError as e:
+            raise SceneError(f"场景清单 JSON 解析失败: {e}") from e
+        self._validate(data)
+        canonical = json.dumps(data, ensure_ascii=False, indent=2)
+        async with self._lock:
+            await self._storage.upsert_scene(canonical, self._name)
+            row = await self._storage.get_scene(self._name)
+            self._apply(canonical, row["updated_at"] if row else "")
+
+    async def reset(self) -> None:
+        await self.save(self._default_text())
 
 
 # ---------- 通用校验 ----------

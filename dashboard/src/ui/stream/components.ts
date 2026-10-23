@@ -10,15 +10,15 @@
  *   由 main.ts 直接拿实例调方法，不必走 update。
  */
 
-import { ChatOverlay, HighlightOverlay } from "./chat";
-import { ChessBoardView } from "./chess";
-import { WordleGameView } from "./wordle";
-import type { Box } from "../engine/schema";
-import type { ComponentFactory } from "../engine/types";
+import type { Box } from '../engine/schema'
+import type { ComponentFactory } from '../engine/types'
+import { ChatOverlay, HighlightOverlay } from './chat'
+import { ChessBoardView } from './chess'
+import { WordleGameView } from './wordle'
 
 export const COMPONENTS: Record<string, ComponentFactory> = {
-  "chat.overlay": (el) => new ChatOverlay(el),
-  "highlight": (el) => new HighlightOverlay(el),
-  "wordle.game": (el) => new WordleGameView(el),
-  "chess.board": (el) => new ChessBoardView(el),
-};
+  'chat.overlay': el => new ChatOverlay(el),
+  'highlight': el => new HighlightOverlay(el),
+  'wordle.game': el => new WordleGameView(el),
+  'chess.board': el => new ChessBoardView(el),
+}

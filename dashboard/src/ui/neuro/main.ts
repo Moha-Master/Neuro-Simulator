@@ -15,191 +15,217 @@
  * Chromium 会强制给 iframe 一个不透明底色。
  */
 
-import "./styles/neuro.css";
+import type { SceneManifest } from '../engine/schema'
 
-import { ACTIONS } from "../engine/action";
-import { ElementEngine } from "../engine/elements";
-import { makeAssetUrl } from "../engine/base";
-import type { SceneManifest } from "../engine/schema";
-import { loadFonts } from "./assets";
-import { CaptionPlayer, type SpeechSeg } from "./speech";
-import { COMPONENTS } from "./components";
+import type { CaptionPlayer, SpeechSeg } from './speech'
+import { ACTIONS } from '../engine/action'
+import { makeAssetUrl } from '../engine/base'
+import { ElementEngine } from '../engine/elements'
+import { loadFonts } from './assets'
+import { COMPONENTS } from './components'
 import {
-  NeuroFeed,
   type FeedEvent,
+  NeuroFeed,
   type SceneInfo,
   type Snapshot,
   type TurnSeg,
-} from "./feed";
-import { fetchScenes } from "./scenes";
+} from './feed'
+import { fetchScenes } from './scenes'
+import './styles/neuro.css'
 
-export async function bootstrapNeuro(stage: HTMLElement): Promise<void> {
-  await loadFonts();
+export async function bootstrapNeuro (stage: HTMLElement): Promise<void> {
+  await loadFonts()
 
-  let manifest: SceneManifest;
+  let manifest: SceneManifest
   try {
-    manifest = await fetchScenes();
-  } catch (e) {
-    console.error("场景清单加载失败，窗口无法渲染", e);
-    return;
+    manifest = await fetchScenes()
+  } catch (error) {
+    console.error('场景清单加载失败，窗口无法渲染', error)
+    return
   }
 
-  const refs = manifest.refs ?? {};
-  const avatarId = refs.avatar ?? "avatar";
-  const captionId = refs.caption ?? "caption";
+  const refs = manifest.refs ?? {}
+  const avatarId = refs.avatar ?? 'avatar'
+  const captionId = refs.caption ?? 'caption'
 
   const engine = new ElementEngine(stage, manifest.scenes, {
     components: COMPONENTS,
     actions: ACTIONS,
     assetUrl: makeAssetUrl(),
-  });
+  })
   // 首帧先按数据落到 default_scene；SSE 的 snapshot 一到就用后端的权威状态纠正。
-  const defaultScene = manifest.default_scene ?? manifest.scenes[0]?.id;
+  const defaultScene = manifest.default_scene ?? manifest.scenes[0]?.id
   if (!defaultScene) {
-    console.error("场景清单里没有 default_scene，窗口无法渲染");
-    return;
+    console.error('场景清单里没有 default_scene，窗口无法渲染')
+    return
   }
   try {
-    await engine.setScene(defaultScene, { instant: true });
-  } catch (e) {
-    console.error(`default_scene 无法渲染: ${defaultScene}`, e);
-    return;
+    await engine.setScene(defaultScene, { instant: true })
+  } catch (error) {
+    console.error(`default_scene 无法渲染: ${defaultScene}`, error)
+    return
   }
 
   // ---------- 字幕实例（跨场景复用同一个元素与实例） ----------
 
-  let player: CaptionPlayer | null = null;
-  let captionSettings: Snapshot["settings"] | null = null;
+  let player: CaptionPlayer | null = null
+  let captionSettings: Snapshot['settings'] | null = null
 
-  function applyCaptionSettings(): void {
-    const caption = captionSettings?.caption;
-    if (!caption || !player) return;
-    if (caption.hide_ms !== undefined) player.setHideDelay(Number(caption.hide_ms));
-    if (caption.step_gap_ms !== undefined) player.setStepGap(Number(caption.step_gap_ms));
+  function applyCaptionSettings (): void {
+    const caption = captionSettings?.caption
+    if (!caption || !player) {
+      return
+    }
+    if (caption.hide_ms !== undefined) {
+      player.setHideDelay(Number(caption.hide_ms))
+    }
+    if (caption.step_gap_ms !== undefined) {
+      player.setStepGap(Number(caption.step_gap_ms))
+    }
   }
 
   /** 元素内容变了会换实例（改数据/换组件），这里重新认一次并补设置 */
-  function ensurePlayer(): CaptionPlayer | null {
-    const view = engine.view<CaptionPlayer>(captionId);
+  function ensurePlayer (): CaptionPlayer | null {
+    const view = engine.view<CaptionPlayer>(captionId)
     if (view && view !== player) {
-      player = view;
-      player.onIdle = () => resetZoom();
-      applyCaptionSettings();
+      player = view
+      player.onIdle = () => resetZoom()
+      applyCaptionSettings()
     }
-    return player;
+    return player
   }
-  ensurePlayer();
+  ensurePlayer()
 
   // ---------- 立绘动作（tool_start 驱动；zoom 在语音播完后复位） ----------
 
-  let zoomed = false;
+  let zoomed = false
 
-  function resetZoom(instant = false): void {
-    if (!zoomed) return;
-    zoomed = false;
-    const el = engine.element(avatarId);
-    if (!el) return;
+  function resetZoom (instant = false): void {
+    if (!zoomed) {
+      return
+    }
+    zoomed = false
+    const el = engine.element(avatarId)
+    if (!el) {
+      return
+    }
     if (instant) {
-      el.style.transform = "";
+      el.style.transform = ''
     } else {
-      void engine.run(avatarId, "avatar.zoom_out");
+      void engine.run(avatarId, 'avatar.zoom_out')
     }
   }
 
   // ---------- 场景（只读渲染后端的权威状态） ----------
 
-  function applyScene(info: SceneInfo | undefined): void {
-    if (!info || !info.id) return;
+  function applyScene (info: SceneInfo | undefined): void {
+    if (!info || !info.id) {
+      return
+    }
     if (!engine.has(info.id)) {
-      console.warn(`后端要求渲染未知场景: ${info.id}`);
-      return;
+      console.warn(`后端要求渲染未知场景: ${info.id}`)
+      return
     }
     void engine
       .setScene(info.id, { elapsed: Number(info.elapsed ?? 0), duration: Number(info.duration ?? 0) })
       .then(ensurePlayer)
-      .catch((e) => console.warn(`场景切换失败: ${info.id}`, e));
+      .catch(error => console.warn(`场景切换失败: ${info.id}`, error))
   }
 
   // ---------- 父页面（合成器 / dashboard 预览）控制层的显隐 ----------
 
-  window.addEventListener("message", (event: MessageEvent) => {
-    const data = event.data as { ns?: string; type?: string; hidden?: string[] } | undefined;
-    if (!data || data.ns !== "neuro-window") return;
-    if (data.type === "visibility") {
-      engine.setHidden(Array.isArray(data.hidden) ? data.hidden : []);
+  window.addEventListener('message', (event: MessageEvent) => {
+    const data = event.data as { ns?: string, type?: string, hidden?: string[] } | undefined
+    if (!data || data.ns !== 'neuro-window') {
+      return
     }
-  });
+    if (data.type === 'visibility') {
+      engine.setHidden(Array.isArray(data.hidden) ? data.hidden : [])
+    }
+  })
   if (window.parent && window.parent !== window) {
-    window.parent.postMessage({ ns: "neuro-window", type: "ready" }, "*");
+    window.parent.postMessage({ ns: 'neuro-window', type: 'ready' }, '*')
   }
 
   // ---------- 事件通道 ----------
 
-  const feed = new NeuroFeed();
+  const feed = new NeuroFeed()
 
-  feed.on("snapshot", (ev: FeedEvent) => {
-    const snap = ev as unknown as Snapshot;
-    captionSettings = snap.settings ?? null;
-    applyCaptionSettings();
-    applyScene(snap.scene);
-    const p = ensurePlayer();
-    if (!p) return;
-    if (snap.turn?.speech?.length) {
-      p.resumeFromSnapshot(snap.turn.speech as TurnSeg[], snap.turn.id);
-      if (!snap.turn.active) p.endOfTurn(snap.turn.id);
-    } else {
-      p.clear();
+  feed.on('snapshot', (ev: FeedEvent) => {
+    const snap = ev as unknown as Snapshot
+    captionSettings = snap.settings ?? null
+    applyCaptionSettings()
+    applyScene(snap.scene)
+    const p = ensurePlayer()
+    if (!p) {
+      return
     }
-  });
+    if (snap.turn?.speech?.length) {
+      p.resumeFromSnapshot(snap.turn.speech as TurnSeg[], snap.turn.id)
+      if (!snap.turn.active) {
+        p.endOfTurn(snap.turn.id)
+      }
+    } else {
+      p.clear()
+    }
+  })
 
-  feed.on("scene_set", (ev: FeedEvent) => {
+  feed.on('scene_set', (ev: FeedEvent) => {
     applyScene({
-      id: String(ev.id ?? ""),
+      id: String(ev.id ?? ''),
       duration: Number(ev.duration ?? 0),
       elapsed: Number(ev.elapsed ?? 0),
-    });
-  });
+    })
+  })
 
-  feed.on("start", (ev: FeedEvent) => {
-    const turnId = ev.turn_id === undefined ? undefined : Number(ev.turn_id);
-    ensurePlayer()?.beginTurn(turnId);
-  });
+  feed.on('start', (ev: FeedEvent) => {
+    const turnId = ev.turn_id === undefined ? undefined : Number(ev.turn_id)
+    ensurePlayer()?.beginTurn(turnId)
+  })
 
-  feed.on("speech", (ev: FeedEvent) => {
+  feed.on('speech', (ev: FeedEvent) => {
     const seg: SpeechSeg = {
       index: Number(ev.index ?? 0),
-      text: String(ev.text ?? ""),
-      audio: String(ev.audio ?? ""),
-      mime: String(ev.mime ?? ""),
+      text: String(ev.text ?? ''),
+      audio: String(ev.audio ?? ''),
+      mime: String(ev.mime ?? ''),
       duration: Number(ev.duration ?? 0),
       step: Number(ev.step ?? 0),
-    };
-    if (ev.turn_id !== undefined) seg.turn_id = Number(ev.turn_id);
-    ensurePlayer()?.enqueue(seg);
-  });
+    }
+    if (ev.turn_id !== undefined) {
+      seg.turn_id = Number(ev.turn_id)
+    }
+    ensurePlayer()?.enqueue(seg)
+  })
 
-  for (const type of ["done", "cancelled", "error"] as const) {
+  for (const type of ['done', 'cancelled', 'error'] as const) {
     feed.on(type, (ev: FeedEvent) => {
-      const turnId = ev.turn_id === undefined ? undefined : Number(ev.turn_id);
-      ensurePlayer()?.endOfTurn(turnId);
-    });
+      const turnId = ev.turn_id === undefined ? undefined : Number(ev.turn_id)
+      ensurePlayer()?.endOfTurn(turnId)
+    })
   }
 
-  feed.on("tool_start", (ev: FeedEvent) => {
-    const name = String(ev.name ?? "");
-    if (name === "model_spin") {
-      void engine.run(avatarId, "avatar.spin");
-    } else if (name === "model_zoom") {
-      zoomed = true;
-      void engine.run(avatarId, "avatar.zoom_in");
-    } else if (name.startsWith("model_")) {
-      console.warn(`未处理的 neuro 画面工具: ${name}`);
+  feed.on('tool_start', (ev: FeedEvent) => {
+    const name = String(ev.name ?? '')
+    if (name === 'model_spin') {
+      void engine.run(avatarId, 'avatar.spin')
+    } else if (name === 'model_zoom') {
+      zoomed = true
+      void engine.run(avatarId, 'avatar.zoom_in')
+    } else if (name.startsWith('model_')) {
+      console.warn(`未处理的 neuro 画面工具: ${name}`)
     }
-  });
+  })
 
-  feed.on("settings", (ev: FeedEvent) => {
-    captionSettings = (ev as unknown as Snapshot["settings"]) ?? null;
-    applyCaptionSettings();
+  feed.on('manifest_changed', () => {
+    // 场景清单被改了（dashboard 里编辑过）：重载窗口页以拉新清单。
+    console.info('场景清单已更新，重新加载窗口')
+    window.location.reload()
+  })
+
+  feed.on('settings', (ev: FeedEvent) => {
+    captionSettings = (ev as unknown as Snapshot['settings']) ?? null
+    applyCaptionSettings()
   });
 
   // 控制台/父页面调试入口（与 stream/ui 的 window.__ns 对齐）
@@ -208,10 +234,10 @@ export async function bootstrapNeuro(stage: HTMLElement): Promise<void> {
     engine,
     feed,
     manifest,
-    get player() {
-      return player;
+    get player () {
+      return player
     },
     setHidden: (ids: string[]) => engine.setHidden(ids),
     resetZoom,
-  };
+  }
 }

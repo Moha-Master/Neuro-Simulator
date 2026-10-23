@@ -15,57 +15,62 @@
  * 显式基址：页面元素上的 `data-module-base` 优先，其次 URL 参数 `?module-base=`。
  */
 
-import type { AssetUrl } from "./types";
+import type { AssetUrl } from './types'
 
 /** 前端资产（构建根的 public/）。 */
-export function rootAsset(path: string): string {
-  const clean = path.replace(/^\.?\//, "");
-  return new URL(`/${clean}`, window.location.origin).href;
+export function rootAsset (path: string): string {
+  const clean = path.replace(/^\.?\//, '')
+  return new URL(`/${clean}`, window.location.origin).href
 }
 
 /** 显式基址：优先取元素上的 data-module-base，其次 URL 参数 ?module-base=。 */
-function explicitModuleBase(): string | null {
-  const attr = document
-    .querySelector("[data-module-base]")
-    ?.getAttribute("data-module-base");
-  if (attr) return attr;
+function explicitModuleBase (): string | null {
+  const el = document.querySelector<HTMLElement>('[data-module-base]')
+  const attr = el?.dataset.moduleBase
+  if (attr) {
+    return attr
+  }
   try {
-    const q = new URLSearchParams(window.location.search).get("module-base");
-    if (q) return q;
+    const q = new URLSearchParams(window.location.search).get('module-base')
+    if (q) {
+      return q
+    }
   } catch {
     /* 忽略：URL 异常时按推导处理 */
   }
-  return null;
+  return null
 }
 
 /** 模块 API 基址（末尾带 "/"）。 */
-export function moduleBase(): string {
-  const explicit = explicitModuleBase();
-  if (explicit) return explicit.endsWith("/") ? explicit : `${explicit}/`;
-  const m = window.location.pathname.match(/^(\/manage\/[^/]+)\/ui(?:\/|$)/);
-  return m ? `${m[1]}/` : "/";
+export function moduleBase (): string {
+  const explicit = explicitModuleBase()
+  if (explicit) {
+    return explicit.endsWith('/') ? explicit : `${explicit}/`
+  }
+  const m = window.location.pathname.match(/^(\/manage\/[^/]+)\/ui(?:\/|$)/)
+  return m ? `${m[1]}/` : '/'
 }
 
 /** 模块 API 的绝对地址：`apiUrl("ui/manifest")` → "<基址>ui/manifest"。 */
-export function apiUrl(path: string): string {
-  const clean = path.replace(/^\/+/, "");
-  return new URL(moduleBase() + clean, window.location.href).href;
+export function apiUrl (path: string): string {
+  const clean = path.replace(/^\/+/, '')
+  return new URL(moduleBase() + clean, window.location.href).href
 }
 
 /** 另一个模块的 API 基址（合成器要问 neuro 的健康状态）。 */
-export function foreignModuleBase(attr: string, fallback: string): string {
-  const el = document.querySelector(`[${attr}]`);
-  const value = el?.getAttribute(attr);
-  const base = value || fallback;
-  return base.endsWith("/") ? base : `${base}/`;
+export function foreignModuleBase (attr: string, fallback: string): string {
+  const el = document.querySelector(`[${attr}]`)
+  const value = el?.getAttribute(attr)
+  const base = value || fallback
+  return base.endsWith('/') ? base : `${base}/`
 }
 
 /** 模块媒体（开场视频等由后端持有的文件）。 */
-export function mediaUrl(name: string): string {
-  return apiUrl(`ui/media/${name.replace(/^\.?\//, "")}`);
+export function mediaUrl (name: string): string {
+  return apiUrl(`ui/media/${name.replace(/^\.?\//, '')}`)
 }
 
 /** 引擎的资产寻址：**视频归模块**（后端要探测它的时长），图片/其它归前端。 */
-export function makeAssetUrl(): AssetUrl {
-  return (src, kind) => (kind === "video" ? mediaUrl(src) : rootAsset(src));
+export function makeAssetUrl (): AssetUrl {
+  return (src, kind) => (kind === 'video' ? mediaUrl(src) : rootAsset(src))
 }

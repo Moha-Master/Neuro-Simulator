@@ -1,16 +1,16 @@
+import { fileURLToPath, URL } from 'node:url'
+import Vue from '@vitejs/plugin-vue'
 // Plugins
 import AutoImport from 'unplugin-auto-import/vite'
-import Components from 'unplugin-vue-components/vite'
 import Fonts from 'unplugin-fonts/vite'
-import Layouts from 'vite-plugin-vue-layouts-next'
-import Vue from '@vitejs/plugin-vue'
-import VueRouter from 'unplugin-vue-router/vite'
+import Components from 'unplugin-vue-components/vite'
 import { VueRouterAutoImports } from 'unplugin-vue-router'
-import Vuetify, { transformAssetUrls } from 'vite-plugin-vuetify'
-
+import VueRouter from 'unplugin-vue-router/vite'
 // Utilities
 import { defineConfig, type Plugin } from 'vite'
-import { fileURLToPath, URL } from 'node:url'
+
+import Layouts from 'vite-plugin-vue-layouts-next'
+import Vuetify, { transformAssetUrls } from 'vite-plugin-vuetify'
 
 /**
  * 画面页（/ui/stream/、/ui/neuro/）不需要 dashboard 的 Roboto 预加载。
@@ -19,14 +19,16 @@ import { fileURLToPath, URL } from 'node:url'
  * 各语言子集共 1.7MB）——OBS 浏览器源会白下载一堆自己根本不用的字体，还刷一屏
  * "preloaded but not used" 警告。主页保留预加载（Vuetify 用 Roboto），画面页摘掉。
  */
-function stripFontPreloads(): Plugin {
+function stripFontPreloads (): Plugin {
   return {
     name: 'ns-strip-font-preloads',
     enforce: 'post',
     transformIndexHtml: {
       order: 'post',
-      handler(html, ctx) {
-        if (!ctx.path || !ctx.path.includes('/ui/')) return html
+      handler (html, ctx) {
+        if (!ctx.path || !ctx.path.includes('/ui/')) {
+          return html
+        }
         return html.replace(/<link[^>]+rel="preload"[^>]*as="font"[^>]*>/g, '')
       },
     },

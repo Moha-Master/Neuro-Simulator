@@ -71,6 +71,15 @@
                 场景是 neuro 后端的权威状态：切一次广播一次，OBS / 合成器 / 本页一起收敛。
                 「开场」放完会按场景数据自动回常态。
               </div>
+              <v-btn
+                class="mt-2"
+                size="x-small"
+                variant="text"
+                prepend-icon="mdi-code-json"
+                @click="sceneEditor = true"
+              >
+                编辑场景数据
+              </v-btn>
             </v-card-text>
           </v-card>
 
@@ -131,6 +140,12 @@
         这一页是 neuro.exe 的窗口预览（背景 / 开场 / 立绘 / 字幕）。层的几何与场景都来自
         neuro 模块的场景数据；合成后的直播画面在 Stream → View。
       </div>
+
+      <SceneManifestEditor
+        v-model="sceneEditor"
+        base="/manage/neuro_sama"
+        title="Neuro 窗口的场景数据"
+      />
     </template>
 
     <v-snackbar v-model="snackbar" :timeout="3500" location="bottom">
@@ -142,6 +157,7 @@
 <script lang="ts" setup>
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import ModuleOffline from '@/components/ModuleOffline.vue'
+import SceneManifestEditor from '@/components/scene/SceneManifestEditor.vue'
 import { useModuleStatus } from '@/composables/useModuleStatus'
 import { api, describeError } from '@/stores/connection'
 
@@ -185,6 +201,8 @@ const visible = ref<Record<string, boolean>>({})
 const switching = ref('')
 const snackbar = ref(false)
 const snackbarText = ref('')
+/** 场景数据编辑器（存的是 neuro 模块自己 DB 里的那份） */
+const sceneEditor = ref(false)
 
 const scenes = computed(() => (data.value?.scenes ?? []).filter((s) => !s.hidden))
 const current = computed<SceneState | null>(() => data.value?.current ?? null)

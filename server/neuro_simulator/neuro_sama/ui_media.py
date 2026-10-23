@@ -8,24 +8,68 @@
 和 ffprobe 一致。不能用顶层 mvhd：剪辑过的 mp4 常出现 mvhd 头部未更新
 （残留原始时长）而只有轨道被截断，二者会严重不符。
 
-**媒体文件为什么在模块包里、而不是前端构建产物里**：后端要读它来决定
+**媒体文件为什么在模块手里、而不是前端构建产物里**：后端要读它来决定
 `intro` 场景的后端脚本什么时候执行——那件事发生在服务端，文件就得在服务端
 手里。前端（neuro 窗口页）通过 `GET /ui/media/{name}` 取同一个文件。
+
+**工作目录是权威**：包内 `neuro_sama/assets/` 只是模板，首次启动时复制到
+`<workdir>/neuro-sama/assets/`（与 `config.json` 同一套做法），之后程序**只**
+从工作目录读——用户换开场视频不用动 site-packages。
 """
 
+import shutil
 import struct
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict, Optional, Tuple
 
 # 探测失败时的回退视频时长（秒）
 FALLBACK_VIDEO_S = 20.0
 
-_video_s: Dict[str, float] = {}
+# 包内模板目录（随 wheel 分发）
+PACKAGE_ASSETS = Path(__file__).parent / "assets"
+
+# 工作目录里的媒体目录（启动时由 deploy_assets 设置；未初始化时回落到包内模板）
+_media_dir: Optional[Path] = None
+
+# 素材名 -> (mtime, 秒数)；换素材（mtime 变）自动失效
+_video_s: Dict[str, Tuple[float, float]] = {}
+
+
+def package_assets_dir() -> Path:
+    """包内模板目录（只读，部署时的来源）。"""
+    return PACKAGE_ASSETS
 
 
 def media_dir() -> Path:
-    """模块持有的媒体目录（包内 `neuro_sama/assets/`）。"""
-    return Path(__file__).parent / "assets"
+    """当前生效的媒体目录（工作目录优先；未部署过时是包内模板）。"""
+    return _media_dir or PACKAGE_ASSETS
+
+
+def set_media_dir(path: Path) -> None:
+    """指定媒体目录（工作目录）；切换后时长缓存作废。"""
+    global _media_dir
+    _media_dir = Path(path)
+    clear_cache()
+
+
+def deploy_assets(data_dir: Path) -> Path:
+    """首次启动：把包内模板复制到工作目录的 `assets/`（缺失才复制）。
+
+    与 `config.json` 的部署同一套逻辑：包内那份是**模板**，工作目录那份才是
+    程序实际读的东西。复制后设置生效目录。
+    """
+    target_dir = Path(data_dir) / "assets"
+    target_dir.mkdir(parents=True, exist_ok=True)
+    for src in PACKAGE_ASSETS.glob("*"):
+        if not src.is_file():
+            continue
+        dst = target_dir / src.name
+        if dst.exists():
+            continue
+        shutil.copyfile(src, dst)
+        print(f"[neuro-sama] 已部署媒体素材: {dst}", flush=True)
+    set_media_dir(target_dir)
+    return target_dir
 
 
 def media_path(name: str) -> Optional[Path]:
@@ -43,17 +87,22 @@ def video_path(src: str) -> Optional[Path]:
 
 
 def video_seconds(src: str) -> Optional[float]:
-    """视频素材时长（秒），按素材名进程内缓存；找不到文件返回 None。"""
+    """视频素材时长（秒）；按 (文件, mtime) 缓存——换素材自动重新探测。"""
     key = (src or "").lstrip("./")
-    if key in _video_s:
-        return _video_s[key]
     path = video_path(key)
     if path is None:
         return None
+    try:
+        mtime = path.stat().st_mtime
+    except OSError:
+        return None
+    cached = _video_s.get(key)
+    if cached is not None and cached[0] == mtime:
+        return cached[1]
     dur = probe_mp4_seconds(path)
     if dur is None or dur <= 0:
         return None
-    _video_s[key] = dur
+    _video_s[key] = (mtime, dur)
     return dur
 
 

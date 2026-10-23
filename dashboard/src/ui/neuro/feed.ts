@@ -16,99 +16,102 @@
  * （不带 channel）则推全部。scene_set/settings 是全局事件，始终下发。
  */
 
-import { apiUrl } from "../engine/base";
+import { apiUrl } from '../engine/base'
 
 export interface FeedEvent {
-  type: string;
-  [key: string]: unknown;
+  type: string
+  [key: string]: unknown
 }
 
 export interface TurnSeg {
-  step?: number;
-  index: number;
-  text: string;
-  duration: number;
-  consumed: number;
-  audio?: string;
-  mime?: string;
+  step?: number
+  index: number
+  text: string
+  duration: number
+  consumed: number
+  audio?: string
+  mime?: string
 }
 
 export interface SceneInfo {
-  id: string;
+  id: string
   /** 场景有效时长（后端可能按视频轨道探测）；`at_end` 靠它换算 */
-  duration: number;
+  duration: number
   /** 已进入场景的秒数（中途连接从这里续播） */
-  elapsed: number;
+  elapsed: number
 }
 
 export interface Snapshot {
-  scene?: SceneInfo;
-  turn?: { id: number; active: boolean; speech: TurnSeg[] };
-  settings?: { caption?: { hide_ms?: number; step_gap_ms?: number } };
+  scene?: SceneInfo
+  turn?: { id: number, active: boolean, speech: TurnSeg[] }
+  settings?: { caption?: { hide_ms?: number, step_gap_ms?: number } }
 }
 
 const EVENT_NAMES = [
-  "snapshot",
-  "scene_set",
-  "start",
-  "speech",
-  "done",
-  "cancelled",
-  "error",
-  "tool_start",
-  "settings",
-];
+  'snapshot',
+  'scene_set',
+  'start',
+  'speech',
+  'done',
+  'cancelled',
+  'error',
+  'tool_start',
+  'settings',
+  'manifest_changed',
+]
 
-type Handler = (ev: FeedEvent) => void;
+type Handler = (ev: FeedEvent) => void
 
 export class NeuroFeed {
-  private es: EventSource;
-  private handlers = new Map<string, Set<Handler>>();
-  onStatus?: (connected: boolean) => void;
+  private es: EventSource
+  private handlers = new Map<string, Set<Handler>>()
+  onStatus?: (connected: boolean) => void
 
-  constructor(url?: string) {
-    this.es = new EventSource(url ?? this.endpoint());
-    this.es.onopen = () => this.onStatus?.(true);
-    this.es.onerror = () => this.onStatus?.(false); // EventSource 原生自动重连
+  constructor (url?: string) {
+    this.es = new EventSource(url ?? this.endpoint())
+    this.es.addEventListener('open', () => this.onStatus?.(true))
+    this.es.onerror = () => this.onStatus?.(false) // EventSource 原生自动重连
     for (const name of EVENT_NAMES) {
       this.es.addEventListener(name, (e: Event) => {
         try {
-          const data = JSON.parse((e as MessageEvent).data) as FeedEvent;
-          this.dispatch(name, data);
-        } catch (err) {
-          console.warn("neuro events 帧解析失败", err);
+          const data = JSON.parse((e as MessageEvent).data) as FeedEvent
+          this.dispatch(name, data)
+        } catch (error) {
+          console.warn('neuro events 帧解析失败', error)
         }
-      });
+      })
     }
   }
 
   /** 页面 URL 可带 ?channel=stream，原样传给事件端点做服务端过滤。 */
-  private endpoint(): string {
-    const channel = new URLSearchParams(window.location.search).get("channel");
+  private endpoint (): string {
+    const channel = new URLSearchParams(window.location.search).get('channel')
     // 事件流是**模块 API**：走模块基址（/manage/neuro_sama/ 或直挂时的 /）
     return apiUrl(
-      channel ? `ui/events?channel=${encodeURIComponent(channel)}` : "ui/events",
-    );
+      channel ? `ui/events?channel=${encodeURIComponent(channel)}` : 'ui/events',
+    )
   }
 
-  on(type: string, fn: Handler): () => void {
-    if (!this.handlers.has(type)) this.handlers.set(type, new Set());
-    this.handlers.get(type)!.add(fn);
-    return () => this.handlers.get(type)?.delete(fn);
+  on (type: string, fn: Handler): () => void {
+    if (!this.handlers.has(type)) {
+      this.handlers.set(type, new Set())
+    }
+    this.handlers.get(type)!.add(fn)
+    return () => this.handlers.get(type)?.delete(fn)
   }
 
-  private dispatch(type: string, ev: FeedEvent): void {
-    ev.type = ev.type || type;
+  private dispatch (type: string, ev: FeedEvent): void {
+    ev.type = ev.type || type
     for (const fn of this.handlers.get(type) ?? []) {
       try {
-        fn(ev);
-      } catch (e) {
-        console.warn(`neuro 事件 ${type} 处理异常`, e);
+        fn(ev)
+      } catch (error) {
+        console.warn(`neuro 事件 ${type} 处理异常`, error)
       }
     }
   }
 
-  close(): void {
-    this.es.close();
+  close (): void {
+    this.es.close()
   }
 }

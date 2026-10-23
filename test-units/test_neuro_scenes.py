@@ -66,8 +66,11 @@ class TestManifestOwnership(unittest.TestCase):
         src = (
             ROOT / "dashboard/src/ui/neuro/scenes.ts"
         ).read_text(encoding="utf-8")
-        self.assertIn('apiUrl("ui/manifest")', src)
-        self.assertNotIn('asset("neuro_scenes.json")', src)
+        # 断言不依赖引号风格（eslint 可能把双引号改成单引号）
+        self.assertIn("ui/manifest", src)
+        self.assertIn("apiUrl", src)
+        # 不再拉静态 json（asset(...) 拼出来的地址）：只问模块要
+        self.assertNotIn("asset(", src)
 
     def test_module_manifest_is_the_full_data(self):
         """模块下发的清单 = 完整数据（渲染器要 default_scene 与 refs）。"""

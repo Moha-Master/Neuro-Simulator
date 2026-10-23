@@ -65,6 +65,14 @@ CREATE TABLE IF NOT EXISTS meta (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
+
+-- scenes：场景清单（整份 JSON 文档，单行 name='scenes'）；
+-- 包内 defaults/neuro_scenes.json 只是播种模板，DB 里的才是权威
+CREATE TABLE IF NOT EXISTS scenes (
+    name       TEXT PRIMARY KEY,
+    content    TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
 """
 
 
@@ -272,6 +280,26 @@ class Storage:
     async def upsert_prompt(self, content: str, name: str = "system") -> None:
         await self.db.execute(
             "INSERT INTO prompts (name, content, updated_at) VALUES (?, ?, ?) "
+            "ON CONFLICT(name) DO UPDATE SET content=excluded.content, "
+            "updated_at=excluded.updated_at",
+            (name, content, _now()),
+        )
+        await self.db.commit()
+
+    # ---------- 场景清单：DB 里的那份才是权威 ----------
+
+    async def get_scene(self, name: str = "scenes") -> Optional[dict]:
+        cur = await self.db.execute(
+            "SELECT name, content, updated_at FROM scenes WHERE name=?", (name,)
+        )
+        row = await cur.fetchone()
+        if row is None:
+            return None
+        return {"name": row[0], "content": row[1], "updated_at": row[2]}
+
+    async def upsert_scene(self, content: str, name: str = "scenes") -> None:
+        await self.db.execute(
+            "INSERT INTO scenes (name, content, updated_at) VALUES (?, ?, ?) "
             "ON CONFLICT(name) DO UPDATE SET content=excluded.content, "
             "updated_at=excluded.updated_at",
             (name, content, _now()),

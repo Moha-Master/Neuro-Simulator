@@ -4,11 +4,11 @@
  * 不受 Vuetify 主题与 reset 影响。dashboard 自己的页面（Stream → View）用
  * iframe 引用同一个地址。
  */
-import { bootstrapStream } from "./main";
+import { bootstrapStream } from './main'
 
-const stage = document.getElementById("stage");
+const stage = document.querySelector<HTMLElement>('#stage')
 if (stage) {
-  void bootstrapStream(stage);
+  void bootstrapStream(stage)
 } else {
-  console.error("找不到 #stage 容器，合成器无法启动");
+  console.error('找不到 #stage 容器，合成器无法启动')
 }

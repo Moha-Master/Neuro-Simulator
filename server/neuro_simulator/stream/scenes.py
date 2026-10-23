@@ -24,6 +24,8 @@ stream 特有的策略：时长只能是数据里写的秒数（合成器不拥�
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+import json
+
 from .. import scene_kit
 from ..scene_kit import SceneError, UnknownScene, resolve_steps  # noqa: F401  (re-export)
 
@@ -33,23 +35,77 @@ def _defaults_path() -> Optional[Path]:
     return p if p.is_file() else None
 
 
-_cache = scene_kit.ManifestCache(_defaults_path, lambda data: _validate(data))
+# 存储（管理器在 scene_kit 里共用，数据各模块各的）：启动时绑定一次，之后
+# **DB 里的那份就是权威**（人工可编辑）；没绑定时退回包内默认（测试/脚本直接用）。
+_store: Optional[scene_kit.SceneStore] = None
+_default_cache: Optional[Dict[str, Any]] = None
 
 
-def clear_cache() -> None:
-    _cache.clear()
+def set_store(store: Optional[scene_kit.SceneStore]) -> None:
+    """绑定 DB 存储（启动时调用一次）。"""
+    global _store
+    _store = store
+
+
+def store() -> Optional[scene_kit.SceneStore]:
+    """已绑定的存储；None = 还没初始化（此时读包内默认）。"""
+    return _store
+
+
+def _default_manifest() -> Dict[str, Any]:
+    """包内默认清单（未绑定 DB 时的兜底；结果缓存）。"""
+    global _default_cache
+    if _default_cache is None:
+        path = _defaults_path()
+        if path is None:
+            raise SceneError("找不到包内默认场景清单")
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except ValueError as e:
+            raise SceneError(f"场景清单 JSON 解析失败: {e}") from e
+        _validate(data)
+        _default_cache = data
+    return _default_cache
 
 
 def manifest() -> Dict[str, Any]:
     """完整场景清单（给画面渲染器：`GET /ui/manifest`）。"""
-    return _cache.load()
+    if _store is not None:
+        return _store.manifest()
+    return _default_manifest()
+
+
+def manifest_source() -> Dict[str, Any]:
+    """元信息：是不是默认值 / 什么时候改的 / 多少字符（给 UI）。"""
+    if _store is not None:
+        return _store.source()
+    return {
+        "is_default": True,
+        "updated_at": "",
+        "chars": len(json.dumps(manifest(), ensure_ascii=False, indent=2)),
+    }
+
+
+async def save_manifest(text: str) -> None:
+    """保存场景清单（校验 → 落库 → 刷新缓存）。"""
+    if _store is None:
+        raise SceneError("场景清单尚未绑定数据库")
+    await _store.save(text)
+
+
+async def reset_manifest() -> None:
+    """恢复包内默认清单。"""
+    if _store is None:
+        raise SceneError("场景清单尚未绑定数据库")
+    await _store.reset()
 
 
 def load_scenes() -> List[Dict[str, Any]]:
-    """场景清单；**数据文件缺失时返回空表**（模块要能照常跑，只是画面/校验降级）。"""
-    if _defaults_path() is None:
+    """场景清单；没有数据时返回空表（模块要能照常跑，只是画面/校验降级）。"""
+    try:
+        return manifest().get("scenes") or []
+    except SceneError:
         return []
-    return _cache.load().get("scenes") or []
 
 
 def find(scene_id: Optional[str]) -> Optional[Dict[str, Any]]:

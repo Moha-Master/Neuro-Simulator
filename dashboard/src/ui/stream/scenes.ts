@@ -11,18 +11,20 @@
  * `starting_soon` / `room_intro` 都是 hidden 内部场景，不出现在 dashboard 清单。
  */
 
-import { apiUrl } from "../engine/base";
-import type { SceneDef, SceneManifest } from "../engine/schema";
+import type { SceneDef, SceneManifest } from '../engine/schema'
+import { apiUrl } from '../engine/base'
 
-export const SCENE_STARTING_SOON = "starting_soon";
+export const SCENE_STARTING_SOON = 'starting_soon'
 /** 开场期间的合成画面（hidden；neuro 全屏，chat/highlight 不参与）。 */
-export const SCENE_ROOM_INTRO = "room_intro";
-export const SCENE_ROOM = "room";
+export const SCENE_ROOM_INTRO = 'room_intro'
+export const SCENE_ROOM = 'room'
 
 /** 拉取场景清单（走模块 API：直挂 / 代理 / dev 三种托管方式都成立）。 */
-export async function fetchScenes(): Promise<SceneDef[]> {
-  const resp = await fetch(apiUrl("ui/manifest"), { cache: "no-store" });
-  if (!resp.ok) throw new Error(`场景清单读取失败: HTTP ${resp.status}`);
-  const data = (await resp.json()) as SceneManifest;
-  return data.scenes ?? [];
+export async function fetchScenes (): Promise<SceneDef[]> {
+  const resp = await fetch(apiUrl('ui/manifest'), { cache: 'no-store' })
+  if (!resp.ok) {
+    throw new Error(`场景清单读取失败: HTTP ${resp.status}`)
+  }
+  const data = (await resp.json()) as SceneManifest
+  return data.scenes ?? []
 }

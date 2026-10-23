@@ -8,25 +8,25 @@
  *   由页面代码直接拿实例调方法，不必走 update。
  */
 
-import type { Box } from "./schema";
+import type { Box } from './schema'
 
 /** 资产寻址：由宿主注入引擎（前端资产在前端，模块媒体在模块）。 */
-export type AssetUrl = (src: string, kind: string) => string;
+export type AssetUrl = (src: string, kind: string) => string
 
 export interface ElementView {
   /** 全量状态快照（element_state 事件 / snapshot.elements） */
-  update?(payload: unknown): void;
+  update?: (payload: unknown) => void
   /** 场景改了本元素的几何 */
-  resize?(box: Box): void;
-  dispose?(): void;
+  resize?: (box: Box) => void
+  dispose?: () => void
 }
 
 /** 组件实例：实现 ElementView 的走通用状态通道；实时管线类（chat/caption/highlight）
  *  只暴露自有方法，由页面代码用 `engine.view<T>(id)` 断言后直接调。 */
-export type ComponentInstance = object;
+export type ComponentInstance = object
 
 export type ComponentFactory = (
   el: HTMLElement,
   props: Record<string, unknown>,
   stage: HTMLElement,
-) => ComponentInstance;
+) => ComponentInstance

@@ -7,10 +7,10 @@
  * - `update(payload)` 是通用元素状态通道；实时管线类组件（字幕）由 main.ts 直接拿实例调方法。
  */
 
-import { CaptionPlayer } from "./speech";
-import type { Box } from "../engine/schema";
-import type { ComponentFactory } from "../engine/types";
+import type { Box } from '../engine/schema'
+import type { ComponentFactory } from '../engine/types'
+import { CaptionPlayer } from './speech'
 
 export const COMPONENTS: Record<string, ComponentFactory> = {
   caption: (el, _props, stage) => new CaptionPlayer(el, stage),
-};
+}

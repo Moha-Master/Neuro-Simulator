@@ -20,6 +20,7 @@ declare module 'vue' {
     PromptEditor: typeof import('./components/persona/PromptEditor.vue')['default']
     RouterLink: typeof import('vue-router')['RouterLink']
     RouterView: typeof import('vue-router')['RouterView']
+    SceneManifestEditor: typeof import('./components/scene/SceneManifestEditor.vue')['default']
     ShortTermMemoryPanel: typeof import('./components/ShortTermMemoryPanel.vue')['default']
     TagInput: typeof import('./components/tags/TagInput.vue')['default']
     ThinkingBlock: typeof import('./components/chat/ThinkingBlock.vue')['default']

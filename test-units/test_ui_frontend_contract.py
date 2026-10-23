@@ -53,8 +53,9 @@ def _components_of(manifest: dict) -> set[str]:
 
 def _registered(ui_dir: Path) -> set[str]:
     """从组件注册表里认出已注册的组件名。"""
-    src = (ui_dir / "components.ts").read_text(encoding="utf-8")
-    block = re.search(r"COMPONENTS[^=]*=\s*\{(.*?)\n\};", src, re.S)
+    # 归一化引号：断言看的是"注册了哪些组件"，不是引号风格
+    src = (ui_dir / "components.ts").read_text(encoding="utf-8").replace("'", '"')
+    block = re.search(r"COMPONENTS[^=]*=\s*\{(.*?)\n\};?", src, re.S)
     if not block:
         return set()
     return set(re.findall(r'"?([A-Za-z][A-Za-z.]*)"?\s*:', block.group(1)))
@@ -73,7 +74,8 @@ class TestSingleFrontend(unittest.TestCase):
 
     def test_engine_is_shared_and_page_agnostic(self):
         self.assertTrue(ENGINE.is_file(), ENGINE)
-        src = ENGINE.read_text(encoding="utf-8")
+        # 归一化引号：断言看的是"依赖了谁"，不是引号风格
+        src = ENGINE.read_text(encoding="utf-8").replace("'", '"')
         for forbidden in ("./components", "./assets", "./chat", "./chess", "./wordle", "./speech"):
             self.assertNotIn(
                 f'from "{forbidden}"', src, f"引擎不该直接依赖页面私有模块: {forbidden}"
