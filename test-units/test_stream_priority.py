@@ -193,7 +193,7 @@ class TestPriorityQueue(unittest.IsolatedAsyncioTestCase):
         events = []
         while not q.empty():
             events.append(q.get_nowait())
-        # 字幕/音频/工具动作由 neuro iframe 自己订阅 /ui/events，stream 不再镜像。
+        # 字幕/音频/工具动作由 neuro 窗口页自己订阅 /chat/events，stream 不再镜像。
         self.assertFalse(any(e["type"] in ("tool_start", "tool_result") for e in events))
         self.assertFalse(any(e["type"] == "speech" for e in events))
         self.assertFalse(any(e["type"] in ("turn_begin", "turn_end") for e in events))
@@ -241,7 +241,7 @@ class TestPriorityQueue(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(all(ms == 0 for ms in sleeps), sleeps)
 
     async def test_no_turn_or_speech_events_are_emitted(self):
-        """speech/turn 事件已移出 stream：neuro 窗口直接从 neuro /ui/events 消费。"""
+        """speech/turn 事件已移出 stream：neuro 窗口页直接订阅 neuro 的 /chat/events。"""
         await self.storage.append_message(self.queue_row, "viewer", "do a trick")
         q = self.bus.subscribe()
         fake = _FakeNeuroClient("http://fake")

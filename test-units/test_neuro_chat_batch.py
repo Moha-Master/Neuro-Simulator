@@ -1,7 +1,7 @@
 """`/chat` 内容平面：产出侧记账、批量响应（terminal/segments）与 audio 裁剪。
 
-这里刻意不走 HTTP：`_collect_batch` 只消费 agent 的事件流，因此测试能同时证明
-"没人读 `/chat` 时 UiState 仍然完整"（E-1 的回归点）。
+这里刻意不走 HTTP：`TurnRunner` 是后台生成单元，因此测试能同时证明
+"没人读 `/chat` 时 UiState 仍然完整"（E-1 的回归点）与"交付路径只做序列化"。
 """
 
 import asyncio
@@ -11,10 +11,12 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+from neuro_simulator.broadcaster import EventBroadcaster
 from neuro_simulator.neuro_sama import tts
 from neuro_simulator.neuro_sama.agent import NeuroAgent
-from neuro_simulator.neuro_sama.server import _collect_batch
+from neuro_simulator.neuro_sama.server import _batch_payload
 from neuro_simulator.neuro_sama.storage import Storage
+from neuro_simulator.neuro_sama.turns import TurnRunner
 from neuro_simulator.neuro_sama.ui_state import UiState, strip_speech_audio
 
 
@@ -110,7 +112,7 @@ class TestAudioPayload(unittest.IsolatedAsyncioTestCase):
         seg = st.batch("stream", "conv", tid, "done", audio=True)["segments"][0]
         self.assertEqual(seg["audio"], "YQ==")
         self.assertEqual(seg["duration"], 2.31)
-        # 快照（/ui/events 断点续播）仍必须有音频
+        # 内容总线的 snapshot（/chat/events 断点续播）仍必须有音频
         self.assertIn("audio", str(st.snapshot("stream")["turn"]))
 
     def test_audio_false_removes_the_key_but_not_the_stored_audio(self):
@@ -182,6 +184,9 @@ class _AgentHarness(unittest.IsolatedAsyncioTestCase):
         self.agent = NeuroAgent(
             client, registry, self.storage, memory, persona, event_sink=self.ui_state.observe
         )
+        self.runner = TurnRunner(
+            self.agent, self.ui_state, memory, EventBroadcaster()
+        )
         self._patchers = [
             patch("neuro_simulator.neuro_sama.agent.get_config", return_value=cfg),
             patch("neuro_simulator.neuro_sama.agent.tts.tts_enabled", return_value=False),
@@ -195,18 +200,24 @@ class _AgentHarness(unittest.IsolatedAsyncioTestCase):
         await self.storage.close()
         self.tmp.cleanup()
 
-    async def _run(self, cancel_event=None) -> dict:
-        tid = self.ui_state.new_turn("stream")
-        payload = await _collect_batch(
-            self.ui_state,
-            self.agent.run("stream", "conv", "hi", cancel_event=cancel_event, turn_id=tid),
-            channel="stream",
-            conversation_id="conv",
-            turn_id=tid,
-            audio=False,
-        )
-        self._tid = tid
-        return payload
+    async def _run(self, cancel_event=None, cancel_on_content=False) -> dict:
+        turn = self.runner.register("stream", "conv")
+        if cancel_event is not None:
+            turn.cancel_event = cancel_event
+        if cancel_on_content:
+            observe = self.ui_state.observe
+
+            def sink(ev, channel, turn_id):
+                observe(ev, channel, turn_id)
+                # 模拟 `/manage/chats/.../stop`：正文刚产出就置位取消
+                if ev.get("type") == "content":
+                    turn.cancel_event.set()
+
+            self.agent.event_sink = sink
+        self.runner.spawn(turn, "hi")
+        await asyncio.wait_for(turn.done_event.wait(), 5.0)
+        self._tid = turn.turn_id
+        return _batch_payload(turn, audio=False)
 
     async def test_terminal_done(self):
         payload = await self._run()
@@ -244,17 +255,7 @@ class _AgentHarness(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("audio", seg)
 
     async def test_terminal_cancelled_persists_partial_and_returns_text(self):
-        cancel_event = asyncio.Event()
-        observe = self.ui_state.observe
-
-        def sink(ev, channel, turn_id):
-            observe(ev, channel, turn_id)
-            # 模拟 `/manage/chats/.../stop`：正文刚产出就置位取消
-            if ev.get("type") == "content":
-                cancel_event.set()
-
-        self.agent.event_sink = sink
-        payload = await self._run(cancel_event)
+        payload = await self._run(cancel_on_content=True)
         self.assertEqual(payload["terminal"], "cancelled")
         self.assertEqual(payload["text"], "half")
 
@@ -264,27 +265,30 @@ class _AgentHarness(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(assistant[-1]["content"], "half", "半截内容必须落库")
         self.assertFalse(self.ui_state.turn_projection("stream")["generating"])
 
-    async def test_cancelled_via_collect_batch(self):
-        # 走真实 `_collect_batch` 的取消轮：事件流以 cancelled 终结
+    async def test_cancelled_before_start(self):
+        # 请求刚发出就被 /stop 打断：agent 以 cancelled 终结
         cancel_event = asyncio.Event()
-        cancel_event.set()  # 请求刚发出就被 /stop 打断
+        cancel_event.set()
         payload = await self._run(cancel_event=cancel_event)
         self.assertEqual(payload["terminal"], "cancelled")
 
 
-class TestCollectBatchTerminalFallback(unittest.IsolatedAsyncioTestCase):
+class TestRunnerTerminalFallback(unittest.IsolatedAsyncioTestCase):
     async def test_missing_terminal_maps_to_error(self):
-        st = UiState()
-        tid = st.new_turn("stream")
+        class _OrphanAgent(NeuroAgent):
+            def __init__(self):
+                super().__init__(None, None, None, None, None)
 
-        async def events():
-            yield {"type": "content", "step": 1, "delta": "orphan"}
+            async def _run(self, channel, conversation_id, user_text, cancel_event=None):
+                yield {"type": "content", "step": 1, "delta": "orphan"}
 
-        payload = await _collect_batch(
-            st, events(), channel="stream", conversation_id="conv", turn_id=tid
-        )
-        self.assertEqual(payload["terminal"], "error")
-        self.assertTrue(payload["message"])
+        ui = UiState()
+        runner = TurnRunner(_OrphanAgent(), ui, None, EventBroadcaster())
+        turn = runner.register("stream", "conv")
+        runner.spawn(turn, "hi")
+        await asyncio.wait_for(turn.done_event.wait(), 2.0)
+        self.assertEqual(turn.result["terminal"], "error")
+        self.assertTrue(turn.result["message"])
 
 
 if __name__ == "__main__":

@@ -155,10 +155,42 @@ class NeuroClient:
         except (httpx.HTTPError, ValueError, AttributeError) as e:
             raise NeuroError(f"neuro 开场启动失败: {type(e).__name__}: {e}") from e
 
+    async def state_events(
+        self, want: Optional[list[str]] = None, drop: Optional[list[str]] = None
+    ) -> AsyncIterator[dict]:
+        """订阅 neuro 的状态总线（`GET /state/events`）。
+
+        只是一层 SSE 解析：断线/非 200 抛 NeuroError，由调用方决定是否退回轮询
+        （幂等对账是轮询的强项，订阅只是省掉"没有变化时的空转"）。
+        """
+        params: dict[str, str] = {}
+        if want:
+            params["want"] = ",".join(want)
+        if drop:
+            params["drop"] = ",".join(drop)
+        timeout = httpx.Timeout(5.0, read=None)
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            try:
+                async with client.stream(
+                    "GET", f"{self.base_url}/state/events", params=params
+                ) as resp:
+                    if resp.status_code != 200:
+                        body = (await resp.aread()).decode("utf-8", errors="replace")
+                        raise NeuroError(
+                            f"neuro /state/events HTTP {resp.status_code}: {body[:300]}"
+                        )
+                    async for ev in _parse_sse(resp.aiter_lines()):
+                        yield ev
+            except httpx.HTTPError as e:
+                raise NeuroError(
+                    f"neuro /state/events 失败: {type(e).__name__}: {e}"
+                ) from e
+
     async def status(self, channel: Optional[str] = None) -> dict:
         """拉 neuro 的状态投影（权威场景 + 语音节奏 + 在途轮次）。失败抛 NeuroError。
 
-        轻量端点（不含音频），适合每半秒一次的轮询；画面续播才用 `/ui/state`。
+        轻量端点（不含音频），适合每半秒一次的轮询；中途连接续播走
+        `/chat/events` 的首帧 snapshot（带 `consumed` 与正在发声句的音频）。
         """
         params = {"channel": channel} if channel else None
         try:

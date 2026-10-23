@@ -54,6 +54,10 @@ export interface IntroGate {
   waited_s: number
   remaining_s: number
   status_error?: string | null
+  /** 实际放行路径（E-4：订阅优先、轮询兜底） */
+  ready_via?: 'sse' | 'poll' | 'none' | null
+  /** 订阅路径收到的状态帧数（排查"订阅活着但不推"） */
+  updates?: number
 }
 
 /** 异常终止开播的原因（下次成功开播时服务端清空）。 */
@@ -207,12 +211,27 @@ export interface TtsStatus {
   degraded: boolean
 }
 
+/** 字幕参数（`UiState.settings()` 的 caption 部分；配置的唯一读取点）。 */
+export interface CaptionStatus {
+  hide_ms: number
+  step_gap_ms: number
+}
+
+/** 场景清单元信息（复用 `SceneStore.source()`，与 `/ui/manifest/source` 同一函数）。 */
+export interface ManifestStatus {
+  is_default: boolean
+  updated_at: string
+  chars: number
+}
+
 export interface NeuroSections {
   scene: Section<NeuroSceneStatus>
   turn: Section<TurnStatus>
   layers: Section<LayerStatus[]>
   model: Section<ModelStatus>
   tts: Section<TtsStatus>
+  caption: Section<CaptionStatus>
+  manifest: Section<ManifestStatus>
 }
 
 export type NeuroStatus = StatusEnvelope<NeuroSections>

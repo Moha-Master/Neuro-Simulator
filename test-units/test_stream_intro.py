@@ -71,6 +71,62 @@ class _ScriptedNeuro:
         return None
 
 
+class _SubscribedNeuro(_ScriptedNeuro):
+    """有 `/state/events` 的替身：按帧剧本推状态（订阅路径用）。"""
+
+    def __init__(self, frames: list, *, status_scenes: list | None = None) -> None:
+        super().__init__(status_scenes or [])
+        self.frames = list(frames)
+        self.subscriptions = 0
+
+    async def state_events(self, want=None, drop=None):
+        self.subscriptions += 1
+        for frame in self.frames:
+            await asyncio.sleep(0.01)
+            yield frame
+
+    async def status(self, channel=None) -> dict:
+        raise AssertionError("订阅路径可用时不该轮询 /status")
+
+
+class _BrokenSubscription(_ScriptedNeuro):
+    """订阅一建立就失败（旧 neuro / 代理不支持）→ 必须退回轮询。"""
+
+    def __init__(self, scenes: list) -> None:
+        super().__init__(scenes)
+        self.subscriptions = 0
+
+    async def state_events(self, want=None, drop=None):
+        self.subscriptions += 1
+        raise NeuroError("state bus unavailable")
+        yield {}  # pragma: no cover - 让函数成为 async generator
+
+
+class _SilentSubscription(_ScriptedNeuro):
+    """订阅活着但一直没有推送（长开场本来就没有离散变化）→ fallback 兜底。"""
+
+    def __init__(self, scenes: list) -> None:
+        super().__init__(scenes)
+        self.subscriptions = 0
+
+    async def state_events(self, want=None, drop=None):
+        self.subscriptions += 1
+        await asyncio.sleep(10)
+        yield {}  # pragma: no cover
+
+
+class _IntroThenSilent(_ScriptedNeuro):
+    """订阅报了开场场景后就不再有变化（脚本坏了），硬上限不能被 fallback 拖长。"""
+
+    async def state_events(self, want=None, drop=None):
+        yield {"type": "snapshot", **_scene_frame("intro")}
+        await asyncio.sleep(10)
+
+
+def _scene_frame(scene_id: str | None) -> dict:
+    return {"sections": {"scene": {"current": {"id": scene_id} if scene_id else None}}}
+
+
 class _NoopChatbot:
     def start_session(self, *args, **kwargs) -> None:
         pass
@@ -185,10 +241,12 @@ class TestIntroGate(unittest.IsolatedAsyncioTestCase):
             out.append(self.q.get_nowait())
         return out
 
-    async def run_main(self, fake, timeout=2.0, ready_timeout=None):
+    async def run_main(self, fake, timeout=2.0, ready_timeout=None, fallback=None):
         patchers = [_patch_client(fake)]
         if ready_timeout is not None:
             patchers.append(patch.object(loop_module, "START_READY_TIMEOUT_S", ready_timeout))
+        if fallback is not None:
+            patchers.append(patch.object(loop_module, "INTRO_FALLBACK_S", fallback))
         for p in patchers:
             p.start()
         try:
@@ -212,6 +270,55 @@ class TestIntroGate(unittest.IsolatedAsyncioTestCase):
         await self.run_main(fake)
         self.assertTrue(self.loop._reached_live)
         self.assertIsNone(self.loop.last_error)
+
+    async def test_subscription_path_releases_on_scene_change(self):
+        """主路径：订阅状态总线，她离开开场场景的那一帧就放行。"""
+        fake = _SubscribedNeuro([
+            {"type": "snapshot", **_scene_frame("intro")},
+            {"type": "state", "rev": 1, **_scene_frame("normal")},
+        ])
+        gate = self.loop._intro_gate
+        await self.run_main(fake)
+        self.assertTrue(self.loop._reached_live)
+        self.assertEqual(fake.subscriptions, 1)
+        self.assertEqual(gate["ready_via"], "sse")
+        self.assertIsNone(self.loop.last_error)
+
+    async def test_subscription_none_current_also_releases(self):
+        """`current` 为 null（neuro 刚重启/场景缺失）与轮询路径同样算放行。"""
+        fake = _SubscribedNeuro([
+            {"type": "snapshot", **_scene_frame(None)},
+        ])
+        await self.run_main(fake)
+        self.assertTrue(self.loop._reached_live)
+
+    async def test_broken_subscription_falls_back_to_polling(self):
+        """订阅建立失败 → 退回 0.5s 轮询，判据不变。"""
+        fake = _BrokenSubscription(["intro", "normal"])
+        gate = self.loop._intro_gate
+        await self.run_main(fake, ready_timeout=2.0)
+        self.assertTrue(self.loop._reached_live)
+        self.assertEqual(fake.subscriptions, 1)
+        self.assertEqual(gate["ready_via"], "poll")
+        self.assertEqual(fake.calls, 2)
+
+    async def test_silent_subscription_falls_back_after_the_window(self):
+        """订阅一直没消息（长开场没有中间变化）→ INTRO_FALLBACK_S 后走轮询。"""
+        fake = _SilentSubscription(["intro", "normal"])
+        gate = self.loop._intro_gate
+        await self.run_main(fake, ready_timeout=2.0, fallback=0.05)
+        self.assertTrue(self.loop._reached_live)
+        self.assertEqual(gate["ready_via"], "poll")
+
+    async def test_hard_deadline_is_not_extended_by_the_fallback_window(self):
+        """订阅报完 intro 就没声了：到硬上限立刻中止，不能先睡满 3s 兜底窗口。"""
+        fake = _IntroThenSilent(["intro"])
+        started = time.monotonic()
+        await self.run_main(fake, ready_timeout=0.12)
+        elapsed = time.monotonic() - started
+        self.assertFalse(self.loop._reached_live)
+        self.assertEqual(self.loop.last_error["code"], "intro_timeout")
+        self.assertLess(elapsed, 1.0, "硬上限优先于 fallback 窗口")
 
     async def test_stalled_intro_aborts_start(self):
         """她一直停在开场场景（脚本坏了/进程假死）→ 到硬上限中止开播，不硬转 live。"""

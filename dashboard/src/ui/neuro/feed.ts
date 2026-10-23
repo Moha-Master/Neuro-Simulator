@@ -1,21 +1,16 @@
-/** neuro 窗口事件通道（SSE，只读）。
+/** neuro 窗口的两条只读连接（SSE，各一条语义，生命周期对称）。
  *
- * 与 stream 的 `/ui/events` 分开：neuro 只关心自己作为"一个窗口"需要的内容——
- * 场景、立绘动作、字幕/音频。chat / 游戏 / 合成属于 stream。
+ * | 平面 | 地址 | 用途 |
+ * |---|---|---|
+ * | 内容 | `/chat/events?channel=<ch>&audio=1&drop=reasoning,content` | 字幕逐句推进、音频、`tool_start` 立绘动作、跨轮清空、首帧 snapshot 续播 |
+ * | 状态 | `/state/events?want=scene,caption,layers,manifest` | 场景（含 `elapsed` 恢复时间线）、字幕设置、层显隐基线、清单变更 |
  *
- * 事件：
- *   snapshot{scene?, turn?, settings?}
- *   scene_set{id, duration, elapsed}        ← 权威场景状态（后端脚本或手动切换）
- *   start{turn_id, channel, conversation_id, model}
- *   speech{turn_id, step, index, text, audio, mime, duration}
- *   done / cancelled / error{turn_id, ...}
- *   tool_start{turn_id, name, arguments}
- *   settings{caption{hide_ms, step_gap_ms}}
- *
- * `?channel=stream` 时服务端只推该 channel 的 turn/speech/tool；独立打开
- * （不带 channel）则推全部。scene_set/settings 是全局事件，始终下发。
+ * 内容事件永远是全量（音频不裁），`drop` 只影响这条连接收到的类型；状态事件
+ * 只推"离散变化"（`elapsed`/`remaining_s` 这类时间流逝不推，前端自己推演）。
+ * 两条连接都靠 EventSource 原生重连，`close()` 一起关。
  */
 
+import type { NeuroSections, Section } from '../../types/status'
 import { apiUrl } from '../engine/base'
 
 export interface FeedEvent {
@@ -33,6 +28,13 @@ export interface TurnSeg {
   mime?: string
 }
 
+/** 内容订阅的首帧（场景/字幕设置已移到状态平面，这里不再出现）。 */
+export interface ContentSnapshot {
+  type: string
+  channel: string | null
+  turn: { id: number, active: boolean, speech: TurnSeg[] } | null
+}
+
 export interface SceneInfo {
   id: string
   /** 场景有效时长（后端可能按视频轨道探测）；`at_end` 靠它换算 */
@@ -41,68 +43,114 @@ export interface SceneInfo {
   elapsed: number
 }
 
-export interface Snapshot {
-  scene?: SceneInfo
-  turn?: { id: number, active: boolean, speech: TurnSeg[] }
-  settings?: { caption?: { hide_ms?: number, step_gap_ms?: number } }
+/** 状态订阅的一帧：`sections` 只含这一帧变化的分区（首帧是完整信封）。 */
+export interface StateFrame {
+  rev: number
+  ts: string
+  sections: Partial<NeuroSections>
 }
 
-const EVENT_NAMES = [
+export interface StateSnapshot extends StateFrame {
+  module: string
+}
+
+export type SectionOf<K extends keyof NeuroSections> = NeuroSections[K] extends Section<infer T>
+  ? T
+  : never
+
+const CONTENT_EVENT_NAMES = [
   'snapshot',
-  'scene_set',
   'start',
+  'reasoning',
+  'content',
   'speech',
+  'tool_start',
+  'tool_result',
+  'usage',
   'done',
   'cancelled',
   'error',
-  'tool_start',
-  'settings',
-  'manifest_changed',
+]
+
+const STATE_EVENT_NAMES = [
+  'snapshot',
+  'state',
 ]
 
 type Handler = (ev: FeedEvent) => void
 
 export class NeuroFeed {
-  private es: EventSource
-  private handlers = new Map<string, Set<Handler>>()
-  onStatus?: (connected: boolean) => void
+  private contentEs: EventSource
+  private stateEs: EventSource
+  private contentHandlers = new Map<string, Set<Handler>>()
+  private stateHandlers = new Map<string, Set<Handler>>()
+  onStatus?: (plane: 'content' | 'state', connected: boolean) => void
 
-  constructor (url?: string) {
-    this.es = new EventSource(url ?? this.endpoint())
-    this.es.addEventListener('open', () => this.onStatus?.(true))
-    this.es.onerror = () => this.onStatus?.(false) // EventSource 原生自动重连
-    for (const name of EVENT_NAMES) {
-      this.es.addEventListener(name, (e: Event) => {
+  constructor () {
+    this.contentEs = new EventSource(this.contentEndpoint())
+    this.stateEs = new EventSource(this.stateEndpoint())
+
+    this.contentEs.addEventListener('open', () => this.onStatus?.('content', true))
+    this.contentEs.onerror = () => this.onStatus?.('content', false) // 原生自动重连
+    this.stateEs.addEventListener('open', () => this.onStatus?.('state', true))
+    this.stateEs.onerror = () => this.onStatus?.('state', false)
+
+    this.listen(this.contentEs, this.contentHandlers, CONTENT_EVENT_NAMES, '内容')
+    this.listen(this.stateEs, this.stateHandlers, STATE_EVENT_NAMES, '状态')
+  }
+
+  /** 页面 URL 可带 ?channel=stream；内容连接按它做服务端过滤，状态连接不过滤。 */
+  private contentEndpoint (): string {
+    const channel = new URLSearchParams(window.location.search).get('channel')
+    const query = ['audio=1', 'drop=reasoning,content']
+    if (channel) {
+      query.unshift(`channel=${encodeURIComponent(channel)}`)
+    }
+    // 事件流是**模块 API**：走模块基址（/manage/neuro_sama/ 或直挂时的 /）
+    return apiUrl(`chat/events?${query.join('&')}`)
+  }
+
+  private stateEndpoint (): string {
+    return apiUrl('state/events?want=scene,caption,layers,manifest')
+  }
+
+  private listen (
+    source: EventSource,
+    handlers: Map<string, Set<Handler>>,
+    names: string[],
+    plane: string,
+  ): void {
+    for (const name of names) {
+      source.addEventListener(name, (e: Event) => {
         try {
           const data = JSON.parse((e as MessageEvent).data) as FeedEvent
-          this.dispatch(name, data)
+          this.dispatch(name, data, handlers)
         } catch (error) {
-          console.warn('neuro events 帧解析失败', error)
+          console.warn(`neuro ${plane}事件帧解析失败`, error)
         }
       })
     }
   }
 
-  /** 页面 URL 可带 ?channel=stream，原样传给事件端点做服务端过滤。 */
-  private endpoint (): string {
-    const channel = new URLSearchParams(window.location.search).get('channel')
-    // 事件流是**模块 API**：走模块基址（/manage/neuro_sama/ 或直挂时的 /）
-    return apiUrl(
-      channel ? `ui/events?channel=${encodeURIComponent(channel)}` : 'ui/events',
-    )
+  onContent (type: string, fn: Handler): () => void {
+    return this.register(this.contentHandlers, type, fn)
   }
 
-  on (type: string, fn: Handler): () => void {
-    if (!this.handlers.has(type)) {
-      this.handlers.set(type, new Set())
+  onState (type: string, fn: Handler): () => void {
+    return this.register(this.stateHandlers, type, fn)
+  }
+
+  private register (handlers: Map<string, Set<Handler>>, type: string, fn: Handler): () => void {
+    if (!handlers.has(type)) {
+      handlers.set(type, new Set())
     }
-    this.handlers.get(type)!.add(fn)
-    return () => this.handlers.get(type)?.delete(fn)
+    handlers.get(type)!.add(fn)
+    return () => handlers.get(type)?.delete(fn)
   }
 
-  private dispatch (type: string, ev: FeedEvent): void {
+  private dispatch (type: string, ev: FeedEvent, handlers: Map<string, Set<Handler>>): void {
     ev.type = ev.type || type
-    for (const fn of this.handlers.get(type) ?? []) {
+    for (const fn of handlers.get(type) ?? []) {
       try {
         fn(ev)
       } catch (error) {
@@ -112,6 +160,7 @@ export class NeuroFeed {
   }
 
   close (): void {
-    this.es.close()
+    this.contentEs.close()
+    this.stateEs.close()
   }
 }

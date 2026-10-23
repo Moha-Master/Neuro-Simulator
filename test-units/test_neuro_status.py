@@ -49,7 +49,8 @@ class TestNeuroStatusShape(unittest.TestCase):
         self.assertEqual(set(body), {"module", "rev", "ts", "sections"})
         self.assertEqual(body["module"], "neuro_sama")
         self.assertEqual(
-            set(body["sections"]), {"scene", "turn", "layers", "model", "tts"}
+            set(body["sections"]),
+            {"scene", "turn", "layers", "model", "tts", "caption", "manifest"},
         )
         for name, section in body["sections"].items():
             self.assertIn("current", section, name)
@@ -124,7 +125,9 @@ class TestNeuroStatusShape(unittest.TestCase):
         only = client.get("/status?want=turn,scene").json()["sections"]
         self.assertEqual(set(only), {"turn", "scene"})
         dropped = client.get("/status?drop=layers,tts,model").json()["sections"]
-        self.assertEqual(set(dropped), {"scene", "turn"})
+        self.assertEqual(
+            set(dropped), {"scene", "turn", "caption", "manifest"}
+        )
         self.assertEqual(client.get("/status?drop=*").json()["sections"], {})
 
     def test_provider_exception_keeps_endpoint_200(self):

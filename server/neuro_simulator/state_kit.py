@@ -16,7 +16,8 @@
 - **provider 抛异常不拖垮模块**：该分区降级成 `{"current": None, "error": ...}`，
   画面/循环照常跑；与"场景数据坏了不拖垮窗口"的既有纪律一致。
 - **rev 供消费者做 gap 检测**：归属者改东西时 `note_change()` 喊一声就 +1
-  （粗粒度，允许"喊了就加"）。
+  （粗粒度，允许"喊了就加"）。`note_change` 同时把"哪些分区变了"报给可选的
+  listener（`GET /state/events` 的推送源）；listener 同步、不得 await。
 - **want/drop 是分区级过滤**：先取 want 再减 drop，`*` = 全部；过滤只影响输出，
   不是业务分支。本轮不做深层路径过滤。
 """
@@ -41,6 +42,10 @@ class StateBoard:
         # dict 保序：输出顺序 = 注册顺序，方便人工对比两份 /status
         self._providers: Dict[str, Callable[[], dict]] = {}
         self._graphs: Dict[str, dict] = {}
+        # 状态推送的接线点：note_change 发生时把 (rev, 分区名) 交给它。
+        # listener 由 server 在启动时注册（组装 EventBroadcaster），机制层不知道
+        # 推送怎么发；没注册时 note_change 只加 rev（单测/脚本直接用的情形）。
+        self._listener: Optional[Callable[[int, tuple], None]] = None
 
     # ---------- 注册 ----------
 
@@ -71,13 +76,23 @@ class StateBoard:
 
     # ---------- 变更通知 ----------
 
+    def set_listener(self, listener: Optional[Callable[[int, tuple], None]]) -> None:
+        """注册变更监听（每个 board 至多一个：一个模块一条状态总线）。"""
+        self._listener = listener
+
+    def section_names(self) -> tuple:
+        """已注册的分区名（注册顺序）。"""
+        return tuple(self._providers)
+
     def note_change(self, *names: str) -> None:
         """归属者改了状态：rev +1（粗粒度，不按分区分别计数）。
 
-        `names` 只作为"哪些分区受影响"的注释；实现上不按名字过滤——消费者
-        用 rev 做 gap 检测，缺一次变化比多一次可怕。
+        `names` 既作为"哪些分区受影响"的注释，也告诉推送层这一帧该带哪些分区；
+        不传名字 = 让推送层带上全部分区（宁多勿缺）。
         """
         self._rev += 1
+        if self._listener is not None:
+            self._listener(self._rev, tuple(n for n in names if n in self._providers))
 
     # ---------- 读 ----------
 

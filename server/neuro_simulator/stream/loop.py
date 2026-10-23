@@ -14,15 +14,19 @@ chat_message / priority_message 给画面。空队列行为可配（占位消息
 对外广播（EventBroadcaster → /ui/events）：session_begin / session_end / state /
 scene_set / element_state（游戏等元素的全量状态）/ chat_message / priority_message /
 stream_metadata / settings。**speech/tool/turn 事件不再走 stream 画面**——neuro
-窗口（合成器里的 iframe）直接订阅 neuro 自己的 /ui/events 播放字幕/音频/动作。
+窗口（合成器里的 iframe）直接订阅 neuro 自己的 `/chat/events`（内容平面）与
+`/state/events`（场景/字幕设置）。
 
 开播：先探测 neuro 健康，再 POST neuro /ui/intro 触发开场（拿她切到的**场景 id**，
 不拿时长）；合成器落到 room_intro（只有 neuro 全屏，不叠 chat/highlight），随后
-每 0.5s 轮询 GET neuro /status 的 `sections.scene.current.id`——**她离开那个场景 =
-开场放完** → 切 room 并推进 starting→live。stream 侧不存在任何秒数倒计时：换素材、调 after 余量、neuro 改了
-场景 id 都不需要同步改这里。到硬上限（START_READY_TIMEOUT_S）仍未放行则中止本次
-开播（落库 ended + session_end{reason:"intro_timeout"} + status.last_error），
-不硬转 live。neuro 不可达时禁止开播；中途 neuro 掉线由合成器显示 no_source 背景
+**订阅** `GET neuro /state/events?want=scene` 等 `sections.scene.current.id` 离开
+开场场景——**她离开那个场景 = 开场放完** → 切 room 并推进 starting→live。
+订阅在 `INTRO_FALLBACK_S` 内没有任何消息（或建立失败）时退回 0.5s 轮询
+`GET neuro /status`（幂等对账），两条路径共用同一判据与同一硬上限。stream 侧
+不存在任何秒数倒计时：换素材、调 after 余量、neuro 改了场景 id 都不需要同步改这里。
+到硬上限（START_READY_TIMEOUT_S）仍未放行则中止本次开播（落库 ended +
+session_end{reason:"intro_timeout"} + status.last_error），不硬转 live。
+neuro 不可达时禁止开播；中途 neuro 掉线由合成器显示 no_source 背景
 （画面侧健康轮询）。
 """
 
@@ -66,12 +70,17 @@ _SESSION_STATE = {
 
 # 开播时"开场是否放完"的判定参数。
 #
-# 正常判定靠**轮询 neuro 的权威场景**（她离开开场场景 = 开场放完）；下面的硬上限只是
-# 纯兜底：她永远停在开场场景（state_script 数据坏、进程假死）、或状态通道一直读不到时
-# 才会走到这里，到点**中止本次开播**——而不是硬转 live（那等于开播一个画面卡在开场的
-# 直播）。硬上限与 neuro 的场景时长无关，所以 stream 侧不存在任何秒数。
+# 主路径是**订阅** neuro 的状态总线（她离开开场场景是一次离散状态变化，正适合
+# 推送）；订阅建立失败或 `INTRO_FALLBACK_S` 内没有任何消息（长开场本来就没有
+# 中间变化）就退回 0.5s 轮询 `/status`——幂等对账是订阅的天然短板，两条路共用
+# 同一判据。下面的硬上限只是纯兜底：她永远停在开场场景（state_script 数据坏、
+# 进程假死）才会走到这里，到点**中止本次开播**——而不是硬转 live（那等于开播一个
+# 画面卡在开场的直播）。硬上限与 neuro 的场景时长无关，所以 stream 侧不存在任何秒数。
 START_READY_TIMEOUT_S = 120.0
 READY_POLL_INTERVAL_S = 0.5
+# 订阅建立后多久没有消息就认为"推不动了"（长开场期间状态总线本来就不发帧：
+# 它只推离散变化，不推 elapsed 这种时间流逝）
+INTRO_FALLBACK_S = 3.0
 
 # 单轮/等语音的硬上限（模块常量，不进 config）：改成"问 neuro 状态"之后，
 # neuro 重启、丢状态、返回一个荒唐的 ends_at 都可能让循环永久挂起，必须靠超时兜底。
@@ -105,6 +114,28 @@ def _neuro_turn(status: Any) -> dict:
         return {}
     current = turn.get("current")
     return current if isinstance(current, dict) else {}
+
+
+# 状态总线的帧可能只含变化的分区：没有 scene 分区 ≠ 场景为空
+_NO_SCENE = object()
+
+
+def _scene_from_state_event(event: Any) -> Any:
+    """从 `/state/events` 的一帧里取当前场景 id。
+
+    返回 `_NO_SCENE` 表示"这帧没带 scene 分区"（例如 turn 变化），调用方应忽略；
+    返回 `""` 表示 scene 分区存在但 current 为 null（neuro 刚重启/场景数据缺失，
+    与轮询路径的"空场景算放行"同一语义）。
+    """
+    if not isinstance(event, dict):
+        return _NO_SCENE
+    sections = event.get("sections")
+    if not isinstance(sections, dict) or "scene" not in sections:
+        return _NO_SCENE
+    section = sections.get("scene")
+    current = section.get("current") if isinstance(section, dict) else None
+    return str((current or {}).get("id") or "")
+
 
 
 class StreamLoop:
@@ -595,63 +626,167 @@ class StreamLoop:
         判据是 neuro 的**权威场景状态**，不是本地倒计时：她换素材、调 `after` 余量、
         开场期间被人工切走场景，这里都自动跟上，stream 侧不存在任何秒数。
 
+        主路径：订阅 `/state/events?want=scene`（状态变化 → 立刻放行）。
+        兜底：订阅建立失败 / `INTRO_FALLBACK_S` 内没有消息 → 0.5s 轮询 `/status`
+        （判据完全相同）。两条路径共用 `START_READY_TIMEOUT_S` 硬上限。
+
         三条退出路径：
           - 离开开场场景，或读不到场景（neuro 刚重启 / 场景数据缺失）→ True
           - stop_event → False（人工下播，静默）
-          - 硬上限 START_READY_TIMEOUT_S → False + last_error（中止本次开播）
-        轮询失败不单独终止：neuro 重启几秒是常见情况，硬上限兜住最坏情形。
+          - 硬上限 → False + last_error（中止本次开播）
+        读状态失败不单独终止：neuro 重启几秒是常见情况，硬上限兜住最坏情形。
         """
         gate = self._intro_gate or {}
         waiting_for = str(gate.get("waiting_for") or "")
         s = stream_settings.load()
         client = NeuroClient(s.neuro_url)
         deadline = time.monotonic() + START_READY_TIMEOUT_S
-        status_error: Optional[str] = None
+        gate.setdefault("ready_via", None)
 
+        if self._stop_event.is_set():
+            return False
+        if not waiting_for:
+            # 没有"要等离开的场景"：与轮询路径一致，第一次判定就放行
+            gate["ready_via"] = "none"
+            return True
+
+        via_subscription = await self._await_intro_subscription(
+            client, s, gate, waiting_for, deadline
+        )
+        if via_subscription is not None:
+            return via_subscription
+        return await self._poll_intro_ready(client, s, gate, waiting_for, deadline)
+
+    async def _await_intro_subscription(
+        self, client, settings, gate, waiting_for: str, deadline: float
+    ) -> Optional[bool]:
+        """订阅状态总线等场景变化；`None` = 该走轮询兜底。"""
+        subscribe = getattr(client, "state_events", None)
+        if subscribe is None:  # 旧替身/极旧客户端：直接兜底
+            return None
+        events = subscribe(want=("scene",))
+        try:
+            while True:
+                if self._stop_event.is_set():
+                    return False
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return self._intro_timeout(gate, waiting_for, None)
+                kind, payload = await self._next_state_event(
+                    events, min(INTRO_FALLBACK_S, remaining)
+                )
+                if kind == "stop":
+                    return False
+                if kind != "event":
+                    # 超时（这段时间没有变化）/连接失败/流结束：幂等对账兜底；
+                    # 但硬上限优先——别为了兜底多等出一个 fallback 窗口。
+                    if time.monotonic() >= deadline:
+                        return self._intro_timeout(gate, waiting_for, None)
+                    return None
+                gate["updates"] = int(gate.get("updates", 0)) + 1
+                current = _scene_from_state_event(payload)
+                if current is _NO_SCENE:
+                    continue
+                self.note_neuro_link(settings.neuro_url, True)
+                gate["neuro_scene"] = current or None
+                if current != waiting_for:
+                    gate["ready_via"] = "sse"
+                    return True
+                if time.monotonic() >= deadline:
+                    return self._intro_timeout(gate, waiting_for, None)
+        finally:
+            aclose = getattr(events, "aclose", None)
+            if aclose is not None:
+                with contextlib.suppress(Exception):
+                    await aclose()
+
+    async def _next_state_event(self, events, timeout: float):
+        """等下一条状态帧，同时被 stop_event 即时打断（不能睡满 fallback 窗口）。"""
+        next_task = asyncio.ensure_future(events.__anext__())
+        stop_task = asyncio.ensure_future(self._stop_event.wait())
+        try:
+            done, _ = await asyncio.wait(
+                {next_task, stop_task},
+                timeout=timeout,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if not done:
+                return "timeout", None
+            if stop_task in done:
+                return "stop", None
+            try:
+                return "event", next_task.result()
+            except StopAsyncIteration:
+                return "end", None
+            except Exception:  # 连接中断/解析失败都走轮询兜底
+                return "error", None
+        finally:
+            for task in (next_task, stop_task):
+                if not task.done():
+                    task.cancel()
+            # 让取消真正传播进 async generator；否则后面的 aclose() 会撞上
+            # "generator is already running"，SSE 连接跟着泄漏
+            with contextlib.suppress(BaseException):
+                await next_task
+
+    async def _poll_intro_ready(
+        self, client, settings, gate, waiting_for: str, deadline: float
+    ) -> bool:
+        """轮询兜底（订阅不可用/长时间没有推送时）：判据与订阅路径完全相同。"""
+        status_error: Optional[str] = gate.get("status_error")
         while True:
             if self._stop_event.is_set():
                 return False
             gate["polls"] = int(gate.get("polls", 0)) + 1
             try:
-                st = await client.status(s.channel)
-                self.note_neuro_link(s.neuro_url, True)
+                st = await client.status(settings.channel)
+                self.note_neuro_link(settings.neuro_url, True)
                 scene = ((st.get("sections") or {}).get("scene") or {}).get("current")
                 current = str((scene or {}).get("id") or "")
                 gate["neuro_scene"] = current or None
                 status_error = None
+                gate.pop("status_error", None)
                 if not waiting_for or current != waiting_for:
                     # 空场景也算"没停在开场"：不能因为读不到场景就一直等
-                    gate["ready_via"] = current or None
+                    gate["ready_via"] = "poll"
                     return True
             except (NeuroError, RuntimeError) as e:
                 status_error = f"{type(e).__name__}: {e}"
-                self.note_neuro_link(s.neuro_url, False, status_error)
+                self.note_neuro_link(settings.neuro_url, False, status_error)
                 gate["status_error"] = status_error
 
             remaining = deadline - time.monotonic()
             if remaining <= 0:
-                self.last_error = {
-                    "code": "intro_timeout",
-                    "message": (
-                        f"neuro 停在开场场景超过 {START_READY_TIMEOUT_S:g}s，已中止本次开播"
-                    ),
-                    "at": time.strftime("%Y-%m-%dT%H:%M:%S"),
-                    "detail": {
-                        "waiting_for": waiting_for,
-                        "neuro_scene": gate.get("neuro_scene"),
-                        "polls": gate.get("polls", 0),
-                        "status_error": status_error,
-                    },
-                }
-                logger.error(
-                    "开播中止：%s（neuro 场景=%s，轮询 %s 次）",
-                    self.last_error["message"],
-                    gate.get("neuro_scene"),
-                    gate.get("polls", 0),
-                )
-                return False
+                return self._intro_timeout(gate, waiting_for, status_error)
             # 短睡且可被 stop 即时打断（睡满整个上限会让下播等十几秒）
             await self._sleep_ms(min(READY_POLL_INTERVAL_S, remaining) * 1000.0)
+
+    def _intro_timeout(
+        self, gate: dict, waiting_for: str, status_error: Optional[str]
+    ) -> bool:
+        self.last_error = {
+            "code": "intro_timeout",
+            "message": (
+                f"neuro 停在开场场景超过 {START_READY_TIMEOUT_S:g}s，已中止本次开播"
+            ),
+            "at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+            "detail": {
+                "waiting_for": waiting_for,
+                "neuro_scene": gate.get("neuro_scene"),
+                "polls": gate.get("polls", 0),
+                "updates": gate.get("updates", 0),
+                "ready_via": gate.get("ready_via"),
+                "status_error": status_error,
+            },
+        }
+        logger.error(
+            "开播中止：%s（neuro 场景=%s，轮询 %s 次，订阅帧 %s 个）",
+            self.last_error["message"],
+            gate.get("neuro_scene"),
+            gate.get("polls", 0),
+            gate.get("updates", 0),
+        )
+        return False
 
     async def _main(self) -> None:
         session = self.session

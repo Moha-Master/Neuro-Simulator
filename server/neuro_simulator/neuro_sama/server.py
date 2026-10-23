@@ -1,4 +1,11 @@
-"""FastAPI 服务：POST /chat（SSE 流式）+ GET /health + /manage 管理接口 + /ui 窗口。
+"""FastAPI 服务：POST /chat（SSE/批量）+ 内容/状态两条总线 + 窗口端点 + /manage。
+
+两条总线的分工（详见 AGENTS）：
+- `GET /chat/events`：**内容平面**（start/reasoning/content/speech/tool_*/usage/
+  done/cancelled/error）。生成在后台任务里（`turns.TurnRunner`），连接只是观察者，
+  断开不终止生成；首帧 snapshot 供中途连接续播。
+- `GET /state/events`：**状态平面**（`state_kit.StateBoard` 的离散变化 + 首帧完整
+  信封）。只推"发生了的变化"，不推 `elapsed`/`remaining_s` 这类时间流逝。
 
 多渠道多会话：请求携带 channel + conversation_id（缺省时服务端生成并随 start 事件回传），
 历史与记忆持久化在 <workdir>/neuro-sama/data.db（见 storage.py）。
@@ -16,6 +23,7 @@
 
 import asyncio
 import json
+import time
 import uuid
 from contextlib import asynccontextmanager
 from typing import AsyncIterator
@@ -36,6 +44,7 @@ from .mcp_client import MCPManager
 from .memory import MemoryError, MemoryStore
 from .persona import PLACEHOLDERS, PersonaError, PersonaStore
 from .storage import Storage
+from .turns import ActiveTurn, TurnConflict, TurnRunner
 from .tools import ToolRegistry, build_builtin_tools
 from .ui_scene import SceneLoopError, make_runner
 from .ui_state import UiState, strip_speech_audio
@@ -48,65 +57,298 @@ _ORANGE = "\033[38;5;208m"
 _RED = "\033[31m"
 _RESET = "\033[0m"
 
-# /ui/events 只镜像 Neuro 窗口需要的生成事件；content/reasoning/usage/tool_result
-# 等纯文本/统计帧不进窗口（省带宽，也避免 EventSource 解析无用数据）。
-# scene_set 是窗口的权威场景状态（后端脚本或手动切换产生），不是生成事件。
-_UI_EVENT_TYPES = {
+# 内容总线只承载"发生过的事实"；场景/设置/清单属于状态平面（/state/events），
+# 不在这一层。默认 = 全集，want/drop 只在序列化层裁剪。
+CONTENT_EVENT_TYPES = (
     "start",
+    "reasoning",
+    "content",
     "speech",
+    "tool_start",
+    "tool_result",
+    "usage",
     "done",
     "cancelled",
     "error",
-    "tool_start",
-    "scene_set",
-    "settings",
-    "manifest_changed",
-}
+)
+
+_TERMINAL_EVENTS = frozenset(("done", "cancelled", "error"))
+
+# reload 取消在途生成后的有界等待：生成正常会在几百 ms 内以 cancelled 结束；
+# 卡住的（LLM 不吐字节且不响应 cancel）不能把配置保存也拖死。
+RELOAD_WAIT_S = 5.0
+
+# play_head 定时器的余量：`turn_projection().speaking` 的阈值是 0.05s，
+# 正好在 play_head 时刻唤醒会读到"还剩 0.00x 秒 → 还在说话"，白白丢一次翻转。
+_PLAY_HEAD_EPS_S = 0.08
 
 
 def _sse(event: str, data: dict) -> str:
     return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
 
 
-async def _collect_batch(
-    ui_state: UiState,
-    events: AsyncIterator[dict],
-    *,
-    channel: str,
-    conversation_id: str,
-    turn_id: int,
-    audio: bool = False,
-) -> dict:
-    """消费 agent 事件流并映射成 `stream:false` 的批量响应。
+def _split(raw: str | None) -> list | None:
+    """query 里的 `a,b` → 列表；空/缺省 → None。"""
+    if not raw:
+        return None
+    items = [p.strip() for p in raw.split(",") if p.strip()]
+    return items or None
 
-    记账已由 agent 的 sink 完成；这里只负责把三个终结事件映射成
-    `terminal`（done/cancelled/error）与 `error.message`。
+
+def _content_names(want: list | None, drop: list | None) -> frozenset:
+    """内容总线的类型过滤：先取 want、再减 drop，`*` = 全集。
+
+    过滤只在序列化层做（总线上的事件永远是全量），所以同一条总线可以同时
+    服务 audio=1 的 OBS 和 drop=reasoning,content 的窗口页。
     """
-    terminal = None
-    error_message = None
+    names = set(CONTENT_EVENT_TYPES)
+    if want is not None and "*" not in want:
+        names &= set(want)
+    if drop is not None:
+        if "*" in drop:
+            names.clear()
+        else:
+            names -= set(drop)
+    return frozenset(names)
+
+
+def _section_names(board: state_kit.StateBoard, want: list | None, drop: list | None) -> frozenset:
+    """状态总线的分区过滤（与 `/status` 的 want/drop 同一语义）。"""
+    names = set(board.section_names())
+    if want is not None and "*" not in want:
+        names &= set(want)
+    if drop is not None:
+        if "*" in drop:
+            names.clear()
+        else:
+            names -= set(drop)
+    return frozenset(names)
+
+
+def _content_snapshot(ui_state: UiState, channel: str | None, turn_id: int | None) -> dict:
+    """内容订阅的首帧：只给这一轮"已经说过什么/正在说什么"。
+
+    `settings`/`scene` 属于状态平面，这里不再出现——窗口页另外挂
+    `/state/events` 拿它们。
+    """
+    return {
+        "type": "snapshot",
+        "channel": channel,
+        "turn": ui_state.content_snapshot(channel, turn_id),
+    }
+
+
+async def _content_events(
+    ui_state: UiState,
+    bus: EventBroadcaster,
+    queue: asyncio.Queue,
+    *,
+    channel: str | None,
+    turn_id: int | None,
+    audio: bool,
+    want: list | None,
+    drop: list | None,
+) -> AsyncIterator[str]:
+    """`GET /chat/events` 的响应体（订阅已由调用方完成）。"""
+    names = _content_names(want, drop)
     try:
-        async for ev in events:
-            typ = ev.get("type")
-            if typ in ("done", "cancelled", "error"):
-                terminal = typ
-                if typ == "error":
-                    error_message = str(ev.get("message") or "")
-    except Exception as e:  # agent 正常不会抛（错误走 error 事件），兜底也要三态
-        if terminal is None:
-            terminal = "error"
-            error_message = f"{type(e).__name__}: {e}"
-    if terminal is None:
-        # 理论不该发生；仍必须满足三态之一
-        terminal = "error"
-        error_message = error_message or "generation ended without a terminal event"
-    return ui_state.batch(
-        channel,
-        conversation_id,
-        turn_id,
-        terminal,
-        message=error_message,
-        audio=audio,
-    )
+        yield _sse("snapshot", _content_snapshot(ui_state, channel, turn_id))
+        while True:
+            try:
+                ev = await asyncio.wait_for(queue.get(), timeout=15.0)
+            except asyncio.TimeoutError:
+                yield ": ping\n\n"
+                continue
+            ev_channel = ev.get("channel")
+            if channel and ev_channel and ev_channel != channel:
+                continue
+            if turn_id is not None and ev.get("turn_id") != turn_id:
+                continue
+            if ev.get("type") not in names:
+                continue
+            # audio=0 只裁这一条连接的副本；总线上的事件与其它订阅者不受影响
+            out = ev if audio else strip_speech_audio(ev)
+            yield _sse(out.get("type", "message"), out)
+    finally:
+        bus.unsubscribe(queue)
+
+
+async def _state_events(
+    board: state_kit.StateBoard,
+    bus: EventBroadcaster,
+    queue: asyncio.Queue,
+    *,
+    want: list | None,
+    drop: list | None,
+) -> AsyncIterator[str]:
+    """`GET /state/events` 的响应体（订阅已由调用方完成）。"""
+    names = _section_names(board, want, drop)
+    try:
+        # 首帧是**完整** envelope：订阅者拿它做基线，后续再按 want/drop 收增量
+        yield _sse("snapshot", board.read())
+        while True:
+            try:
+                ev = await asyncio.wait_for(queue.get(), timeout=15.0)
+            except asyncio.TimeoutError:
+                yield ": ping\n\n"
+                continue
+            payload = _filter_sections(ev, names)
+            # 这一帧变化的分区全被这个订阅者 drop 掉了 → 不发空帧（rev 跳号由
+            # 客户端回读 /status 对账；它本来就不关心这些分区）
+            if payload["sections"]:
+                yield _sse("state", payload)
+    finally:
+        bus.unsubscribe(queue)
+
+
+def _filter_sections(envelope: dict, names: frozenset) -> dict:
+    sections = {
+        key: value
+        for key, value in (envelope.get("sections") or {}).items()
+        if key in names
+    }
+    return {**envelope, "sections": sections}
+
+
+def build_state_bus(board: state_kit.StateBoard) -> EventBroadcaster:
+    """把 board 的变更接到一条广播总线（启动时调用一次）。
+
+    `note_change` 是同步的，这里同步算好"变了的分区"再 publish；provider 都
+    同步无 I/O，所以这一步不会阻塞生成。
+    """
+
+    bus = EventBroadcaster()
+
+    def publish(rev: int, names: tuple) -> None:
+        fields = list(names) or None  # 没报名字 = 全部分区（宁多勿缺）
+        snapshot = board.read(want=fields)
+        bus.publish({"rev": rev, "ts": snapshot["ts"], "sections": snapshot["sections"]})
+
+    board.set_listener(publish)
+    return bus
+
+
+class TurnSignal:
+    """`turn.speaking` 的 true→false：按 `play_head` 到点喊一次状态变化。
+
+    这不是新事件类型（`turn_drained` 不存在）：它只是状态投影里 `speaking`
+    从 true 变 false 的那一次 `note_change("turn")`。新句到达就重排，轮次结束
+    就取消；否则状态总线会停在一个过期的 speaking=true 上。
+    """
+
+    def __init__(self, board: state_kit.StateBoard, ui_state: UiState) -> None:
+        self._board = board
+        self._ui_state = ui_state
+        # 每个 channel 一个句柄：web 与 stream 可能同时有一轮在跑，
+        # 全局单句柄会让后到的句子取消掉另一个 channel 的翻转定时器
+        self._handles: dict[str, asyncio.TimerHandle] = {}
+
+    def cancel(self, channel: str) -> None:
+        handle = self._handles.pop(channel, None)
+        if handle is not None:
+            handle.cancel()
+
+    def cancel_all(self) -> None:
+        for channel in list(self._handles):
+            self.cancel(channel)
+
+    def reschedule(self, channel: str) -> None:
+        self.cancel(channel)
+        head = self._ui_state.turn_play_head(channel)
+        if head is None:
+            return
+        delay = head - time.monotonic() + _PLAY_HEAD_EPS_S
+        if delay <= 0:
+            # 已经播完（极短句/测试里的假时钟）：立刻翻一次
+            self._board.note_change("turn")
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:  # 没有循环（脚本/单测直接调 observe）时不排
+            return
+        # call_at 用 monotonic 基准（与 UiState.play_head 同一时钟）
+        self._handles[channel] = loop.call_at(head + _PLAY_HEAD_EPS_S, self._fire, channel)
+
+    def _fire(self, channel: str) -> None:
+        self._handles.pop(channel, None)
+        self._board.note_change("turn")
+
+
+def make_observer(board: state_kit.StateBoard, ui_state: UiState, signal: TurnSignal):
+    """agent 产出侧记账 + 派生状态变化的通知（启动时建一个）。
+
+    记账仍然只有 `UiState` 一处；这里只在"状态投影真的会变"的事件上喊
+    `note_change`——content 逐字 delta 不进状态投影，喊它只会把总线变成洪水。
+    """
+
+    def observe(ev: dict, channel: str, turn_id: int) -> None:
+        ui_state.observe(ev, channel, turn_id)
+        typ = ev.get("type")
+        if typ == "speech":
+            board.note_change("turn")
+            signal.reschedule(channel)
+        elif typ in _TERMINAL_EVENTS:
+            board.note_change("turn")
+            # 生成结束 ≠ 语音播完（批量/短生成很常见）：这里不能 cancel，
+            # 否则 speaking 会永远停在 true。reschedule 会在 play_head 到点时
+            # 再推一次 true→false（已经播完就立刻推，多一帧无害）。
+            signal.reschedule(channel)
+
+    return observe
+
+
+def _batch_payload(turn: ActiveTurn, audio: bool) -> dict:
+    """批量响应的交付副本：结果存全量（含 audio），这里按调用方裁。"""
+    payload = turn.result or {
+        "turn_id": turn.turn_id,
+        "channel": turn.channel,
+        "conversation_id": turn.conversation_id,
+        "terminal": "error",
+        "message": "generation result missing",
+        "text": "",
+        "segments": [],
+    }
+    if audio:
+        return payload
+    return {
+        **payload,
+        "segments": [
+            {key: value for key, value in seg.items() if key != "audio"}
+            for seg in payload.get("segments") or []
+        ],
+    }
+
+
+async def _chat_sse(
+    turn: ActiveTurn,
+    bus: EventBroadcaster,
+    queue: asyncio.Queue,
+    *,
+    audio: bool,
+) -> AsyncIterator[str]:
+    """`POST /chat {stream:true}` 的响应体：只转发**这一轮**的内容事件。
+
+    订阅由 handler 在 spawn 之前完成（否则 start 会漏），这里只负责消费与裁剪。
+    """
+    try:
+        while True:
+            try:
+                ev = await asyncio.wait_for(queue.get(), timeout=15.0)
+            except asyncio.TimeoutError:
+                # 生成可能已经结束但终结帧丢了（队列满）；别把连接永远挂着
+                if turn.done_event.is_set():
+                    return
+                continue
+            if ev.get("turn_id") != turn.turn_id:
+                continue
+            out = ev if audio else strip_speech_audio(ev)
+            yield _sse(out.get("type", "message"), out)
+            if out.get("type") in _TERMINAL_EVENTS:
+                return
+    finally:
+        bus.unsubscribe(queue)
+
+
 
 
 def _terminal(event: str, data: dict) -> None:
@@ -267,6 +509,10 @@ def build_status_board(ui_state: UiState, ctx: dict) -> state_kit.StateBoard:
     board.register("layers", lambda: _layers_current(ui_state))
     board.register("model", _model_current)
     board.register("tts", _tts_current)
+    # 两个字幕参数：复用 `UiState.settings()`（配置的唯一读取点），不另存
+    board.register("caption", lambda: ui_state.settings()["caption"])
+    # 清单元信息：复用 `SceneStore.source()`（与 GET /ui/manifest/source 同一函数）
+    board.register("manifest", lambda: ui_scenes.manifest_source())
     return board
 
 
@@ -318,12 +564,20 @@ class ScenePayload(BaseModel):
 async def _hot_reload(app: FastAPI) -> None:
     """配置热重载：重读 config.yaml，更新 LLM 客户端 / 记忆上限 / MCP。
 
-    在途流式生成先优雅终止：置位全部活跃 cancel_event，各流落库半截内容
-    并以 cancelled 事件结束——避免 LLM 客户端重建时旧客户端被 close
-    导致在途请求裸 error。
+    在途生成先**优雅终止并有界等待**：置位全部 cancel_event，等任务落库半截内容
+    并以 cancelled 结束（最多 RELOAD_WAIT_S）。不这样做，旧 LLM 客户端被 close
+    后仍在跑的请求会裸 error；无限等则会把配置保存拖死——超时就记日志继续，
+    绝不让 reload 悬挂。
     """
-    for ev in list(app.state.active_streams.values()):
-        ev.set()
+    turns = app.state.turns.cancel_all()
+    if turns:
+        finished = await app.state.turns.wait_all(turns, RELOAD_WAIT_S)
+        if not finished:
+            print(
+                f"[neuro-sama] WARNING: {RELOAD_WAIT_S:g}s 内仍有在途生成未结束，"
+                "继续 reload（它们可能以 error 收尾）",
+                flush=True,
+            )
     cfg = get_config()
     cfg.reload()
     agent: NeuroAgent = app.state.agent
@@ -363,8 +617,9 @@ async def _hot_reload(app: FastAPI) -> None:
         f"tools={agent.registry.all_names()}",
         flush=True,
     )
-    app.state.broadcaster.publish({"type": "settings", **app.state.ui_state.settings()})
-    app.state.ui_broadcaster.publish({"type": "settings", **app.state.ui_state.settings()})
+    app.state.turn_signal.cancel_all()
+    # 字幕参数来自 config；生效的 model/tts 也可能变（引用重建、TTS 解锁存）
+    app.state.status_board.note_change("caption", "model", "tts")
 
 
 def create_app() -> FastAPI:
@@ -409,11 +664,10 @@ def create_app() -> FastAPI:
         # channel 是 query 级别的策略（机制在 state_kit），用 request 作用域变量传递。
         status_ctx = {"channel": None}
         board = build_status_board(ui_state, status_ctx)
-
-        def observe(ev, channel, turn_id):
-            # 记账仍然只有 UiState 一处；这里只额外通知 board rev 变化
-            ui_state.observe(ev, channel, turn_id)
-            board.note_change("turn")
+        # 两条总线：内容（生成事件，全量含音频）与状态（离散变化，无音频/正文）
+        state_bus = build_state_bus(board)
+        content_bus = EventBroadcaster()
+        turn_signal = TurnSignal(board, ui_state)
 
         agent = NeuroAgent(
             client,
@@ -422,23 +676,38 @@ def create_app() -> FastAPI:
             memory,
             persona,
             StreamGameProvider(),
-            event_sink=observe,
+            event_sink=make_observer(board, ui_state, turn_signal),
         )
         app.state.agent = agent
         app.state.memory = memory
         app.state.persona = persona
         app.state.storage = storage
         app.state.mcp = mcp
-        app.state.active_streams: dict[str, asyncio.Event] = {}
-        app.state.broadcaster = EventBroadcaster()
-        app.state.ui_broadcaster = EventBroadcaster()
+        app.state.content_bus = content_bus
+        app.state.state_bus = state_bus
         app.state.ui_state = ui_state
         app.state.status_board = board
         app.state.status_channel = status_ctx
+        app.state.turn_signal = turn_signal
+
+        def on_turn_finish(turn: ActiveTurn) -> None:
+            # 任务收尾兜底：即便 agent 没走 error 事件（异常/被取消），状态平面
+            # 也要看到 generating=false；语音还没播完则由 reschedule 到点补一次。
+            board.note_change("turn")
+            turn_signal.reschedule(turn.channel)
+
+        app.state.turns = TurnRunner(
+            agent,
+            ui_state,
+            memory,
+            content_bus,
+            printer=_terminal,
+            on_finish=on_turn_finish,
+        )
 
         def publish_ui(ev: dict) -> None:
-            app.state.ui_broadcaster.publish(ev)
-            # 场景切换会改变 /status 的 scene/layers 分区
+            # 场景切换会改变状态平面的 scene/layers 分区（没有别的总线了：
+            # scene_set 不再是内容事件）
             if ev.get("type") == "scene_set":
                 board.note_change("scene", "layers")
 
@@ -457,6 +726,7 @@ def create_app() -> FastAPI:
             flush=True,
         )
         yield
+        turn_signal.cancel_all()
         await app.state.ui_scene.stop()
         if client is not None:
             await client.close()
@@ -483,15 +753,16 @@ def create_app() -> FastAPI:
             "tts": tts.tts_state(),
         }
 
-    # ---------- 状态投影（其他模块消费） ----------
+    # ---------- 状态平面（读取 + 订阅） ----------
 
     @app.get("/status")
     async def status(request: Request):
         """状态机投影：`{module, rev, ts, sections}`（**不含旧扁平键**）。
 
         分区：`scene`（当前画面）、`turn`（本轮节奏）、`layers`（元素层）、
-        `model`（LLM 服务是否可用）、`tts`（生效的合成器）。全部 provider
-        同步且无 I/O，可被别的模块每半秒拉一次；音频/正文只在内容平面。
+        `model`（LLM 服务是否可用）、`tts`（生效的合成器）、`caption`（字幕
+        参数）、`manifest`（场景清单元信息）。全部 provider 同步且无 I/O，可被
+        别的模块每半秒拉一次；音频/正文只在内容平面。
 
         `?channel=` 只影响 `turn`（每个 channel 至多一条在途轮次）；`want`/`drop`
         是分区级过滤（逗号分隔，`*`=全部），只影响输出。
@@ -499,136 +770,111 @@ def create_app() -> FastAPI:
         params = request.query_params
         channel = (params.get("channel") or "").strip() or None
         app.state.status_channel["channel"] = channel
-        want = params.get("want")
-        drop = params.get("drop")
         return app.state.status_board.read(
-            want=want.split(",") if want else None,
-            drop=drop.split(",") if drop else None,
+            want=_split(params.get("want")), drop=_split(params.get("drop"))
         )
 
-    # ---------- 对话 ----------
+    @app.get("/state/events")
+    async def state_events(request: Request):
+        """状态总线：首帧完整 envelope，之后只推**离散变化**的分区。
+
+        `event: state` 的 `sections` 只含这一帧变化的分区（客户端按分区名合并）；
+        `rev` 跳号说明中间有帧被丢（总线尽力而为）→ 回读 `GET /status` 对账。
+        `elapsed`/`remaining_s` 这类随秒增长的量不推，消费者自己按 `duration`/
+        `ends_at` 推演。
+        """
+        params = request.query_params
+        want = _split(params.get("want"))
+        drop = _split(params.get("drop"))
+        bus: EventBroadcaster = app.state.state_bus
+        queue = bus.subscribe()
+        return StreamingResponse(
+            _state_events(
+                app.state.status_board, bus, queue, want=want, drop=drop
+            ),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
+
+    # ---------- 内容平面（生成 + 订阅） ----------
 
     @app.post("/chat")
     async def chat(req: ChatRequest):
         message = req.message.strip()
         if not message:
             raise HTTPException(status_code=400, detail="message must not be empty")
-        agent: NeuroAgent = app.state.agent
-        memory: MemoryStore = app.state.memory
-        cfg = get_config()
         conversation_id = req.conversation_id or uuid.uuid4().hex
         channel = req.channel
+        runner: TurnRunner = app.state.turns
 
         print(f"\n{_CYAN}you ({channel}:{conversation_id[:8]}) » {message}{_RESET}", flush=True)
 
-        stream_key = f"{channel}:{conversation_id}"
-        if stream_key in app.state.active_streams:
-            # 同会话并发流会导致历史消息交错落库、/stop 误投，直接拒绝（检查与
-            # 登记之间无 await，单事件循环内原子）；新会话（服务端生成 id）不受限
-            raise HTTPException(status_code=409, detail="this conversation already has a generation in progress")
-        cancel_event = asyncio.Event()
-        app.state.active_streams[stream_key] = cancel_event
-        turn_id = app.state.ui_state.new_turn(channel)
-
-        async def drive():
-            """产出 start + agent 事件，并镜像到两条广播总线。
-
-            记账已在 agent 产出侧完成（`event_sink`）；这里只做转发/序列化。
-            `audio` 的裁剪在调用方的交付层（SSE/JSON），广播总线拿到的永远是全量。
-            """
-            svc = cfg.neuro_llm()
-            start_ev = {
-                "channel": channel,
-                "conversation_id": conversation_id,
-                "model": svc.model if svc else None,
-                "turn_id": turn_id,
-            }
-            start_evt = {"type": "start", "stream_key": stream_key, **start_ev}
-            app.state.broadcaster.publish(start_evt)
-            app.state.ui_broadcaster.publish(start_evt)
-            # 对外交付的 start 不带 stream_key（那是内部 stream 注册键，以前也不下发）
-            yield {"type": "start", **start_ev}
-            async for ev in agent.run(
-                channel, conversation_id, message, cancel_event=cancel_event, turn_id=turn_id
-            ):
-                _terminal(ev["type"], ev)
-                if ev["type"] == "done":
-                    ev = {
-                        **ev,
-                        "_memory": {
-                            "count": memory.count,
-                            "used": memory.used,
-                            "char_limit": memory.char_limit,
-                        },
-                    }
-                ev = {**ev, "turn_id": turn_id}
-                mirrored = {"stream_key": stream_key, "channel": channel, "conversation_id": conversation_id, **ev}
-                app.state.broadcaster.publish(mirrored)
-                if ev["type"] in _UI_EVENT_TYPES:
-                    app.state.ui_broadcaster.publish(mirrored)
-                yield ev
-
-        def clean_up() -> None:
-            app.state.active_streams.pop(stream_key, None)
-            app.state.ui_state.abort(channel, turn_id)
+        # 同会话并发流会导致历史消息交错落库、/stop 误投，直接拒绝。检查与登记
+        # 之间不能有 await（单事件循环内原子）；新会话（服务端生成 id）不受限。
+        if runner.find(channel, conversation_id) is not None:
+            raise HTTPException(
+                status_code=409,
+                detail="this conversation already has a generation in progress",
+            )
+        try:
+            turn = runner.register(channel, conversation_id)
+        except TurnConflict as e:
+            raise HTTPException(status_code=409, detail=str(e)) from e
+        # 新轮开始：这个 channel 旧的 play_head 定时器作废，状态平面推一次 turn
+        app.state.turn_signal.cancel(channel)
+        app.state.status_board.note_change("turn")
 
         if not req.stream:
-            # 批量模式仍然逐事件消费 agent（同一套生成/记账逻辑），只是不往连接上写 SSE
-            try:
-                payload = await _collect_batch(
-                    app.state.ui_state,
-                    drive(),
-                    channel=channel,
-                    conversation_id=conversation_id,
-                    turn_id=turn_id,
-                    audio=req.audio,
-                )
-            finally:
-                clean_up()
-            return JSONResponse(payload)
+            # 批量模式：同一个后台任务，调用方只是等结果。请求侧断开/取消不会
+            # 传播到任务（任务没有被 await，只被 done_event 等待）。
+            runner.spawn(turn, message)
+            await turn.done_event.wait()
+            return JSONResponse(_batch_payload(turn, req.audio))
 
-        async def gen():
-            try:
-                async for ev in drive():
-                    # 只裁"发给这个响应"的副本：broadcaster 已经拿到全量（/ui/events 续播要用）
-                    out = ev if req.audio else strip_speech_audio(ev)
-                    yield _sse(out["type"], out)
-            finally:
-                clean_up()
-
+        # 先订阅再 spawn：反过来的话 start 事件可能在订阅建立前就发完了
+        bus: EventBroadcaster = app.state.content_bus
+        queue = bus.subscribe()
+        runner.spawn(turn, message)
         return StreamingResponse(
-            gen(),
+            _chat_sse(turn, bus, queue, audio=req.audio),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
+
+    @app.get("/chat/events")
+    async def chat_events(request: Request):
+        """内容总线：某个 channel / 某一轮的生成事件（**含音频**）。
+
+        默认全集；`want`/`drop` 只在序列化层过滤（例如窗口页 drop 掉
+        reasoning/content，只要字幕与动作）。`audio=0` 只剥这一条连接的
+        `audio` 键——总线上的事件永远是全量，否则 OBS 中途重载会续播不出声。
+        """
+        params = request.query_params
+        channel = (params.get("channel") or "").strip() or None
+        raw_turn = (params.get("turn_id") or "").strip()
+        try:
+            turn_id = int(raw_turn) if raw_turn else None
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail="turn_id must be an integer") from e
+        audio = (params.get("audio") or "1").lower() not in ("0", "false", "no")
+        bus: EventBroadcaster = app.state.content_bus
+        queue = bus.subscribe()
+        return StreamingResponse(
+            _content_events(
+                app.state.ui_state,
+                bus,
+                queue,
+                channel=channel,
+                turn_id=turn_id,
+                audio=audio,
+                want=_split(params.get("want")),
+                drop=_split(params.get("drop")),
+            ),
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
 
     # ---------- /manage：热重载 + 会话/对话记录管理（配置管理由 vedal 统一处理） ----------
-
-    @app.get("/manage/events")
-    async def manage_events():
-        """SSE 事件广播：供 Dashboard Chat 页面实时拉取在途会话的生成状态。"""
-        bus: EventBroadcaster = app.state.broadcaster
-        q = bus.subscribe()
-
-        async def event_generator():
-            try:
-                active = list(app.state.active_streams.keys())
-                yield _sse("snapshot", {"active": active})
-                while True:
-                    try:
-                        ev = await asyncio.wait_for(q.get(), timeout=15.0)
-                    except asyncio.TimeoutError:
-                        yield ": ping\n\n"
-                        continue
-                    yield _sse(ev.get("type", "message"), ev)
-            finally:
-                bus.unsubscribe(q)
-
-        return StreamingResponse(
-            event_generator(),
-            media_type="text/event-stream",
-            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
-        )
 
     @app.post("/manage/reload")
     async def manage_reload():
@@ -859,58 +1105,15 @@ def create_app() -> FastAPI:
 
     @app.post("/manage/chats/{channel}/{conversation_id}/stop")
     async def manage_stop_chat(channel: str, conversation_id: str):
-        """中断指定会话的流式生成。"""
-        stream_key = f"{channel}:{conversation_id}"
-        cancel_event = app.state.active_streams.get(stream_key)
-        if cancel_event is None:
+        """中断指定会话的流式生成（生成在后台任务里，这是唯一的用户取消入口）。"""
+        turn = app.state.turns.find(channel, conversation_id)
+        if turn is None:
             return {"status": "not_running"}
-        cancel_event.set()
+        turn.cancel_event.set()
         print(f"[neuro-sama] stop requested: {channel}:{conversation_id}", flush=True)
         return {"status": "ok", "stopped": True}
 
     # ---------- /ui：Neuro 窗口（背景 / 开场 / 立绘 / 字幕） ----------
-
-    @app.get("/ui/events")
-    async def ui_events(request: Request):
-        """Neuro 窗口只读事件流：snapshot + 实时 speech/tool/intro。
-
-        `?channel=stream` 时只推该 channel 的生成事件（合成器用）；独立打开
-        Neuro View 时不带 channel，显示全部。intro/settings 是全局事件，始终下发。
-        """
-        bus: EventBroadcaster = app.state.ui_broadcaster
-        ui_state: UiState = app.state.ui_state
-        channel = (request.query_params.get("channel") or "").strip() or None
-        q = bus.subscribe()
-
-        async def gen():
-            try:
-                yield _sse("snapshot", ui_state.snapshot(channel))
-                while True:
-                    try:
-                        ev = await asyncio.wait_for(q.get(), timeout=15.0)
-                    except asyncio.TimeoutError:
-                        yield ": ping\n\n"
-                        continue
-                    ev_channel = ev.get("channel")
-                    if channel and ev_channel and ev_channel != channel:
-                        continue
-                    if ev.get("type") not in _UI_EVENT_TYPES:
-                        continue
-                    yield _sse(ev.get("type", "message"), ev)
-            finally:
-                bus.unsubscribe(q)
-
-        return StreamingResponse(
-            gen(),
-            media_type="text/event-stream",
-            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
-        )
-
-    @app.get("/ui/state")
-    async def ui_state_view(request: Request):
-        """当前窗口状态（调试/合成器恢复用）。"""
-        channel = (request.query_params.get("channel") or "").strip() or None
-        return app.state.ui_state.snapshot(channel)
 
     async def _switch_scene(scene_id: str) -> dict:
         """切场景的唯一入口：手动端点与 stream 开播都走这里（同一套校验与广播）。"""
@@ -954,7 +1157,7 @@ def create_app() -> FastAPI:
             await ui_scenes.save_manifest(payload.content)
         except ui_scenes.SceneError as e:
             raise HTTPException(status_code=400, detail=str(e))
-        app.state.ui_broadcaster.publish({"type": "manifest_changed"})
+        app.state.status_board.note_change("manifest", "scene", "layers")
         return {"status": "ok", "source": ui_scenes.manifest_source()}
 
     @app.post("/ui/manifest/reset")
@@ -964,7 +1167,7 @@ def create_app() -> FastAPI:
             await ui_scenes.reset_manifest()
         except ui_scenes.SceneError as e:
             raise HTTPException(status_code=400, detail=str(e))
-        app.state.ui_broadcaster.publish({"type": "manifest_changed"})
+        app.state.status_board.note_change("manifest", "scene", "layers")
         return {"status": "ok", "source": ui_scenes.manifest_source()}
 
     @app.get("/ui/scenes")

@@ -2,15 +2,16 @@
 
 这里对外提供**三个面**，用途和频率不同：
 
-- `snapshot()` → **画面快照**（`/ui/events` 与 `/ui/state`）：逐句带 `consumed`，
-  正在发声那句还带 base64 `audio`，供渲染器（OBS 重载、dashboard 预览）断点续播。
-- `turn_projection()` / `scene_snapshot()` → **状态投影的原料**（`/status` 由
-  `state_kit.StateBoard` 组合）：只有"这一轮还剩多久"这类任意时刻重读都对的值，
-  不含音频、不含正文，供其他模块高频轮询（stream 判开场是否放完、判下一轮节奏；
-  chatbot 判她是否睡着；将来的 Discord/QQ 接入同样消费它）。
-- `turn_text()` / `turn_segments()` / `batch()` → **内容平面**（`POST /chat`）：
-  "这一轮到底说了什么"，整轮全量、不截断；`segments` 的 `(turn_id, step, index)`
-  是唯一键。
+- `snapshot()` → **画面快照**（内部函数；`GET /chat/events` 首帧去掉
+  `settings`/`scene` 后只留 `turn`）：逐句带 `consumed`，正在发声那句还带
+  base64 `audio`，供渲染器（OBS 重载、dashboard 预览）断点续播。
+- `turn_projection()` / `scene_snapshot()` → **状态投影的原料**（`/status` 与
+  `/state/events` 由 `state_kit.StateBoard` 组合）：只有"这一轮还剩多久"这类
+  任意时刻重读都对的值，不含音频、不含正文，供其他模块高频轮询（stream 判开场
+  是否放完、判下一轮节奏；chatbot 判她是否睡着；将来的 Discord/QQ 接入同样消费它）。
+- `turn_text()` / `turn_segments()` / `batch()` → **内容平面**（`POST /chat`
+  与 `/chat/events`）："这一轮到底说了什么"，整轮全量、不截断；
+  `segments` 的 `(turn_id, step, index)` 是唯一键。
 
 时间基准是服务端 `time.monotonic()`；状态投影里的 `ends_at` 已换算成 unix 秒——
 **跨进程不要对 monotonic 时钟**，所以对外只给"还剩多少秒"和换算后的绝对时刻。
@@ -39,7 +40,7 @@ def strip_speech_audio(ev: Dict[str, Any]) -> Dict[str, Any]:
     """序列化层：从 speech 事件里剥掉 audio 键（audio=false 的调用方用）。
 
     **只能用在"发给某个连接/某个响应"的那一步**——`_Speech.audio` 必须保持全量，
-    它是 `/ui/events` snapshot 断点续播（OBS 中途重载）的唯一数据源。
+    它是 `/chat/events` 首帧 snapshot 断点续播（OBS 中途重载）的唯一数据源。
     """
     if ev.get("type") != "speech" or "audio" not in ev:
         return ev
@@ -255,7 +256,7 @@ class UiState:
             "in_flight": sum(1 for t in self._turns.values() if t.active),
         }
 
-    # ---------- 内容平面（/chat 的批量响应） ----------
+    # ---------- 内容平面（/chat 的批量响应、/chat/events 首帧） ----------
 
     def _resolve_turn(
         self, channel: Optional[str] = None, turn_id: Optional[int] = None
@@ -365,7 +366,19 @@ class UiState:
 
     # ---------- snapshot（画面消费） ----------
 
-    def snapshot(self, channel: Optional[str] = None) -> Dict[str, Any]:
+    def turn_play_head(self, channel: Optional[str] = None) -> Optional[float]:
+        """本轮语音预测播完的 monotonic 时刻（没有轮次时为 None）。
+
+        状态总线需要它来排 `play_head` 定时器：`turn.speaking` 从 true 变 false
+        不是事件，而是"时间到了"的一次状态变化；归属者（server）据此到点喊
+        `note_change("turn")`。不要把这个时刻下发给别人——跨进程只给 `ends_at`。
+        """
+        turn = self._resolve_turn(channel)
+        return turn.play_head if turn is not None else None
+
+    def snapshot(
+        self, channel: Optional[str] = None, turn_id: Optional[int] = None
+    ) -> Dict[str, Any]:
         now = time.monotonic()
         out: Dict[str, Any] = {"settings": self.settings()}
         scene = self.scene_snapshot(now)
@@ -373,7 +386,10 @@ class UiState:
             out["scene"] = scene
 
         pick = channel or self._last_channel
-        turn = self._turns.get(pick) if pick else None
+        turn = self._resolve_turn(pick, turn_id)
+        if turn is not None and channel and turn.channel != channel:
+            # turn_id 是全局唯一 id；同时给了 channel 就两个条件都要满足
+            turn = None
         if turn is not None and self._turn_visible(turn, now):
             out["turn"] = {
                 "id": turn.id,
@@ -381,6 +397,17 @@ class UiState:
                 "speech": [self._segment(s, now) for s in turn.speech],
             }
         return out
+
+    def content_snapshot(
+        self, channel: Optional[str] = None, turn_id: Optional[int] = None
+    ) -> Optional[Dict[str, Any]]:
+        """`/chat/events` 首帧的 `turn` 部分（内容平面；settings/scene 在状态平面）。
+
+        数据源就是 `snapshot()`（同一个 `consumed`/正在发声句带音频的规则），
+        这里只负责去掉状态平面的两个键——不另存一份，也不重新计算。
+        """
+        turn = self.snapshot(channel, turn_id).get("turn")
+        return turn if turn is not None else None
 
     @staticmethod
     def _turn_visible(turn: _Turn, now: float) -> bool:

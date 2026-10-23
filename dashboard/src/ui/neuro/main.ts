@@ -24,10 +24,13 @@ import { ElementEngine } from '../engine/elements'
 import { loadFonts } from './assets'
 import { COMPONENTS } from './components'
 import {
+  type ContentSnapshot,
   type FeedEvent,
   NeuroFeed,
   type SceneInfo,
-  type Snapshot,
+  type SectionOf,
+  type StateFrame,
+  type StateSnapshot,
   type TurnSeg,
 } from './feed'
 import { fetchScenes } from './scenes'
@@ -69,18 +72,17 @@ export async function bootstrapNeuro (stage: HTMLElement): Promise<void> {
   // ---------- 字幕实例（跨场景复用同一个元素与实例） ----------
 
   let player: CaptionPlayer | null = null
-  let captionSettings: Snapshot['settings'] | null = null
+  let captionSettings: SectionOf<'caption'> | null = null
 
   function applyCaptionSettings (): void {
-    const caption = captionSettings?.caption
-    if (!caption || !player) {
+    if (!captionSettings || !player) {
       return
     }
-    if (caption.hide_ms !== undefined) {
-      player.setHideDelay(Number(caption.hide_ms))
+    if (captionSettings.hide_ms !== undefined) {
+      player.setHideDelay(Number(captionSettings.hide_ms))
     }
-    if (caption.step_gap_ms !== undefined) {
-      player.setStepGap(Number(caption.step_gap_ms))
+    if (captionSettings.step_gap_ms !== undefined) {
+      player.setStepGap(Number(captionSettings.step_gap_ms))
     }
   }
 
@@ -132,6 +134,59 @@ export async function bootstrapNeuro (stage: HTMLElement): Promise<void> {
       .catch(error => console.warn(`场景切换失败: ${info.id}`, error))
   }
 
+  function applySceneSection (scene: SectionOf<'scene'> | null | undefined): void {
+    if (!scene) {
+      return
+    }
+    applyScene({
+      id: String(scene.id ?? ''),
+      duration: Number(scene.duration ?? 0),
+      elapsed: Number(scene.elapsed ?? 0),
+    })
+  }
+
+  // ---------- 层显隐基线（状态平面的 layers；父页面仍可按 id 追加隐藏） ----------
+
+  let parentHidden: string[] = []
+  let layerHidden: string[] = []
+
+  function applyHidden (): void {
+    // 父页面只能隐藏、不能强制显示：两边的隐藏集合取并集
+    engine.setHidden([...new Set([...parentHidden, ...layerHidden])])
+  }
+
+  function applyLayers (layers: SectionOf<'layers'> | null | undefined): void {
+    layerHidden = (layers ?? []).filter(layer => !layer.visible).map(layer => layer.id)
+    applyHidden()
+  }
+
+  // ---------- 清单变更（比较 updated_at，幂等比较是防 reload 循环的唯一保险） ----------
+
+  let manifestUpdatedAt: string | null = null
+  let manifestBaselineSet = false
+  let reloading = false
+
+  function applyManifest (manifest: SectionOf<'manifest'> | null | undefined): void {
+    if (!manifest || reloading) {
+      return
+    }
+    const stamp = String(manifest.updated_at ?? '')
+    if (!manifestBaselineSet) {
+      // boot 基线：本页启动后看到的第一份清单就是"我现在渲染的那份"
+      manifestUpdatedAt = stamp
+      manifestBaselineSet = true
+      return
+    }
+    if (stamp === manifestUpdatedAt) {
+      return
+    }
+    // 只有"和 boot 时不同"才 reload；reload 后第一份快照又会把基线写成新值，
+    // 所以同一个清单不会触发第二次 reload（没有这道比较就会无限刷新）。
+    reloading = true
+    console.info('场景清单已更新，重新加载窗口', manifestUpdatedAt, '→', stamp)
+    window.location.reload()
+  }
+
   // ---------- 父页面（合成器 / dashboard 预览）控制层的显隐 ----------
 
   window.addEventListener('message', (event: MessageEvent) => {
@@ -140,22 +195,21 @@ export async function bootstrapNeuro (stage: HTMLElement): Promise<void> {
       return
     }
     if (data.type === 'visibility') {
-      engine.setHidden(Array.isArray(data.hidden) ? data.hidden : [])
+      parentHidden = Array.isArray(data.hidden) ? data.hidden : []
+      applyHidden()
     }
   })
   if (window.parent && window.parent !== window) {
     window.parent.postMessage({ ns: 'neuro-window', type: 'ready' }, '*')
   }
 
-  // ---------- 事件通道 ----------
+  // ---------- 事件通道：内容（字幕/音频）+ 状态（场景/设置/层/清单） ----------
 
   const feed = new NeuroFeed()
 
-  feed.on('snapshot', (ev: FeedEvent) => {
-    const snap = ev as unknown as Snapshot
-    captionSettings = snap.settings ?? null
-    applyCaptionSettings()
-    applyScene(snap.scene)
+  // 内容连接
+  feed.onContent('snapshot', (ev: FeedEvent) => {
+    const snap = ev as unknown as ContentSnapshot
     const p = ensurePlayer()
     if (!p) {
       return
@@ -170,20 +224,12 @@ export async function bootstrapNeuro (stage: HTMLElement): Promise<void> {
     }
   })
 
-  feed.on('scene_set', (ev: FeedEvent) => {
-    applyScene({
-      id: String(ev.id ?? ''),
-      duration: Number(ev.duration ?? 0),
-      elapsed: Number(ev.elapsed ?? 0),
-    })
-  })
-
-  feed.on('start', (ev: FeedEvent) => {
+  feed.onContent('start', (ev: FeedEvent) => {
     const turnId = ev.turn_id === undefined ? undefined : Number(ev.turn_id)
     ensurePlayer()?.beginTurn(turnId)
   })
 
-  feed.on('speech', (ev: FeedEvent) => {
+  feed.onContent('speech', (ev: FeedEvent) => {
     const seg: SpeechSeg = {
       index: Number(ev.index ?? 0),
       text: String(ev.text ?? ''),
@@ -199,13 +245,13 @@ export async function bootstrapNeuro (stage: HTMLElement): Promise<void> {
   })
 
   for (const type of ['done', 'cancelled', 'error'] as const) {
-    feed.on(type, (ev: FeedEvent) => {
+    feed.onContent(type, (ev: FeedEvent) => {
       const turnId = ev.turn_id === undefined ? undefined : Number(ev.turn_id)
       ensurePlayer()?.endOfTurn(turnId)
     })
   }
 
-  feed.on('tool_start', (ev: FeedEvent) => {
+  feed.onContent('tool_start', (ev: FeedEvent) => {
     const name = String(ev.name ?? '')
     if (name === 'model_spin') {
       void engine.run(avatarId, 'avatar.spin')
@@ -217,19 +263,29 @@ export async function bootstrapNeuro (stage: HTMLElement): Promise<void> {
     }
   })
 
-  feed.on('manifest_changed', () => {
-    // 场景清单被改了（dashboard 里编辑过）：重载窗口页以拉新清单。
-    console.info('场景清单已更新，重新加载窗口')
-    window.location.reload()
-  })
+  // 状态连接：首帧是完整信封，之后每帧只带变化的分区；按分区名合并即可
+  function applyState (frame: StateFrame | StateSnapshot): void {
+    const sections = frame.sections ?? {}
+    if (sections.caption) {
+      captionSettings = sections.caption.current
+      applyCaptionSettings()
+    }
+    if (sections.scene) {
+      applySceneSection(sections.scene.current)
+    }
+    if (sections.layers) {
+      applyLayers(sections.layers.current)
+    }
+    if (sections.manifest) {
+      applyManifest(sections.manifest.current)
+    }
+  }
 
-  feed.on('settings', (ev: FeedEvent) => {
-    captionSettings = (ev as unknown as Snapshot['settings']) ?? null
-    applyCaptionSettings()
-  });
+  feed.onState('snapshot', (ev: FeedEvent) => applyState(ev as unknown as StateSnapshot))
+  feed.onState('state', (ev: FeedEvent) => applyState(ev as unknown as StateFrame))
 
   // 控制台/父页面调试入口（与 stream/ui 的 window.__ns 对齐）
-  (window as unknown as Record<string, unknown>).__ns = {
+  ;(window as unknown as Record<string, unknown>).__ns = {
     stage,
     engine,
     feed,

@@ -82,6 +82,10 @@ class SceneStore:
         self._name = name
         self._data: Optional[Dict[str, Any]] = None
         self._updated_at = ""
+        # `source()` 的缓存：`/status` 的 manifest 分区会被别的模块高频拉取，
+        # 而 `is_default` 要读包内文件、`chars` 要整份 JSON 序列化——不能每次
+        # 轮询都算。清单只在 load/save/set_data 时变，那几处刷新缓存即可。
+        self._source: Optional[Dict[str, Any]] = None
         self._lock = asyncio.Lock()
 
     # ---------- 加载 / 播种 ----------
@@ -110,12 +114,14 @@ class SceneStore:
         self._validate(data)
         self._data = data
         self._updated_at = updated_at
+        self._source = None
 
     def set_data(self, data: Dict[str, Any], updated_at: str = "") -> None:
         """测试用：直接注入清单（校验但不落库）。"""
         self._validate(data)
         self._data = data
         self._updated_at = updated_at
+        self._source = None
 
     # ---------- 读 ----------
 
@@ -134,12 +140,18 @@ class SceneStore:
         )
 
     def source(self) -> Dict[str, Any]:
-        """给 UI 的元信息：是不是默认值 / 什么时候改的 / 多少字符。"""
-        return {
-            "is_default": self.is_default(),
-            "updated_at": self._updated_at,
-            "chars": len(json.dumps(self.manifest(), ensure_ascii=False, indent=2)),
-        }
+        """给 UI 的元信息：是不是默认值 / 什么时候改的 / 多少字符。
+
+        结果在清单变化前是常量，缓存起来：这是 `/status` 的 `manifest` 分区
+        现读的同一份数据，不能被高频轮询拖成"每半秒读一次文件 + 序列化整份 JSON"。
+        """
+        if self._source is None:
+            self._source = {
+                "is_default": self.is_default(),
+                "updated_at": self._updated_at,
+                "chars": len(json.dumps(self.manifest(), ensure_ascii=False, indent=2)),
+            }
+        return dict(self._source)
 
     # ---------- 写 ----------
 
