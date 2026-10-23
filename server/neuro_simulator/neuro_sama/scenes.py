@@ -135,6 +135,15 @@ def label(scene_id: str) -> str:
     return str(scene.get("label") or scene_id) if scene else scene_id
 
 
+def desc(scene_id: Optional[str]) -> str:
+    """场景的**机器/LLM 自述**（英文陈述句）；没写就是空串。
+
+    与 `label`（短名）、`prompt_context`（注入当轮 prompt 的指令）分工见 AGENTS.md。
+    """
+    scene = find(scene_id)
+    return str(scene.get("desc") or "") if scene else ""
+
+
 def default_scene_id() -> str:
     sid = str(manifest().get("default_scene") or "").strip()
     if not sid or not exists(sid):
@@ -205,6 +214,7 @@ def overview() -> List[Dict[str, Any]]:
             {
                 "id": sid,
                 "label": str(s.get("label") or sid),
+                "desc": str(s.get("desc") or ""),
                 "icon": s.get("icon"),
                 "hidden": bool(s.get("hidden")),
                 "duration": round(effective_duration(sid), 3),
@@ -249,6 +259,9 @@ def _validate(data: Any) -> None:
         element_ids_by_scene[sid] = scene_kit.check_elements(scene.get("elements"), sid)
         if not element_ids_by_scene[sid]:
             raise SceneError(f"场景 {sid}: neuro 窗口至少需要一个元素（立绘/背景/字幕）")
+        # desc 是面向机器/LLM 的状态自述（英文陈述句）；非必填，保持旧清单可用
+        if "desc" in scene and not isinstance(scene.get("desc"), str):
+            raise SceneError(f"场景 {sid}: desc 必须是字符串")
 
         raw_duration = scene.get("duration")
         if isinstance(raw_duration, dict):

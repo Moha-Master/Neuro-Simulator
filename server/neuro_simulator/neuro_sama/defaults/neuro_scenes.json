@@ -10,6 +10,7 @@
       "id": "normal",
       "label": "常态（房间）",
       "icon": "mdi-sofa",
+      "desc": "The default shot: the room background fills the frame, Neuro's avatar stands centred, and captions appear near the bottom.",
       "elements": [
         {
           "id": "bg_room",
@@ -58,6 +59,7 @@
       "id": "intro",
       "label": "开场",
       "icon": "mdi-play",
+      "desc": "The intro video plays full frame; the room background and Neuro's avatar fade in near the end, with captions near the bottom.",
       "duration": { "media": "intro_video", "after": 3.0 },
       "timeline": {
         "steps": [

@@ -86,9 +86,9 @@ class TestProductionSideAccounting(unittest.IsolatedAsyncioTestCase):
         async for _ in agent.run("stream", "conv", "hi", turn_id=tid):
             pass
 
-        status = st.status("stream")
-        self.assertFalse(status["speech"]["generating"])
-        self.assertEqual(status["turns"]["in_flight"], 0)
+        turn = st.turn_projection("stream")
+        self.assertFalse(turn["generating"])
+        self.assertEqual(turn["in_flight"], 0)
         self.assertEqual(st.turn_text("stream"), "Before the tool. After the tool.")
         self.assertEqual([s["text"] for s in st.turn_segments("stream")],
                          ["Before the tool.", "After the tool."])
@@ -262,7 +262,7 @@ class _AgentHarness(unittest.IsolatedAsyncioTestCase):
         messages = await self.storage.get_messages(conv_id)
         assistant = [m for m in messages if m["role"] == "assistant"]
         self.assertEqual(assistant[-1]["content"], "half", "半截内容必须落库")
-        self.assertFalse(self.ui_state.status("stream")["speech"]["generating"])
+        self.assertFalse(self.ui_state.turn_projection("stream")["generating"])
 
     async def test_cancelled_via_collect_batch(self):
         # 走真实 `_collect_batch` 的取消轮：事件流以 cancelled 终结

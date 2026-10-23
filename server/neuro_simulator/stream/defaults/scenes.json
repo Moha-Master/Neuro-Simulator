@@ -5,6 +5,7 @@
       "id": "starting_soon",
       "label": "Starting Soon",
       "icon": "mdi-clock-outline",
+      "desc": "The stream has not started yet: a no-source backdrop fills the frame, chat and priority overlays are visible, and the Neuro window is hidden.",
       "hidden": true,
       "elements": [
         {
@@ -65,6 +66,7 @@
       "id": "room_intro",
       "label": "开场",
       "icon": "mdi-movie-open",
+      "desc": "The intro bumper is playing: the Neuro window fills the frame edge to edge, with no chat or priority overlay.",
       "hidden": true,
       "elements": [],
       "neuro": {
@@ -79,6 +81,7 @@
       "id": "room",
       "label": "房间（默认）",
       "icon": "mdi-sofa",
+      "desc": "The default shot: Neuro's room background fills the frame, her avatar is centred with captions near the bottom, and chat plus priority overlays sit on the left.",
       "elements": [
         {
           "id": "chat",
@@ -138,6 +141,7 @@
       "id": "community_art",
       "label": "Community Art",
       "icon": "mdi-palette",
+      "desc": "A community artwork fills the frame as the backdrop, with the Neuro window overlaid on top and chat plus priority overlays on the left.",
       "elements": [
         {
           "id": "bg_art",
@@ -199,6 +203,7 @@
       "id": "gameplay",
       "label": "Game Play",
       "icon": "mdi-gamepad-variant",
+      "desc": "A game-play backdrop fills the frame, with the Neuro window overlaid on top and chat plus priority overlays on the left.",
       "elements": [
         {
           "id": "bg_game",
@@ -260,6 +265,7 @@
       "id": "play_wordle",
       "label": "Wordle",
       "icon": "mdi-format-text",
+      "desc": "A Wordle board occupies the centre of the frame, with the Neuro window on the right and chat plus priority overlays on the left.",
       "prompt_context": "You are playing Wordle on stream right now: a hidden word has to be guessed in six tries, one guess per row, and every guess must be a real word of the same length. Colours mean: green = right letter right place, yellow = right letter wrong place, grey = not in the word.",
       "elements": [
         {
@@ -336,6 +342,7 @@
       "id": "play_chess",
       "label": "Chess",
       "icon": "mdi-chess-knight",
+      "desc": "A Lichess chess board sits on the left of the media area, with the Neuro window on the right and chat plus priority overlays on the left.",
       "prompt_context": "You are playing online Chess on Lichess against the Lichess AI. Call game_chess_move with one move copied verbatim from the 'Your legal moves' list (SAN like Nf3, O-O, exd5). The result says what you played, how the opponent replied, and your new legal moves. One move per call.",
       "elements": [
         {

@@ -42,6 +42,16 @@
                 ></v-icon>
                 <span class="text-subtitle-1">{{ m.name }}</span>
                 <v-spacer></v-spacer>
+                <v-btn
+                  v-if="m.name === 'stream' || m.name === 'neuro_sama'"
+                  size="x-small"
+                  variant="text"
+                  prepend-icon="mdi-graph"
+                  to="/state"
+                  class="mr-1"
+                >
+                  State
+                </v-btn>
                 <v-chip size="small" :color="m.reachable ? 'success' : 'error'" variant="tonal">
                   {{ m.reachable ? 'Running' : 'Stopped' }}
                 </v-chip>
@@ -60,6 +70,12 @@
                 <div v-else-if="m.name === 'vedal'" class="text-caption text-disabled">
                   管理模块本身，无法通过自身管理
                 </div>
+                <!-- 状态摘要来自 vedal /state；生命周期（PID/managed）仍来自
+                     /manage/modules，两个来源只在展示层合并。 -->
+                <ModuleStateChips
+                  v-if="m.name === 'stream' || m.name === 'neuro_sama'"
+                  :module="m.name"
+                />
               </v-card-text>
               <v-card-actions class="pb-2">
                 <v-btn
@@ -119,8 +135,10 @@
 </template>
 
 <script lang="ts" setup>
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { api, useConnectionStore } from '@/stores/connection'
+import ModuleStateChips from '@/components/state/ModuleStateChips.vue'
+import { useModuleState } from '@/composables/useModuleState'
 
 interface ModuleInfo {
   url: string | null
@@ -130,6 +148,7 @@ interface ModuleInfo {
 }
 
 const connectionStore = useConnectionStore()
+const moduleState = useModuleState()
 
 const moduleMap = ref<Record<string, ModuleInfo>>({})
 const loading = ref(false)
@@ -177,5 +196,8 @@ const act = async (name: string, op: 'run' | 'stop' | 'restart') => {
 onMounted(() => {
   connectionStore.checkHealth()
   loadModules()
+  moduleState.start()
 })
+
+onUnmounted(() => moduleState.stop())
 </script>

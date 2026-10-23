@@ -25,7 +25,7 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from openai import AsyncOpenAI
 from pydantic import BaseModel
 
-from .. import scene_kit
+from .. import scene_kit, state_kit
 from ..broadcaster import EventBroadcaster
 from ..config import get_config
 from . import tts, ui_media
@@ -167,6 +167,109 @@ def _persona_core_stats(persona: PersonaStore) -> dict:
     }
 
 
+# ---------- /status 的分区 provider（同步、无 I/O，组合 UiState 与场景清单） ----------
+
+
+def _scene_current(ui_state: UiState) -> dict | None:
+    """当前场景 + 清单里的 label/desc/icon（场景清单是唯一权威）。"""
+    snap = ui_state.scene_snapshot()
+    sid = str(snap.get("id") or "")
+    if not sid:
+        return None
+    try:
+        label = ui_scenes.label(sid)
+        desc = ui_scenes.desc(sid)
+        scene = ui_scenes.find(sid)
+        icon = scene.get("icon") if scene else None
+        # 只读清单里的脚本声明，不解析时长（后者可能触发视频轨道探测 = I/O）
+        script = (scene or {}).get("state_script") or {}
+        auto_returns = bool(script.get("steps"))
+    except ui_scenes.SceneError:
+        # 场景数据坏了不拖垮状态投影：用 id 兜底，其余字段留空
+        label, desc, icon, auto_returns = sid, "", None, False
+    return {
+        "id": sid,
+        "label": label,
+        "desc": desc,
+        "icon": icon,
+        "duration": snap.get("duration"),
+        "elapsed": snap.get("elapsed"),
+        "auto_returns": auto_returns,
+    }
+
+
+def _layers_current(ui_state: UiState) -> list:
+    """当前场景的元素层（visible 来自清单）。
+
+    服务端没有运行时的"父页面隐藏集合"权威（隐藏由画面渲染器按自身页面决定），
+    所以这里不臆造 `hidden_by_parent`——只报清单里的可见性。
+    """
+    sid = str(ui_state.scene_snapshot().get("id") or "")
+    if not sid:
+        return []
+    try:
+        for scene in ui_scenes.scenes():
+            if scene.get("id") == sid:
+                return [
+                    {
+                        "id": str(e.get("id")),
+                        "name": e.get("name") or str(e.get("id")),
+                        "visible": e.get("visible", True),
+                    }
+                    for e in scene.get("elements") or []
+                ]
+    except ui_scenes.SceneError:
+        return []
+    return []
+
+
+def _model_current() -> dict:
+    """与 /health 同一个判断（`cfg.neuro_llm() is not None`），不复制规则。"""
+    try:
+        service_ok = get_config().neuro_llm() is not None
+    except RuntimeError:
+        service_ok = False
+    return {"service_ok": service_ok}
+
+
+def _tts_current() -> dict:
+    """复用 `tts.tts_state()`（/health 用的同一个函数）。"""
+    state = tts.tts_state()
+    return {
+        "effective_provider": state.get("effective_provider"),
+        "degraded": bool(state.get("degraded")),
+    }
+
+
+def _neuro_scene_graph() -> dict:
+    """states 从场景清单现生成；transitions 是手写小表。"""
+    try:
+        states = [
+            {"id": s["id"], "label": s.get("label") or s["id"], "desc": s.get("desc") or ""}
+            for s in ui_scenes.scenes()
+        ]
+    except ui_scenes.SceneError:
+        states = []
+    return {
+        "states": states,
+        "transitions": [
+            {"from": "intro", "to": "normal", "by": "intro state_script reaches its end"},
+            {"from": "normal", "to": "intro", "by": "POST /ui/intro"},
+        ],
+    }
+
+
+def build_status_board(ui_state: UiState, ctx: dict) -> state_kit.StateBoard:
+    """装配 neuro 的分区（启动时调用一次；测试可直接调）。"""
+    board = state_kit.StateBoard("neuro_sama")
+    board.register("scene", lambda: _scene_current(ui_state), graph=_neuro_scene_graph())
+    board.register("turn", lambda: ui_state.turn_projection(ctx["channel"]))
+    board.register("layers", lambda: _layers_current(ui_state))
+    board.register("model", _model_current)
+    board.register("tts", _tts_current)
+    return board
+
+
 class ChatRequest(BaseModel):
     message: str
     channel: str = "web"
@@ -302,6 +405,16 @@ def create_app() -> FastAPI:
         )
         # UiState 先于 agent 创建：agent 要在产出事件时直接记账（不依赖 HTTP 消费者）
         ui_state = UiState()
+        # /status 的分区提供者：只读 UiState / 场景清单 / 配置，同步且无 I/O。
+        # channel 是 query 级别的策略（机制在 state_kit），用 request 作用域变量传递。
+        status_ctx = {"channel": None}
+        board = build_status_board(ui_state, status_ctx)
+
+        def observe(ev, channel, turn_id):
+            # 记账仍然只有 UiState 一处；这里只额外通知 board rev 变化
+            ui_state.observe(ev, channel, turn_id)
+            board.note_change("turn")
+
         agent = NeuroAgent(
             client,
             registry,
@@ -309,7 +422,7 @@ def create_app() -> FastAPI:
             memory,
             persona,
             StreamGameProvider(),
-            event_sink=ui_state.observe,
+            event_sink=observe,
         )
         app.state.agent = agent
         app.state.memory = memory
@@ -320,9 +433,16 @@ def create_app() -> FastAPI:
         app.state.broadcaster = EventBroadcaster()
         app.state.ui_broadcaster = EventBroadcaster()
         app.state.ui_state = ui_state
-        app.state.ui_scene = make_runner(
-            app.state.ui_state, app.state.ui_broadcaster.publish
-        )
+        app.state.status_board = board
+        app.state.status_channel = status_ctx
+
+        def publish_ui(ev: dict) -> None:
+            app.state.ui_broadcaster.publish(ev)
+            # 场景切换会改变 /status 的 scene/layers 分区
+            if ev.get("type") == "scene_set":
+                board.note_change("scene", "layers")
+
+        app.state.ui_scene = make_runner(app.state.ui_state, publish_ui)
         try:
             scene_info = app.state.ui_scene.init_default()
             scene_names = [s["id"] for s in ui_scenes.overview()]
@@ -367,23 +487,24 @@ def create_app() -> FastAPI:
 
     @app.get("/status")
     async def status(request: Request):
-        """跨模块的状态投影：当前场景 + 语音节奏 + 在途轮次，**不含音频/正文**。
+        """状态机投影：`{module, rev, ts, sections}`（**不含旧扁平键**）。
 
-        判据：任意时刻重读能拿到正确值 → 状态平面（本端点）；"发生过的事实"
-        （这一轮说了什么）→ 内容平面（`POST /chat`）。`speech.text` 已删除。
+        分区：`scene`（当前画面）、`turn`（本轮节奏）、`layers`（元素层）、
+        `model`（LLM 服务是否可用）、`tts`（生效的合成器）。全部 provider
+        同步且无 I/O，可被别的模块每半秒拉一次；音频/正文只在内容平面。
 
-        与 `/ui/state` 的分工：那边是**画面快照**（逐句 consumed + 正在发声那句的
-        base64 音频，给渲染器断点续播）；这边是**状态投影**，可以被别的模块每半秒
-        拉一次而不拖几 MB。stream 的直播循环用它判"开场是否放完"、读本轮
-        `ends_at` 决定下一轮节奏；chatbot 用它判她是不是睡着了。
+        `?channel=` 只影响 `turn`（每个 channel 至多一条在途轮次）；`want`/`drop`
+        是分区级过滤（逗号分隔，`*`=全部），只影响输出。
         """
-        cfg = get_config()
-        channel = (request.query_params.get("channel") or "").strip() or None
-        return {
-            "module": "neuro_sama",
-            "model_service_ok": cfg.neuro_llm() is not None,
-            **app.state.ui_state.status(channel),
-        }
+        params = request.query_params
+        channel = (params.get("channel") or "").strip() or None
+        app.state.status_channel["channel"] = channel
+        want = params.get("want")
+        drop = params.get("drop")
+        return app.state.status_board.read(
+            want=want.split(",") if want else None,
+            drop=drop.split(",") if drop else None,
+        )
 
     # ---------- 对话 ----------
 

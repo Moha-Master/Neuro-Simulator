@@ -1,6 +1,7 @@
 import { ref } from 'vue'
 import { ApiError, api, describeError } from '@/stores/connection'
-import type { QueueMessage, SceneSummary, SessionRow, StreamStatus } from '@/types/stream'
+import type { QueueMessage, SceneSummary, SessionRow } from '@/types/stream'
+import type { StreamStatus } from '@/types/status'
 
 const MODULE = 'stream'
 

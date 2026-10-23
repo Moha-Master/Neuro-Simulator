@@ -11,84 +11,12 @@ export interface StreamSession {
   tags?: string[]
 }
 
-export interface StreamMetadata {
-  title: string
-  category: string
-  /** Twitch 流标签（最多 10 个） */
-  tags: string[]
-  /** false = 无场次，此时值是 config 的默认值（作为下一场初值） */
-  live: boolean
-}
-
-export interface ChatbotRuntime {
-  enabled: boolean
-  model: string | null
-  model_ref: string | null
-  interval_s: number
-  count: number
-  max_concurrent: number
-  interval_jitter: number
-  in_flight: number
-}
-
-export interface PersistedSession {
-  session_id: string
-  queue_id?: string
-  channel: string
-  conversation_id: string
-  state: string
-  started_at: string
-  ended_at: string | null
-  cursor_msg?: number
-  rounds: number
-  tags?: string[]
-}
-
-/** 开场闸门（仅 state=starting 时有值）：stream 轮询 neuro 的权威场景等她离开开场。 */
-export interface IntroGate {
-  /** neuro 切到的开场场景 id（判据：她离开这个场景 = 开场放完） */
-  waiting_for: string
-  neuro_scene: string | null
-  polls: number
-  timeout_s: number
-  waited_s: number
-  remaining_s: number
-  /** 最近一次读 neuro /status 失败的原因（成功时为 null/缺省） */
-  status_error?: string | null
-}
-
-/** 异常终止开播的原因（下次成功开播时服务端清空）。 */
-export interface StreamLastError {
-  code: string
-  message: string
-  at: string
-  detail?: {
-    waiting_for?: string
-    neuro_scene?: string | null
-    polls?: number
-    status_error?: string | null
-  }
-}
-
-export interface StreamStatus {
-  state: string
-  /** 当前画面场景 id（开场期间是 hidden 的 room_intro） */
-  scene: string | null
-  /** hidden 场景不在 GET /stream/scenes 清单里，服务端直接给出名字 */
-  scene_label?: string | null
-  scene_icon?: string | null
-  /** 开场闸门（starting 有值，其他阶段 null） */
-  starting?: IntroGate | null
-  last_error?: StreamLastError | null
-  /** 当前活跃游戏 id（无则 null） */
-  game: string | null
-  session: StreamSession | null
-  metadata: StreamMetadata
-  queue_depth_unconsumed: number | null
-  priority_queue_depth_unconsumed: number | null
-  chatbot: ChatbotRuntime
-  persisted: PersistedSession | null
-}
+/**
+ * stream 模块的非状态类型。
+ *
+ * 状态机投影（`/stream/status` 与 vedal `/state`）的类型统一在
+ * `@/types/status.ts`——那边是契约守卫，别在这里再抄一份。
+ */
 
 export interface QueueMessage {
   id: number
@@ -131,6 +59,8 @@ export interface SceneSummary {
   id: string
   label: string
   icon: string
+  /** 面向机器/LLM 的英文状态自述 */
+  desc: string
   prompt_context: string
   elements: SceneElement[]
 }

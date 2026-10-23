@@ -55,7 +55,7 @@
       <v-card class="mb-6">
         <v-card-title class="text-subtitle-1">当前场次</v-card-title>
         <v-card-text>
-          <template v-if="st.status.value && st.status.value.state !== 'offline'">
+          <template v-if="currentState !== 'offline'">
             <v-row dense>
               <v-col cols="6" md="3">
                 <div class="text-caption text-disabled">Session</div>
@@ -68,8 +68,8 @@
               <v-col cols="6" md="3">
                 <div class="text-caption text-disabled">轮次 / 待消费（普通 · 优先）</div>
                 <div class="text-body-2">
-                  {{ rounds }} / {{ st.status.value.queue_depth_unconsumed ?? '—' }} ·
-                  {{ st.status.value.priority_queue_depth_unconsumed ?? '—' }}
+                  {{ rounds }} / {{ st.status.value?.sections.chat.current?.normal_pending ?? '—' }} ·
+                  {{ st.status.value?.sections.chat.current?.priority_pending ?? '—' }}
                 </div>
               </v-col>
               <v-col cols="6" md="3">
@@ -201,7 +201,7 @@
            开局 → 游戏场景、下播 → no-source 待机）；手动切会让画面与循环/游戏状态
            互相打架，所以 dashboard 不再提供按钮（API 仍然可用）。
            room_intro 是 hidden 场景（不在 GET /stream/scenes 清单里），名字与图标
-           由服务端 status.scene_label / scene_icon 给出。 -->
+           由服务端 status.sections.scene.current 给出。 -->
       <v-card class="mb-6">
         <v-card-title class="text-subtitle-1">场景（直播画面）</v-card-title>
         <v-card-text>
@@ -210,12 +210,12 @@
               {{ currentSceneLabel }}
             </v-chip>
             <v-chip
-              v-if="st.status.value?.game"
+              v-if="st.status.value?.sections.games.current?.active"
               size="small"
               variant="tonal"
               prepend-icon="mdi-gamepad-variant"
             >
-              游戏：{{ st.status.value.game }}
+              游戏：{{ st.status.value.sections.games.current?.active }}
             </v-chip>
             <v-spacer />
             <v-btn
@@ -307,28 +307,33 @@ const CATEGORIES = [
 
 let timer: number | null = null
 
-const currentState = computed(() => st.status.value?.state ?? 'offline')
-const sid = computed(() => st.status.value?.session?.session_id ?? '')
-const conv = computed(() => st.status.value?.session?.conversation_id ?? '')
-const rounds = computed(() => st.status.value?.persisted?.rounds ?? 0)
-const live = computed(() => Boolean(st.status.value?.metadata?.live))
-const currentScene = computed(() => st.status.value?.scene ?? '')
+const currentState = computed(
+  () => st.status.value?.sections.loop.current?.state ?? 'offline',
+)
+const sid = computed(() => st.status.value?.sections.loop.current?.session_id ?? '')
+const conv = computed(() => st.status.value?.sections.loop.current?.conversation_id ?? '')
+const rounds = computed(() => st.status.value?.sections.loop.current?.round ?? 0)
+const live = computed(() => Boolean(st.status.value?.sections.metadata.current?.live))
+const currentScene = computed(() => st.status.value?.sections.scene.current?.id ?? '')
 const currentSceneInfo = computed(
   () => st.scenes.value.find((s) => s.id === currentScene.value) ?? null,
 )
 const currentSceneLabel = computed(() => {
   if (currentSceneInfo.value) return currentSceneInfo.value.label
   // hidden 场景（开场的 room_intro）不在手动清单里 → 用服务端给的 label，别显示裸 id
-  const fromServer = st.status.value?.scene_label
+  const fromServer = st.status.value?.sections.scene.current?.label
   if (fromServer) return fromServer
   return currentScene.value ? currentScene.value : '待机（no source）'
 })
 const currentSceneIcon = computed(
-  () => currentSceneInfo.value?.icon ?? st.status.value?.scene_icon ?? 'mdi-television-pause',
+  () =>
+    currentSceneInfo.value?.icon ??
+    st.status.value?.sections.scene.current?.icon ??
+    'mdi-television-pause',
 )
 // 开场闸门与"上次为什么没开成"（服务端在下次成功开播时清空 last_error）
-const introGate = computed(() => st.status.value?.starting ?? null)
-const lastError = computed(() => st.status.value?.last_error ?? null)
+const introGate = computed(() => st.status.value?.sections.loop.current?.intro ?? null)
+const lastError = computed(() => st.status.value?.sections.loop.current?.last_error ?? null)
 
 // 本场信息编辑区：以服务端值为基线；用户有未保存改动时不被轮询覆盖，
 // 但场次切换（开播/下播）会重新对齐（新场次的标题来自上一场或 config 默认值）。
@@ -349,7 +354,7 @@ const metaDirty = computed(
 )
 
 watch(
-  () => st.status.value?.metadata,
+  () => st.status.value?.sections.metadata.current,
   (m) => {
     if (!m) return
     if (!metaDirty.value || m.live !== metaBase.value.live) {

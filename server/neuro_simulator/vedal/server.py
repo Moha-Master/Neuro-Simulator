@@ -2,6 +2,7 @@
 
 与 dashboard 的通信协议（同域 HTTP，dashboard 由本模块静态托管）：
 - GET  /health                    健康检查（dashboard 只检查 vedal；vedal 顺带探测各模块）
+- GET  /state                     各模块状态机投影的全景聚合（并发扇出，原样透传）
 - GET  /manage/config             取 config.json 结构化内容 + 服务反查表
 - PUT  /manage/config             提交结构化 config -> 悬空引用清理 -> 校验 -> 写盘 -> 按变动 schema 热重载
 - POST /manage/config/reload-all  向所有模块和 vedal 自身执行 reload
@@ -28,8 +29,10 @@ import os
 import signal
 import subprocess
 import sys
+import time
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
 
@@ -211,6 +214,72 @@ def module_url(name: str) -> Optional[str]:
     return _module_url(get_config(), name)
 
 
+# 状态机投影的读超时：模块的 provider 是同步无 I/O 的，2s 足够；这是聚合层的
+# 观测纪律，不进 config（改它没有业务含义，只会让 dashboard 更慢）。
+STATE_TIMEOUT_S = 2.0
+
+# 各模块状态投影的路径由模块自己定（neuro 是 /status，stream 是 /stream/status），
+# 这里只做"按约定拼 URL"的小表；未来模块默认按 /status 处理。
+_MODULE_STATUS_PATHS = {
+    "neuro_sama": "/status",
+    "stream": "/stream/status",
+}
+
+
+def _local_iso() -> str:
+    return datetime.now().astimezone().isoformat(timespec="seconds")
+
+
+async def _fetch_module_state(
+    name: str,
+    *,
+    want: Optional[str],
+    drop: Optional[str],
+) -> dict[str, Any]:
+    """读取一个模块的 `/status` 投影，**原样**放进聚合结果。
+
+    规则：只加观测字段（url/reachable/observed_at/elapsed_ms/error），不改名、
+    不摊平、不合并模块返回的任何内容；任何失败都必须降级成本模块
+    `reachable=false + error`，绝不让整次 `/state` 变成 500。
+    """
+    url = module_url(name)
+    observed_at = _local_iso()
+    started = time.monotonic()
+    entry: dict[str, Any] = {
+        "url": url,
+        "reachable": False,
+        "observed_at": observed_at,
+        "elapsed_ms": 0,
+        "status": None,
+        "error": None,
+    }
+    if not url:
+        entry["error"] = "no url configured"
+        return entry
+
+    params: dict[str, str] = {}
+    if want is not None:
+        params["want"] = want
+    if drop is not None:
+        params["drop"] = drop
+
+    path = _MODULE_STATUS_PATHS.get(name, "/status")
+    try:
+        async with httpx.AsyncClient(timeout=STATE_TIMEOUT_S) as client:
+            response = await client.get(f"{url}{path}", params=params or None)
+        if response.status_code != 200:
+            raise RuntimeError(f"HTTP {response.status_code}: {response.text[:200]}")
+        entry["status"] = response.json()
+        entry["reachable"] = True
+    except Exception as e:  # 连接/超时/非 200/坏 JSON 一律降级该模块
+        entry["error"] = f"{type(e).__name__}: {e}"
+    finally:
+        # 观测完成时刻：freshness 描述的是"这份快照多久前拿到"，不是发出请求的时刻
+        entry["observed_at"] = _local_iso()
+        entry["elapsed_ms"] = max(0, int((time.monotonic() - started) * 1000))
+    return entry
+
+
 class SPAStaticFiles(StaticFiles):
     """SPA 回退：无扩展名的未命中路径返回 index.html（vue-router history 模式）。"""
 
@@ -278,6 +347,48 @@ def create_app() -> FastAPI:
             url = module_url(name)
             modules[name] = {"url": url, "reachable": await _is_reachable(url)}
         return {"status": "ok", "module": "vedal", "modules": modules}
+
+    # ---------- /state：各模块状态机投影的全景聚合 ----------
+
+    @app.get("/state")
+    async def state(
+        want: Optional[str] = None,
+        drop: Optional[str] = None,
+        modules: Optional[str] = None,
+    ):
+        """并发读取各模块 `/status`，原样聚合；**不做二次计算/缓存/摊平**。
+
+        - `want`/`drop` 原样透传给每个模块（分区级过滤由模块解释）；
+        - `modules=stream,neuro_sama` 只聚合指定模块（默认 config 里的全部模块）；
+        - vedal 自身没有状态机投影，不进 `modules`；
+        - `/manage/modules` 的生命周期信息（managed/pid）是另一条路径的语义，不混进来；
+        - 任何模块失败只影响它自己：`reachable=false + error`，HTTP 永远 200。
+        """
+        names = [name for name in _module_names() if name != "vedal"]
+        if modules:
+            requested = {part.strip() for part in modules.split(",") if part.strip()}
+            names = [name for name in names if name in requested]
+
+        results = await asyncio.gather(
+            *(_fetch_module_state(name, want=want, drop=drop) for name in names),
+            return_exceptions=True,
+        )
+
+        payload: dict[str, Any] = {}
+        for name, result in zip(names, results):
+            if isinstance(result, BaseException):
+                # _fetch 自己已经兜底过；这里是防御性分支（例如取消/意外异常）
+                payload[name] = {
+                    "url": module_url(name),
+                    "reachable": False,
+                    "observed_at": _local_iso(),
+                    "elapsed_ms": 0,
+                    "status": None,
+                    "error": f"{type(result).__name__}: {result}",
+                }
+            else:
+                payload[name] = result
+        return {"vedal": {"module": "vedal", "ts": _local_iso()}, "modules": payload}
 
     # ---------- /manage：全局配置管理 ----------
 

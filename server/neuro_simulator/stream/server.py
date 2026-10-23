@@ -36,6 +36,8 @@ from ..scene_kit import SceneError
 from ..templates import TemplateError
 from . import scenes as scene_catalog
 from . import settings as stream_settings
+from . import status as stream_status_projection
+from .audience import AudienceTracker
 from .games import GameError
 from .loop import StreamConflict, StreamLoop
 from .neuro_client import NeuroClient
@@ -205,8 +207,18 @@ def create_app() -> FastAPI:
                 f"[stream] 清理遗留场次（进程重启所致）: {stale['session_id']}",
                 flush=True,
             )
+        # 状态机投影：provider 只读 loop / 场景清单 / 缓存，绝不 await。
+        # 观众数是频道级事实（未开播也要能取），后台任务自己刷新缓存。
+        app.state.audience = AudienceTracker()
+        board = stream_status_projection.build_board(loop, app.state.audience)
+        loop.state_board = board
+        app.state.status_board = board
+        recent = await storage.list_sessions(limit=1)
+        loop.persisted = recent[0] if recent else None
+        app.state.audience.start()
         print("[stream] ready", flush=True)
         yield
+        await app.state.audience.shutdown()
         await loop.shutdown()
         await storage.close()
 
@@ -233,60 +245,18 @@ def create_app() -> FastAPI:
             },
         }
 
-    async def _chatbot_status(lp: StreamLoop) -> dict:
-        cb = stream_settings.load().chatbot
-        return {
-            "enabled": cb.enabled,
-            "model": cb.model or None,
-            "model_ref": cb.model_ref or None,
-            "interval_s": cb.interval_s,
-            "count": cb.count,
-            "max_concurrent": cb.max_concurrent,
-            "interval_jitter": cb.interval_jitter,
-            "in_flight": lp.chatbot.in_flight,
-        }
-
     @app.get("/stream/status")
-    async def stream_status():
-        storage: Storage = app.state.storage
-        lp = _loop()
-        active = await storage.get_active_session()
-        recent = (await storage.list_sessions(limit=1)) or None
-        depth = None
-        priority_depth = None
-        if lp.session:
-            depth = await storage.queue_depth_after(lp.session["queue_row"], lp.session["cursor"])
-            priority_depth = await storage.priority_depth_after(
-                lp.session["queue_row"], lp.session["priority_cursor"]
-            )
-        title, category = lp.session_metadata()
-        tags = lp.session_tags()
-        return {
-            "state": lp.state,
-            "scene": lp.last_scene,
-            # hidden 场景（如开场的 room_intro）不在 GET /stream/scenes 里，
-            # 所以顺带给 label/icon，dashboard 不必自己猜 id
-            "scene_label": scene_catalog.label(lp.last_scene) if lp.last_scene else None,
-            "scene_icon": scene_catalog.icon(lp.last_scene) if lp.last_scene else None,
-            # 开场闸门（仅 starting 有值）：等 neuro 离开开场场景，stream 不倒数秒数
-            "starting": lp.intro_status(),
-            "last_error": lp.last_error,
-            "game": lp.games.active_id,
-            "session": lp.session and {k: lp.session[k] for k in (
-                "session_id", "queue_id", "channel", "conversation_id", "cursor",
-                "priority_cursor", "title", "category", "tags",
-            )},
-            "metadata": {
-                "title": title,
-                "category": category,
-                "tags": tags,
-                "live": lp.session is not None,
-            },
-            "queue_depth_unconsumed": depth,
-            "priority_queue_depth_unconsumed": priority_depth,
-            "chatbot": await _chatbot_status(lp),
-            "persisted": active or (recent[0] if recent else None),
-        }
+    async def stream_status(want: str | None = None, drop: str | None = None):
+        """状态机投影：`{module, rev, ts, sections}`（**没有任何旧扁平键**）。
+
+        每个分区统一是 `{current, graph?}`；provider 同步、无 I/O，所以这里既
+        不查库也不发 HTTP（队列深度/场次/观众数/neuro 观测都由归属者缓存）。
+        `want`/`drop` 是分区级过滤（逗号分隔，`*`=全部），只影响输出。
+        """
+        return app.state.status_board.read(
+            want=want.split(",") if want else None,
+            drop=drop.split(",") if drop else None,
+        )
 
     @app.get("/stream/sessions")
     async def stream_sessions(limit: int = 20):

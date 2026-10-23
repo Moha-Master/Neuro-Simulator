@@ -24,6 +24,7 @@ declare module 'vue-router/auto-routes' {
     '/neuro-sama-memory': RouteRecordInfo<'/neuro-sama-memory', '/neuro-sama-memory', Record<never, never>, Record<never, never>>,
     '/neuro-sama-persona': RouteRecordInfo<'/neuro-sama-persona', '/neuro-sama-persona', Record<never, never>, Record<never, never>>,
     '/neuro-view': RouteRecordInfo<'/neuro-view', '/neuro-view', Record<never, never>, Record<never, never>>,
+    '/state': RouteRecordInfo<'/state', '/state', Record<never, never>, Record<never, never>>,
     '/stream': RouteRecordInfo<'/stream', '/stream', Record<never, never>, Record<never, never>>,
     '/stream-chatbot': RouteRecordInfo<'/stream-chatbot', '/stream-chatbot', Record<never, never>, Record<never, never>>,
     '/stream-templates': RouteRecordInfo<'/stream-templates', '/stream-templates', Record<never, never>, Record<never, never>>,
@@ -63,6 +64,10 @@ declare module 'vue-router/auto-routes' {
     }
     'src/pages/neuro-view.vue': {
       routes: '/neuro-view'
+      views: never
+    }
+    'src/pages/state.vue': {
+      routes: '/state'
       views: never
     }
     'src/pages/stream.vue': {

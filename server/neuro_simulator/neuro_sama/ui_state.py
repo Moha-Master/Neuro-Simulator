@@ -1,17 +1,18 @@
 """neuro 窗口的共享状态：当前场景 + 当前/最近一轮语音（speech）时间线。
 
-这里对外提供**两个面**，用途和频率不同：
+这里对外提供**三个面**，用途和频率不同：
 
 - `snapshot()` → **画面快照**（`/ui/events` 与 `/ui/state`）：逐句带 `consumed`，
   正在发声那句还带 base64 `audio`，供渲染器（OBS 重载、dashboard 预览）断点续播。
-- `status()` → **状态投影**（`/status`）：只有"当前场景 + 还剩多久说话"，
+- `turn_projection()` / `scene_snapshot()` → **状态投影的原料**（`/status` 由
+  `state_kit.StateBoard` 组合）：只有"这一轮还剩多久"这类任意时刻重读都对的值，
   不含音频、不含正文，供其他模块高频轮询（stream 判开场是否放完、判下一轮节奏；
   chatbot 判她是否睡着；将来的 Discord/QQ 接入同样消费它）。
 - `turn_text()` / `turn_segments()` / `batch()` → **内容平面**（`POST /chat`）：
   "这一轮到底说了什么"，整轮全量、不截断；`segments` 的 `(turn_id, step, index)`
   是唯一键。
 
-时间基准是服务端 `time.monotonic()`；`status()` 里的 `ends_at` 已换算成 unix 秒——
+时间基准是服务端 `time.monotonic()`；状态投影里的 `ends_at` 已换算成 unix 秒——
 **跨进程不要对 monotonic 时钟**，所以对外只给"还剩多少秒"和换算后的绝对时刻。
 
 **场景是权威状态**：只有 `SceneRunner`（后端脚本执行器）与管理端点能改，
@@ -212,43 +213,46 @@ class UiState:
 
     # ---------- status（其他模块消费的精简投影） ----------
 
-    def status(self, channel: Optional[str] = None) -> Dict[str, Any]:
-        """"我在哪个场景 / 还剩多久说话"——给别的模块轮询用，**不含音频、不含正文**。
+    def turn_projection(self, channel: Optional[str] = None) -> Dict[str, Any]:
+        """本 channel 这一轮的节奏投影（状态平面）：**不含音频、不含正文**。
 
-        **平面判据**：任意时刻重读都能拿到正确值 → 状态平面（这里）；它是"发生过的
-        事实"（这一轮说过哪些句子/音频）→ 内容平面（`POST /chat` / `turn_text()`）。
+        与 `snapshot()` 的分工：snapshot 是**画面快照**（逐句 consumed，正在发声那句
+        还带 base64 音频），供渲染器断点续播；这里只回答"她还在生成吗 / 还在说话吗 /
+        还剩多久"，供 stream 的直播循环判定开场是否放完、下一轮节奏，chatbot 判定她
+        是不是睡着了。
 
-        与 `snapshot()` 的分工：snapshot 是**画面快照**（逐句 consumed，正在发声那句还带
-        base64 音频），供渲染器断点续播；status 是**状态投影**，供 stream 的直播循环判
-        定开场是否放完、chatbot 判定她是不是睡着了、将来的 Discord/QQ 接入判节奏。
-        字段可以重叠，但用途和频率不同——status 被 0.5s 一次地拉也不该拖几 MB。
+        `segments_done` 是**现算**的已发声句数（句尾已过；正在说的那句不算），
+        不额外存一份计数器——派生值不落第二份存储。
 
         注意：**每个 channel 至多一条在途 turn**（`new_turn()` 会覆盖同 channel 的旧
         记录），所以调用方必须在本轮读走 `ends_at` 之后再发下一轮；否则读到的是新轮
-        的时间轴。
+        的时间轴。`turn_id` 就是给调用方做这个校验的。
         """
         now = time.monotonic()
         pick = channel or self._last_channel
         turn = self._turns.get(pick) if pick else None
         remaining = max(0.0, turn.play_head - now) if turn is not None else 0.0
         return {
-            "scene": self.scene_snapshot(now) or None,
-            "speech": {
-                "channel": pick,
-                "turn_id": turn.id if turn is not None else None,
-                # generating = 本轮还在生成；speaking = 还有声音/字幕要播
-                "generating": bool(turn and turn.active),
-                "speaking": remaining > 0.05,
-                "remaining_s": round(remaining, 2),
-                # 本轮语音预测播完的 unix 时刻；可能落在过去（= 她上次说完的时刻）。
-                # 本轮还没有任何 speech（TTS 关闭/纯工具轮）→ None：下游据此跳过语音等待。
-                "ends_at": (
-                    round(time.time() + (turn.play_head - now), 3)
-                    if turn is not None and turn.speech
-                    else None
-                ),
-            },
-            "turns": {"in_flight": sum(1 for t in self._turns.values() if t.active)},
+            "turn_id": turn.id if turn is not None else None,
+            "channel": pick,
+            # generating = 本轮还在生成；speaking = 还有声音/字幕要播
+            "generating": bool(turn and turn.active),
+            "speaking": remaining > 0.05,
+            "remaining_s": round(remaining, 2),
+            # 本轮语音预测播完的 unix 时刻；可能落在过去（= 她上次说完的时刻）。
+            # 本轮还没有任何 speech（TTS 关闭/纯工具轮）→ None：下游据此跳过语音等待。
+            "ends_at": (
+                round(time.time() + (turn.play_head - now), 3)
+                if turn is not None and turn.speech
+                else None
+            ),
+            "segments": len(turn.speech) if turn is not None else 0,
+            "segments_done": (
+                sum(1 for s in turn.speech if s.start + s.duration <= now)
+                if turn is not None
+                else 0
+            ),
+            "in_flight": sum(1 for t in self._turns.values() if t.active),
         }
 
     # ---------- 内容平面（/chat 的批量响应） ----------

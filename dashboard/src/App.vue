@@ -9,6 +9,12 @@
           </template>
           <v-list-item-title>Home</v-list-item-title>
         </v-list-item>
+        <v-list-item to="/state" :active="$route.path === '/state'">
+          <template #prepend>
+            <v-icon>mdi-sitemap-outline</v-icon>
+          </template>
+          <v-list-item-title>State</v-list-item-title>
+        </v-list-item>
         <v-list-item to="/config" :active="$route.path === '/config'">
           <template #prepend>
             <v-icon>mdi-cog</v-icon>

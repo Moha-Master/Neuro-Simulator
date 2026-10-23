@@ -125,9 +125,10 @@ const pending = ref<'all' | null>(null)
 
 const runtime = computed(
   () =>
-    st.status.value?.chatbot ?? {
+    st.status.value?.sections.chatbot.current ?? {
       enabled: false,
       model: null,
+      model_ref: null,
       interval_s: 0,
       count: 0,
       max_concurrent: 0,

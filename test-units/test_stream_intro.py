@@ -59,9 +59,12 @@ class _ScriptedNeuro:
         sid = self.scenes[min(self.calls - 1, len(self.scenes) - 1)]
         return {
             "module": "neuro_sama",
-            "scene": {"id": sid, "duration": 0.0, "elapsed": 0.0} if sid else None,
-            "speech": {"speaking": False, "remaining_s": 0.0},
-            "turns": {"in_flight": 0},
+            "sections": {
+                "scene": {
+                    "current": {"id": sid, "duration": 0.0, "elapsed": 0.0} if sid else None
+                },
+                "turn": {"current": {"speaking": False, "remaining_s": 0.0}},
+            },
         }
 
     async def stop(self, channel, conversation_id) -> None:
@@ -345,7 +348,17 @@ class _FakeSpeechStatus:
         self.ends_at = time.time() + ends_in_s
 
     async def status(self, channel=None) -> dict:
-        return {"speech": {"turn_id": 1, "speaking": True, "ends_at": self.ends_at}}
+        return {
+            "sections": {
+                "turn": {
+                    "current": {
+                        "turn_id": 1,
+                        "speaking": True,
+                        "ends_at": self.ends_at,
+                    }
+                }
+            }
+        }
 
 
 class TestGameSpeechGate(unittest.IsolatedAsyncioTestCase):

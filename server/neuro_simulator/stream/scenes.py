@@ -151,6 +151,15 @@ def icon(scene_id: Optional[str]) -> Optional[str]:
     return value or None
 
 
+def desc(scene_id: Optional[str]) -> str:
+    """场景的**机器/LLM 自述**（英文陈述句）；没写就是空串。
+
+    与 `label`（短名）、`prompt_context`（注入当轮 prompt 的指令）分工见 AGENTS.md。
+    """
+    scene = find(scene_id)
+    return str(scene.get("desc") or "") if scene else ""
+
+
 def prompt_context(scene_id: Optional[str]) -> str:
     """场景自带说明则用它，否则空串（调用方回落到 config 的 scene_context）。"""
     scene = find(scene_id)
@@ -218,6 +227,7 @@ def overview() -> List[Dict[str, Any]]:
             "id": s.get("id"),
             "label": s.get("label") or s.get("id"),
             "icon": s.get("icon") or "mdi-image-frame",
+            "desc": s.get("desc") or "",
             "prompt_context": s.get("prompt_context") or "",
             "elements": [
                 {
@@ -291,6 +301,9 @@ def _validate(data: Any) -> None:
         pc = scene.get("prompt_context")
         if pc is not None and not isinstance(pc, str):
             raise SceneError(f"场景 {sid}: prompt_context 必须是字符串")
+        # desc 是面向机器/LLM 的状态自述（英文陈述句）；非必填，保持旧清单可用
+        if "desc" in scene and not isinstance(scene.get("desc"), str):
+            raise SceneError(f"场景 {sid}: desc 必须是字符串")
 
     for scene in items:
         sid = str(scene.get("id"))

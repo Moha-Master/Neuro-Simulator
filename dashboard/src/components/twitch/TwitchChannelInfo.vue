@@ -104,7 +104,7 @@
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import TwitchIcon from './TwitchIcon.vue'
 import { useNotifications } from '@/composables/twitchNotifications'
-import { useViewerCount } from './useViewerCount'
+import type { AudienceStatus } from '@/types/status'
 
 const props = withDefaults(
   defineProps<{
@@ -115,8 +115,10 @@ const props = withDefaults(
     state: string
     /** 本场开始时间（DB 的 YYYY-MM-DD HH:MM:SS） */
     startedAt: string | null
+    /** 频道观众数（stream 后端的 audience 分区；null = 暂不可用） */
+    audience?: AudienceStatus | null
   }>(),
-  { tags: () => [] },
+  { tags: () => [], audience: null },
 )
 
 const avatarUrl = '/avatar.webp'
@@ -138,7 +140,15 @@ function toggleFollow(): void {
   localStorage.setItem(FOLLOW_KEY, followed.value ? '1' : '0')
 }
 
-const { text: viewerText, title: viewerTitle } = useViewerCount()
+/** 观众数由 stream 后端缓存（TwitchTracker 平均观众）；前端不再直连外部接口。 */
+const viewerText = computed(() =>
+  props.audience?.viewers == null
+    ? '—'
+    : Number(props.audience.viewers).toLocaleString('en-US'),
+)
+const viewerTitle = computed(() =>
+  props.audience?.viewers == null ? '观众数暂不可用' : 'TwitchTracker 平均观众（非实时）',
+)
 
 const now = ref(Date.now())
 let timer: number | null = null

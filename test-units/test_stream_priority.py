@@ -19,6 +19,7 @@ class _FakeNeuroClient:
 
     def __init__(self, url: str, *, ends_in_s: float = 0.0, text: str = "ta-da") -> None:
         self.url = url
+        self.base_url = url
         self.ends_in_s = ends_in_s
         self.text = text
         self.chat_calls = 0
@@ -42,10 +43,14 @@ class _FakeNeuroClient:
     async def status(self, channel=None) -> dict:
         self.status_calls += 1
         return {
-            "speech": {
-                "turn_id": 7,
-                "speaking": self.ends_in_s > 0,
-                "ends_at": time.time() + self.ends_in_s,
+            "sections": {
+                "turn": {
+                    "current": {
+                        "turn_id": 7,
+                        "speaking": self.ends_in_s > 0,
+                        "ends_at": time.time() + self.ends_in_s,
+                    }
+                }
             }
         }
 

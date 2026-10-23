@@ -36,6 +36,7 @@
           :tags="tags"
           :state="state"
           :started-at="startedAt"
+          :audience="audience"
         />
       </div>
 
@@ -98,23 +99,30 @@ const uiUrl = '/ui/stream/'
 
 const isDark = computed(() => theme.global.current.value.dark)
 
-const state = computed(() => chatState.value || streamStatus.value?.state || 'offline')
+const state = computed(
+  () => chatState.value || streamStatus.value?.sections.loop.current?.state || 'offline',
+)
 const isOffline = computed(() => state.value === 'offline')
 
 const title = computed(
-  () => chatMetadata.value.title || streamStatus.value?.metadata.title || '',
+  () => chatMetadata.value.title || streamStatus.value?.sections.metadata.current?.title || '',
 )
 const category = computed(
-  () => chatMetadata.value.category || streamStatus.value?.metadata.category || 'Just Chatting',
+  () =>
+    chatMetadata.value.category ||
+    streamStatus.value?.sections.metadata.current?.category ||
+    'Just Chatting',
 )
 const tags = computed(() =>
   chatMetadata.value.tags.length
     ? chatMetadata.value.tags
-    : (streamStatus.value?.metadata.tags ?? []),
+    : (streamStatus.value?.sections.metadata.current?.tags ?? []),
 )
 
+const audience = computed(() => streamStatus.value?.sections.audience.current ?? null)
+
 const startedAt = computed(() => {
-  const persisted = streamStatus.value?.persisted
+  const persisted = streamStatus.value?.sections.loop.current?.persisted
   if (!persisted || persisted.state === 'offline') return null
   return persisted.started_at
 })
@@ -122,7 +130,7 @@ const startedAt = computed(() => {
 const chatActive = computed(
   () =>
     chatSessionActive.value ||
-    (Boolean(streamStatus.value?.session) && state.value !== 'offline'),
+    (Boolean(streamStatus.value?.sections.loop.current?.session_id) && state.value !== 'offline'),
 )
 
 // 折叠状态与 Twitch 一样持久化

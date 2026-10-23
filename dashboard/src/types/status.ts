@@ -1,0 +1,256 @@
+/**
+ * 状态机投影的类型契约（与后端字段逐字对齐）。
+ *
+ * 这些类型是**契约守卫**：dashboard 的所有状态读取都走具名类型，`vue-tsc` 会在
+ * 后端改字段名/改形状时直接报错，而不是运行时读到 undefined 才发现。
+ *
+ * 形状来源：
+ * - `GET /status`（neuro_sama）
+ * - `GET /stream/status`（stream）
+ * - `GET /state`（vedal 聚合，`status` 原样透传上面两者的 envelope）
+ */
+
+// ---------- graph 通用形状 ----------
+
+export interface GraphState {
+  id: string
+  label: string
+  desc?: string
+}
+
+export interface GraphTransition {
+  from: string
+  to: string
+  by?: string
+}
+
+export interface StateGraph {
+  states: GraphState[]
+  transitions: GraphTransition[]
+}
+
+export interface Section<T = Record<string, unknown>> {
+  current: T | null
+  graph?: StateGraph
+  /** provider 抛异常时该分区降级为 {current:null,error}，其余分区照常 */
+  error?: string
+}
+
+export interface StatusEnvelope<S> {
+  module: string
+  rev: number
+  ts: string
+  sections: S
+}
+
+// ---------- stream 分区 ----------
+
+/** 开场闸门（仅 state=starting 时有值）。 */
+export interface IntroGate {
+  waiting_for: string
+  neuro_scene: string | null
+  polls: number
+  timeout_s: number
+  waited_s: number
+  remaining_s: number
+  status_error?: string | null
+}
+
+/** 异常终止开播的原因（下次成功开播时服务端清空）。 */
+export interface StreamLastError {
+  code: string
+  message: string
+  at: string
+  detail?: {
+    waiting_for?: string
+    neuro_scene?: string | null
+    polls?: number
+    status_error?: string | null
+  }
+}
+
+export interface PersistedSession {
+  session_id: string
+  queue_id?: string
+  channel: string
+  conversation_id: string
+  state: string
+  started_at: string
+  ended_at: string | null
+  cursor_msg?: number
+  rounds: number
+  tags?: string[]
+}
+
+export interface LoopStatus {
+  state: string
+  session_id: string | null
+  queue_id: string | null
+  channel: string | null
+  conversation_id: string | null
+  round: number
+  cursor: number | null
+  priority_cursor: number | null
+  intro: IntroGate | null
+  last_error: StreamLastError | null
+  started_at: string | null
+  persisted: PersistedSession | null
+}
+
+export interface StreamSceneStatus {
+  id: string
+  label: string
+  icon: string | null
+  /** 面向机器/LLM 的英文状态自述 */
+  desc: string
+  duration: number | null
+  elapsed: number | null
+}
+
+export interface StreamMetadata {
+  title: string
+  category: string
+  tags: string[]
+  /** false = 无场次，此时值是 config 的默认值（作为下一场初值） */
+  live: boolean
+}
+
+export interface AudienceStatus {
+  /** TwitchTracker 平均观众；拿不到时为 null（不编造数字） */
+  viewers: number | null
+  viewers_source: string
+  updated_at: string | null
+  error: string | null
+}
+
+export interface ChatStatus {
+  normal_pending: number | null
+  priority_pending: number | null
+  last_message_id: number | null
+}
+
+export interface ChatbotRuntime {
+  enabled: boolean
+  model: string | null
+  model_ref: string | null
+  interval_s: number
+  count: number
+  max_concurrent: number
+  interval_jitter: number
+  in_flight: number
+}
+
+export interface GamesStatus {
+  active: string | null
+  /** 活跃游戏的 element_state 全量快照（key = 游戏 id，含 phase） */
+  [gameId: string]: unknown
+}
+
+export interface NeuroLinkStatus {
+  reachable: boolean
+  observed_at: string | null
+  url: string
+  error: string | null
+}
+
+export interface StreamSections {
+  loop: Section<LoopStatus>
+  scene: Section<StreamSceneStatus>
+  metadata: Section<StreamMetadata>
+  audience: Section<AudienceStatus>
+  chat: Section<ChatStatus>
+  chatbot: Section<ChatbotRuntime>
+  games: Section<GamesStatus>
+  neuro_link: Section<NeuroLinkStatus>
+}
+
+export type StreamStatus = StatusEnvelope<StreamSections>
+
+// ---------- neuro_sama 分区 ----------
+
+export interface NeuroSceneStatus {
+  id: string
+  label: string
+  /** 面向机器/LLM 的英文状态自述（原样展示，不翻译） */
+  desc: string
+  icon: string | null
+  duration: number | null
+  elapsed: number | null
+  auto_returns: boolean
+}
+
+export interface TurnStatus {
+  turn_id: string | null
+  channel: string | null
+  generating: boolean
+  speaking: boolean
+  remaining_s: number
+  /** 本轮语音预测播完的 unix 秒；本轮没有 speech 时为 null */
+  ends_at: number | null
+  segments: number
+  segments_done: number
+  in_flight: number
+}
+
+export interface LayerStatus {
+  id: string
+  name: string
+  visible: boolean
+}
+
+export interface ModelStatus {
+  service_ok: boolean
+}
+
+export interface TtsStatus {
+  effective_provider: string | null
+  degraded: boolean
+}
+
+export interface NeuroSections {
+  scene: Section<NeuroSceneStatus>
+  turn: Section<TurnStatus>
+  layers: Section<LayerStatus[]>
+  model: Section<ModelStatus>
+  tts: Section<TtsStatus>
+}
+
+export type NeuroStatus = StatusEnvelope<NeuroSections>
+
+// ---------- vedal 聚合 ----------
+
+/** 聚合器不认识的模块分区（未来模块）：只在 JSON 回落里出现 */
+export type UnknownSections = Record<string, Section<unknown>>
+
+export interface ModuleState<S = UnknownSections> {
+  url: string | null
+  reachable: boolean
+  observed_at: string
+  elapsed_ms: number
+  /** 模块的 `/status` envelope 原样透传；不可达时为 null */
+  status: StatusEnvelope<S> | null
+  error: string | null
+}
+
+export interface VedalState {
+  vedal: { module: string; ts: string }
+  modules: Record<string, ModuleState>
+}
+
+/**
+ * 聚合结果里取某个模块的具名分区。
+ *
+ * 后端 `modules` 是异质 map（key = 模块名），TS 无法从配置静态推出每个 value 的
+ * 分区类型；这里把边界收在两个函数里，页面内部仍然全部走具名类型。
+ */
+export function streamModule(root: VedalState | null): ModuleState<StreamSections> | null {
+  if (!root) return null
+  const entry = root.modules.stream
+  return entry ? (entry as unknown as ModuleState<StreamSections>) : null
+}
+
+export function neuroModule(root: VedalState | null): ModuleState<NeuroSections> | null {
+  if (!root) return null
+  const entry = root.modules.neuro_sama
+  return entry ? (entry as unknown as ModuleState<NeuroSections>) : null
+}

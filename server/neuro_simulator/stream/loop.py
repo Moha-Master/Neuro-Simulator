@@ -4,8 +4,9 @@
 
 每轮：先查优先轨（有则只消费最早 1 条），否则从普通轨随机抽取 ≤N 条未消费消息
 （按时间正序呈现）→ 拼装场景化 user message 调 neuro /chat（批量模式）→
-读 `GET /status` 拿本轮语音预测播完的绝对时刻 → 等“播完 + speech_cooldown_ms”
-→ 下一轮。**stream 不自己累加字幕时间线**：neuro 的 `UiState` 是唯一权威。
+读 `GET /status` 的 `sections.turn.current.ends_at` 拿本轮语音预测播完的绝对时刻 →
+等“播完 + speech_cooldown_ms” → 下一轮。**stream 不自己累加字幕时间线**：neuro 的
+`UiState` 是唯一权威。
 优先消息在注入时与普通消息完全同格式（对模型只是降噪）；入列即广播
 chat_message / priority_message 给画面。空队列行为可配（占位消息 / 静默等待，
 静默模式下由入列事件即时唤醒，无需轮询）。
@@ -17,8 +18,8 @@ stream_metadata / settings。**speech/tool/turn 事件不再走 stream 画面**�
 
 开播：先探测 neuro 健康，再 POST neuro /ui/intro 触发开场（拿她切到的**场景 id**，
 不拿时长）；合成器落到 room_intro（只有 neuro 全屏，不叠 chat/highlight），随后
-每 0.5s 轮询 GET neuro /status——**她离开那个场景 = 开场放完** → 切 room 并推进
-starting→live。stream 侧不存在任何秒数倒计时：换素材、调 after 余量、neuro 改了
+每 0.5s 轮询 GET neuro /status 的 `sections.scene.current.id`——**她离开那个场景 =
+开场放完** → 切 room 并推进 starting→live。stream 侧不存在任何秒数倒计时：换素材、调 after 余量、neuro 改了
 场景 id 都不需要同步改这里。到硬上限（START_READY_TIMEOUT_S）仍未放行则中止本次
 开播（落库 ended + session_end{reason:"intro_timeout"} + status.last_error），
 不硬转 live。neuro 不可达时禁止开播；中途 neuro 掉线由合成器显示 no_source 背景
@@ -32,6 +33,7 @@ import logging
 import random
 import time
 import uuid
+from datetime import datetime
 from typing import Any, Awaitable, Callable, Optional, Union
 
 from .. import scene_kit
@@ -91,6 +93,20 @@ def _now_human() -> str:
     return time.strftime("%a %Y-%m-%d %H:%M:%S")
 
 
+def _neuro_turn(status: Any) -> dict:
+    """/status 新形状里的 turn 分区（sections.turn.current）；读不到就是空 dict。"""
+    if not isinstance(status, dict):
+        return {}
+    sections = status.get("sections")
+    if not isinstance(sections, dict):
+        return {}
+    turn = sections.get("turn")
+    if not isinstance(turn, dict):
+        return {}
+    current = turn.get("current")
+    return current if isinstance(current, dict) else {}
+
+
 class StreamLoop:
     def __init__(self, storage: Storage, bus: EventBroadcaster, persona, templates) -> None:
         self.storage = storage
@@ -117,6 +133,38 @@ class StreamLoop:
         self._intro_gate: Optional[dict[str, Any]] = None
         # 最近一次"异常终止开播"的原因（供 dashboard 显示；下次成功开播时清空）
         self.last_error: Optional[dict[str, Any]] = None
+
+        # /stream/status 的 provider 必须同步无 I/O：有 I/O 的值由 loop（归属者）
+        # 在事情发生时顺手记下，provider 只读这些缓存。
+        self.queue_depth = 0
+        self.priority_depth = 0
+        self.last_message_id = 0
+        self.persisted: Optional[dict[str, Any]] = None
+        # stream 对 neuro 的最近观测（health / intro / status / 语音闸门都更新它）
+        self.neuro_link: dict[str, Any] = {
+            "reachable": False,
+            "observed_at": None,
+            "url": "",
+            "error": None,
+        }
+        # 启动时由 server 绑定：状态变化时 bump rev（未绑定时 no-op，便于单测）
+        self.state_board: Optional[Any] = None
+
+    def _touch(self, *names: str) -> None:
+        """状态分区变了：通知 board 递增 rev（粗粒度，见 state_kit）。"""
+        board = self.state_board
+        if board is not None:
+            board.note_change(*names)
+
+    def note_neuro_link(self, url: str, reachable: bool, error: Optional[str] = None) -> None:
+        """记录一次对 neuro 的真实观测（绝不在这里发请求）。"""
+        self.neuro_link = {
+            "reachable": bool(reachable),
+            "observed_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+            "url": url or "",
+            "error": error,
+        }
+        self._touch("neuro_link")
 
     # ---------- 供 snapshot 的中途连接状态 ----------
 
@@ -161,13 +209,14 @@ class StreamLoop:
                 return
             try:
                 st = await client.status(channel)
+                self.note_neuro_link(neuro_url, True)
             except NeuroError as e:
                 # neuro 重启中：先短睡重试，deadline 兜底
+                self.note_neuro_link(neuro_url, False, f"{type(e).__name__}: {e}")
                 logger.warning("game 语音闸门读 status 失败: %s", e)
                 await self._sleep_ms(SPEECH_POLL_INTERVAL_S * 1000)
                 continue
-            speech = st.get("speech") if isinstance(st, dict) else None
-            ends_at = (speech or {}).get("ends_at") if isinstance(speech, dict) else None
+            ends_at = _neuro_turn(st).get("ends_at")
             if ends_at is None:
                 return
             try:
@@ -203,6 +252,7 @@ class StreamLoop:
         self.bus.publish(ev)
 
     def _publish_state(self) -> None:
+        self._touch("loop")
         self.publish({"type": "state", "state": self.state, "session_state": _SESSION_STATE[self.state]})
 
     # ---------- 控制入口 ----------
@@ -227,10 +277,13 @@ class StreamLoop:
         try:
             await client.health()
         except NeuroError as e:
+            self.note_neuro_link(s.neuro_url, False, f"{type(e).__name__}: {e}")
             raise StreamConflict(f"neuro 模块不可达，无法开播：{e}") from e
+        self.note_neuro_link(s.neuro_url, True)
         try:
             intro_scene = await client.intro()  # 要等她离开的场景 id，不是时长
         except NeuroError as e:
+            self.note_neuro_link(s.neuro_url, False, f"{type(e).__name__}: {e}")
             raise StreamConflict(f"neuro 开场启动失败，无法开播：{e}") from e
 
         queue_row, queue_id = await self.storage.create_queue(f"stream {time.strftime('%Y-%m-%d %H:%M')}")
@@ -265,6 +318,15 @@ class StreamLoop:
             "category": meta_category,
             "tags": meta_tags,
         }
+        # 供 /stream/status 的 loop.started_at / loop.persisted（无 I/O 投影）；
+        # 新队列从空开始，深度与最近消息 id 都归零。
+        self.persisted = await self.storage.get_session(session_id)
+        if self.persisted:
+            self.session["started_at"] = self.persisted.get("started_at")
+        self.queue_depth = 0
+        self.priority_depth = 0
+        self.last_message_id = 0
+        self._touch("loop", "chat")
         self.state = STATE_STARTING
         self._stop_event.clear()
         self._wakeup.clear()
@@ -365,6 +427,11 @@ class StreamLoop:
         self.session["title"] = new_title
         self.session["category"] = new_category
         self.session["tags"] = new_tags
+        if self.persisted is not None:
+            self.persisted.update(
+                {"title": new_title, "category": new_category, "tags": new_tags}
+            )
+        self._touch("metadata", "loop")
         meta = {"title": new_title, "category": new_category, "tags": new_tags}
         self.publish({"type": "stream_metadata", **meta})
         logger.info(
@@ -423,6 +490,7 @@ class StreamLoop:
         self.last_scene = scene_id
         self._scene_duration = max(0.0, float(duration))
         self._scene_started_at = time.monotonic()
+        self._touch("scene")
         return self.scene_snapshot()
 
     def scene_id(self) -> Optional[str]:
@@ -481,7 +549,18 @@ class StreamLoop:
 
     def _announce_chatbot_message(self, msg_id: int, username: str, content: str) -> None:
         """Chatbot 直接写库后的广播回调（不含唤醒，批量入列由 chat 循环统一触发）。"""
+        # chatbot 绕过 append_message 直接写库，深度缓存要在同一条真实路径上补记
+        self._note_appended(None, msg_id)
         self._announce_message(msg_id, username, content)
+
+    def _note_appended(self, priority_type: Optional[str], msg_id: int) -> None:
+        """入列后的深度缓存（未消费数 + 最近消息 id）。"""
+        if priority_type:
+            self.priority_depth += 1
+        else:
+            self.queue_depth += 1
+        self.last_message_id = max(self.last_message_id, int(msg_id))
+        self._touch("chat")
 
     async def append_message(
         self,
@@ -504,6 +583,7 @@ class StreamLoop:
         self._announce_message(
             msg_id, username, content, priority_type=priority_type, value=value
         )
+        self._note_appended(priority_type, msg_id)
         self.on_new_message()
         return msg_id
 
@@ -534,7 +614,8 @@ class StreamLoop:
             gate["polls"] = int(gate.get("polls", 0)) + 1
             try:
                 st = await client.status(s.channel)
-                scene = st.get("scene") if isinstance(st, dict) else None
+                self.note_neuro_link(s.neuro_url, True)
+                scene = ((st.get("sections") or {}).get("scene") or {}).get("current")
                 current = str((scene or {}).get("id") or "")
                 gate["neuro_scene"] = current or None
                 status_error = None
@@ -544,6 +625,7 @@ class StreamLoop:
                     return True
             except (NeuroError, RuntimeError) as e:
                 status_error = f"{type(e).__name__}: {e}"
+                self.note_neuro_link(s.neuro_url, False, status_error)
                 gate["status_error"] = status_error
 
             remaining = deadline - time.monotonic()
@@ -627,6 +709,14 @@ class StreamLoop:
         self._scenes.cancel()  # 作废在跑的场景后端脚本
         self.last_scene = None
         self._scene_duration = 0.0
+        self.queue_depth = 0
+        self.priority_depth = 0
+        if self.persisted is not None:
+            # 下播后 dashboard 仍要看到刚刚结束的那一场（state/ended_at 由 loop 自己维护）
+            self.persisted.update(
+                {"state": "offline", "ended_at": time.strftime("%Y-%m-%d %H:%M:%S")}
+            )
+        self._touch("loop", "chat", "scene")
         self._publish_state()
 
     async def _speech_ends_at(
@@ -639,12 +729,16 @@ class StreamLoop:
         """
         try:
             st = await client.status(channel)
+            self.note_neuro_link(getattr(client, "base_url", ""), True)
         except NeuroError as e:
             # 生成已经成功，状态读不到只意味着本轮无法等语音：退回 cooldown
+            self.note_neuro_link(
+                getattr(client, "base_url", ""), False, f"{type(e).__name__}: {e}"
+            )
             logger.warning("neuro /status 读取失败，本轮按无语音处理: %s", e)
             return None
-        speech = st.get("speech") if isinstance(st, dict) else None
-        if not isinstance(speech, dict):
+        speech = _neuro_turn(st)
+        if not speech:
             return None
         reported_turn = speech.get("turn_id")
         if turn_id is not None and reported_turn is not None and reported_turn != turn_id:
@@ -740,6 +834,22 @@ class StreamLoop:
             priority_cursor=session["priority_cursor"],
             inc_rounds=True,
         )
+        # 游标已推进：未消费深度是"归属者现算后缓存"，/status 只读缓存不查库。
+        self.queue_depth = await self.storage.queue_depth_after(
+            session["queue_row"], session["cursor"]
+        )
+        self.priority_depth = await self.storage.priority_depth_after(
+            session["queue_row"], session["priority_cursor"]
+        )
+        if self.persisted is not None:
+            self.persisted.update(
+                {
+                    "rounds": session["rounds"],
+                    "cursor_msg": session["cursor"],
+                    "priority_cursor": session["priority_cursor"],
+                }
+            )
+        self._touch("loop", "chat")
 
         # 下一轮请求 = 语音播完 + cooldown。没有语音（ends_at 为 None）时从本轮
         # 结束开始计 cooldown——等价于旧实现的 had_speech=False 分支。

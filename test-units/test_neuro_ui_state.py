@@ -134,7 +134,7 @@ class TestScene(unittest.TestCase):
 class TestStepGapOnServerTimeline(unittest.TestCase):
     """服务端时间线必须计入 step 间停顿——前端 `speech.ts` 就是按这个节奏播的。
 
-    少算 gap 会让 `status().remaining_s` 比画面短，于是下游消费它的一方
+    少算 gap 会让 `turn_projection().remaining_s` 比画面短，于是下游消费它的一方
     （stream 的轮次节奏、chatbot 的睡眠判定）全部提前，表现是"她还在说话，
     下一条弹幕已经发进去了"。
     """
@@ -153,7 +153,7 @@ class TestStepGapOnServerTimeline(unittest.TestCase):
         with patch(CLOCK, return_value=103.5):
             st.observe(self.speech(1, 1, "b"), "stream", tid)  # +1s gap → 104..106
         with patch(CLOCK, return_value=103.6):
-            speech = st.status("stream")["speech"]
+            speech = st.turn_projection("stream")
         self.assertAlmostEqual(speech["remaining_s"], 106.0 - 103.6, places=2)
 
     def test_sentences_in_the_same_step_are_back_to_back(self):
@@ -165,7 +165,7 @@ class TestStepGapOnServerTimeline(unittest.TestCase):
         with patch(CLOCK, return_value=101.2):
             st.observe(self.speech(0, 1, "b"), "stream", tid)  # 无 gap：103..105
         with patch(CLOCK, return_value=103.0):
-            speech = st.status("stream")["speech"]
+            speech = st.turn_projection("stream")
         self.assertAlmostEqual(speech["remaining_s"], 2.0, places=2)
 
     def test_first_sentence_never_waits_for_a_gap(self):
@@ -176,12 +176,12 @@ class TestStepGapOnServerTimeline(unittest.TestCase):
         with patch(CLOCK, return_value=101.0):
             st.observe(self.speech(5, 0, "a"), "stream", tid)
         with patch(CLOCK, return_value=101.0):
-            speech = st.status("stream")["speech"]
+            speech = st.turn_projection("stream")
         self.assertAlmostEqual(speech["remaining_s"], 2.0, places=2)
 
 
 class TestStatusProjection(unittest.TestCase):
-    """`status()` 是给别的模块**高频轮询**的投影：轻量、不含音频。
+    """`turn_projection()` 是给别的模块**高频轮询**的投影：轻量、不含音频。
 
     画面续播走 `snapshot()`（带 base64，只在连接/重连时取一次）；
     两者混用会让 0.5s 一次的轮询拖几 MB。
@@ -201,7 +201,7 @@ class TestStatusProjection(unittest.TestCase):
             self._speaking(st, tid)
         with patch(CLOCK, return_value=101.0):
             self.assertIn("audio", str(st.snapshot("stream")["turn"]))  # 画面要能续播
-            status = st.status("stream")
+            status = st.turn_projection("stream")
         self.assertNotIn("audio", str(status))
         self.assertNotIn("YQ==", str(status))
 
@@ -211,15 +211,17 @@ class TestStatusProjection(unittest.TestCase):
             tid = st.new_turn("stream")
             self._speaking(st, tid)
         with patch(CLOCK, return_value=101.0):
-            status = st.status("stream")
-        speech = status["speech"]
-        self.assertEqual(speech["turn_id"], tid)
-        self.assertTrue(speech["generating"], "本轮还没 done")
-        self.assertTrue(speech["speaking"])
-        self.assertAlmostEqual(speech["remaining_s"], 4.0, places=2)
-        self.assertNotIn("text", speech, "正文属于内容平面，状态投影不再带 text")
-        self.assertEqual(status["turns"], {"in_flight": 1})
-        self.assertIsNone(status["scene"], "没切过场景就是 null，不是空对象")
+            status = st.turn_projection("stream")
+        self.assertEqual(status["turn_id"], tid)
+        self.assertEqual(status["channel"], "stream")
+        self.assertTrue(status["generating"], "本轮还没 done")
+        self.assertTrue(status["speaking"])
+        self.assertAlmostEqual(status["remaining_s"], 4.0, places=2)
+        self.assertNotIn("text", status, "正文属于内容平面，状态投影不再带 text")
+        self.assertEqual(status["segments"], 1)
+        self.assertEqual(status["segments_done"], 0)
+        self.assertEqual(status["in_flight"], 1)
+        self.assertEqual(st.scene_snapshot(), {}, "没切过场景就是空对象，分区 current 为 null")
 
     def test_ends_at_is_none_without_speech(self):
         """TTS 关闭/纯工具轮没有 speech 事件：ends_at 必须是 None，不能给个假时刻。"""
@@ -228,7 +230,7 @@ class TestStatusProjection(unittest.TestCase):
             tid = st.new_turn("stream")
             st.observe({"type": "content", "step": 1, "delta": "no tts here"}, "stream", tid)
         with patch(CLOCK, return_value=105.0):
-            speech = st.status("stream")["speech"]
+            speech = st.turn_projection("stream")
         self.assertIsNone(speech["ends_at"])
         self.assertFalse(speech["speaking"])
 
@@ -241,7 +243,7 @@ class TestStatusProjection(unittest.TestCase):
             tid = st.new_turn("stream")
             self._speaking(st, tid)
         with patch(CLOCK, return_value=101.0):
-            speech = st.status("stream")["speech"]
+            speech = st.turn_projection("stream")
         self.assertAlmostEqual(speech["ends_at"], real_time.time() + speech["remaining_s"], delta=1.0)
 
     def test_finished_turn_stops_speaking(self):
@@ -251,7 +253,7 @@ class TestStatusProjection(unittest.TestCase):
             self._speaking(st, tid)
         with patch(CLOCK, return_value=106.0):
             st.observe({"type": "done"}, "stream", tid)
-            speech = st.status("stream")["speech"]
+            speech = st.turn_projection("stream")
         self.assertFalse(speech["generating"])
         self.assertFalse(speech["speaking"])
         self.assertEqual(speech["remaining_s"], 0.0)
@@ -273,7 +275,7 @@ class TestStatusProjection(unittest.TestCase):
                      "duration": 0.1, "audio": "", "mime": ""},
                     "stream", tid,
                 )
-        speech = st.status("stream")["speech"]
+        speech = st.turn_projection("stream")
         self.assertNotIn("text", speech)
 
     def test_other_channel_does_not_leak(self):
@@ -282,7 +284,7 @@ class TestStatusProjection(unittest.TestCase):
             tid = st.new_turn("stream")
             self._speaking(st, tid)
         with patch(CLOCK, return_value=101.0):
-            speech = st.status("web")["speech"]
+            speech = st.turn_projection("web")
         self.assertIsNone(speech["turn_id"])
         self.assertFalse(speech["speaking"])
         self.assertEqual(speech["remaining_s"], 0.0)
@@ -294,9 +296,9 @@ class TestStatusProjection(unittest.TestCase):
             tid = st.new_turn("stream")
             self._speaking(st, tid)
             st.abort("stream", tid)
-            speech = st.status("stream")["speech"]
+            speech = st.turn_projection("stream")
         self.assertFalse(speech["generating"])
-        self.assertEqual(st.status("stream")["turns"]["in_flight"], 0)
+        self.assertEqual(st.turn_projection("stream")["in_flight"], 0)
 
 
 class TestContentPlane(unittest.TestCase):
