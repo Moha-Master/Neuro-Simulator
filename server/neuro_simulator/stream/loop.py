@@ -3,8 +3,9 @@
 状态：offline → starting（neuro 窗口播放开场）→ live ⇄ paused → offline
 
 每轮：先查优先轨（有则只消费最早 1 条），否则从普通轨随机抽取 ≤N 条未消费消息
-（按时间正序呈现）→ 拼装场景化 user message 调 neuro /chat → 消费响应
-（记录预测播放时间线，用于轮次节奏）→ 等“最后一句播完 + speech_cooldown_ms”→ 下一轮。
+（按时间正序呈现）→ 拼装场景化 user message 调 neuro /chat（批量模式）→
+读 `GET /status` 拿本轮语音预测播完的绝对时刻 → 等“播完 + speech_cooldown_ms”
+→ 下一轮。**stream 不自己累加字幕时间线**：neuro 的 `UiState` 是唯一权威。
 优先消息在注入时与普通消息完全同格式（对模型只是降噪）；入列即广播
 chat_message / priority_message 给画面。空队列行为可配（占位消息 / 静默等待，
 静默模式下由入列事件即时唤醒，无需轮询）。
@@ -70,6 +71,12 @@ _SESSION_STATE = {
 START_READY_TIMEOUT_S = 120.0
 READY_POLL_INTERVAL_S = 0.5
 
+# 单轮/等语音的硬上限（模块常量，不进 config）：改成"问 neuro 状态"之后，
+# neuro 重启、丢状态、返回一个荒唐的 ends_at 都可能让循环永久挂起，必须靠超时兜底。
+# 超时按失败轮处理（退避 3s 继续），不终结场次。
+ROUND_DEADLINE_S = 300.0
+SPEECH_POLL_INTERVAL_S = 0.2
+
 # 开场期间合成器落在 room_intro（neuro 全屏、不显示 chat/highlight）；
 # 她离开开场场景后切到 room，并同时推进 live。
 SCENE_ROOM_INTRO = "room_intro"
@@ -110,10 +117,6 @@ class StreamLoop:
         self._intro_gate: Optional[dict[str, Any]] = None
         # 最近一次"异常终止开播"的原因（供 dashboard 显示；下次成功开播时清空）
         self.last_error: Optional[dict[str, Any]] = None
-        # 当前轮次的预测发声终点（只用于轮次节奏 / game 工具闸门）
-        self._turn_play_head = 0.0
-        # 当前 speech 的 LLM step（用于把 neuro 的 caption_step_gap_ms 计入时间线）
-        self._turn_step: Optional[int] = None
 
     # ---------- 供 snapshot 的中途连接状态 ----------
 
@@ -137,13 +140,46 @@ class StreamLoop:
     async def wait_for_speech_end(self) -> None:
         """等当前预测的语音时间线播完（game 工具执行前的闸门）。
 
-        用服务端预测的 TTS 时间轴，不依赖任何前端/播放器回报；stop 时立即放行。
+        这里等的是**轮次中间**的时刻（生成还在进行、批量响应还没回来），所以不能
+        依赖 `/chat` 的返回值——直接问 neuro `/status`。每次循环重读以适配工具
+        执行期间新出现的句子；stop 立即放行，读不到状态/ends_at 远得离谱时由
+        `ROUND_DEADLINE_S` 兜底，不能把工具调用卡死。
         """
+        try:
+            s = stream_settings.load()
+        except RuntimeError:
+            return
+        neuro_url = getattr(s, "neuro_url", "")
+        channel = getattr(s, "channel", "stream")
+        if not neuro_url:
+            return
+        client = NeuroClient(neuro_url)
+        deadline = time.monotonic() + ROUND_DEADLINE_S
         while not self._stop_event.is_set():
-            remaining = self._turn_play_head - time.monotonic()
+            if time.monotonic() >= deadline:
+                logger.error("game 语音闸门超过 %.0fs deadline，放行", ROUND_DEADLINE_S)
+                return
+            try:
+                st = await client.status(channel)
+            except NeuroError as e:
+                # neuro 重启中：先短睡重试，deadline 兜底
+                logger.warning("game 语音闸门读 status 失败: %s", e)
+                await self._sleep_ms(SPEECH_POLL_INTERVAL_S * 1000)
+                continue
+            speech = st.get("speech") if isinstance(st, dict) else None
+            ends_at = (speech or {}).get("ends_at") if isinstance(speech, dict) else None
+            if ends_at is None:
+                return
+            try:
+                remaining = float(ends_at) - time.time()
+            except (TypeError, ValueError):
+                return
             if remaining <= 0:
                 return
-            await asyncio.sleep(min(remaining, 0.2))
+            if remaining > deadline - time.monotonic():
+                logger.error("game 语音闸门 ends_at 超出 deadline，放行")
+                return
+            await self._sleep_ms(min(remaining, SPEECH_POLL_INTERVAL_S) * 1000)
 
     async def run_game_action(
         self, action: Callable[[], Union[dict[str, Any], Awaitable[dict[str, Any]]]]
@@ -233,7 +269,6 @@ class StreamLoop:
         self._stop_event.clear()
         self._wakeup.clear()
         self.last_scene = SCENE_ROOM_INTRO
-        self._turn_play_head = 0.0
         # 上一次开播的异常原因不跨场次留痕（dashboard 关心的是"这一次怎么样了"）
         self.last_error = None
         self._intro_gate = {
@@ -577,8 +612,6 @@ class StreamLoop:
         was = self.state
         self.state = STATE_OFFLINE
         self._intro_gate = None
-        self._turn_play_head = 0.0
-        self._turn_step = None
         if self.session is not None:
             await self.storage.update_session(
                 self.session["session_row"], state="offline", ended=True
@@ -596,13 +629,44 @@ class StreamLoop:
         self._scene_duration = 0.0
         self._publish_state()
 
+    async def _speech_ends_at(
+        self, client: NeuroClient, channel: str, turn_id: Any
+    ) -> Optional[float]:
+        """读这一轮语音预测播完的 unix 时刻（来自 neuro 的权威时间轴）。
+
+        必须在批量响应之后**立刻**读：`UiState.new_turn()` 会覆盖同 channel 的旧
+        记录，晚读会拿到下一轮的时间轴。`turn_id` 不匹配时不猜，按无语音处理。
+        """
+        try:
+            st = await client.status(channel)
+        except NeuroError as e:
+            # 生成已经成功，状态读不到只意味着本轮无法等语音：退回 cooldown
+            logger.warning("neuro /status 读取失败，本轮按无语音处理: %s", e)
+            return None
+        speech = st.get("speech") if isinstance(st, dict) else None
+        if not isinstance(speech, dict):
+            return None
+        reported_turn = speech.get("turn_id")
+        if turn_id is not None and reported_turn is not None and reported_turn != turn_id:
+            logger.warning(
+                "neuro /status 已被别的轮次覆盖（期望 turn=%s，读到 %s），本轮不等语音",
+                turn_id,
+                reported_turn,
+            )
+            return None
+        ends_at = speech.get("ends_at")
+        try:
+            return float(ends_at) if ends_at is not None else None
+        except (TypeError, ValueError):
+            return None
+
     async def _run_round(self, s: stream_settings.StreamSettings, session: dict) -> str | None:
         """跑一轮：抽取→拼装→生成消费→等语音播完 + cooldown。
 
         返回 "wait"（静默模式无消息）或 None（本轮已完成，可继续下一轮）。
-        语音播完的判定使用服务端预测时间轴 `_turn_play_head`：最后一句的
-        `start + duration`，与画面顺序播放模型一致；**不是**“生成结束后再等
-        整轮语音总时长”（那会把生成期间已经播掉的时间重复计算）。
+        **节奏完全来自 neuro**：`text`/`terminal` 取批量响应，`ends_at` 取
+        `GET /status`；stream 不再自己累加 step gap（那会和 `UiState` 的时间轴
+        重复计算，且两边必须手工对齐）。
         """
         picked = await self._pick(s, session)
         if picked is None:
@@ -638,41 +702,27 @@ class StreamLoop:
                 session["cursor"] = last_id
         text = self.templates.render("neuro_user", {**tpl_vars, "messages": messages_block})
         round_failed = False
-        had_speech = False
         turn_text = ""
-        self._turn_play_head = time.monotonic()
-        self._turn_step = None
+        ends_at: Optional[float] = None
         client = NeuroClient(s.neuro_url)
         try:
-            async for ev in client.chat(session["channel"], session["conversation_id"], text):
-                if self._stop_event.is_set():
-                    break
-                et = ev.get("type")
-                if et == "speech":
-                    duration = float(ev.get("duration") or 0)
-                    stext = str(ev.get("text") or "").strip()
-                    step = int(ev.get("step") or 0)
-                    if stext:
-                        turn_text = f"{turn_text} {stext}".strip()
-                    # 发声时刻 = max(事件到达, 前句播完)：用于轮次节奏 / game 工具闸门。
-                    # 字幕与音频的实际播放由 neuro 窗口负责（它自己处理 step 间停顿）；
-                    # 这里把同一个 caption_step_gap_ms 也计入预测时间线，保证下一轮/
-                    # chatbot 的等待与 neuro 的实际播放一致。
-                    if self._turn_step is not None and step != self._turn_step:
-                        gap_ms = getattr(s, "caption_step_gap_ms", 0) or 0
-                        if gap_ms > 0:
-                            self._turn_play_head += gap_ms / 1000.0
-                    now = time.monotonic()
-                    start = max(now, self._turn_play_head)
-                    self._turn_play_head = start + duration
-                    self._turn_step = step
-                    had_speech = True
-                    # 睡眠判定从“这句预测播完”开始计时：字幕还在播时 chatbot 不会
-                    # 把 Neuro 判成空闲；长工具轮里也不会等整轮结束才更新。
-                    self.chatbot.note_neuro_speech(turn_text, self._turn_play_head)
-                elif et in ("done", "cancelled", "error"):
-                    round_failed = et in ("cancelled", "error")
-                    break
+            r = await asyncio.wait_for(
+                client.chat_batch(text, session["channel"], session["conversation_id"], audio=False),
+                timeout=ROUND_DEADLINE_S,
+            )
+            terminal = str(r.get("terminal") or "")
+            round_failed = terminal in ("cancelled", "error")
+            turn_text = str(r.get("text") or "")
+            if terminal not in ("done", "cancelled", "error"):
+                logger.error("neuro 批量响应缺少合法 terminal: %r", terminal)
+                round_failed = True
+            elif terminal == "error":
+                logger.error("neuro 轮次 error: %s", r.get("message"))
+            # 必须立刻读：同 channel 的下一条记录会覆盖 UiState 里的这一轮
+            ends_at = await self._speech_ends_at(client, session["channel"], r.get("turn_id"))
+        except asyncio.TimeoutError:
+            logger.error("neuro 轮次超过 %.0fs deadline，按失败处理", ROUND_DEADLINE_S)
+            round_failed = True
         except NeuroError as e:
             logger.error("neuro 轮次失败: %s", e)
             round_failed = True
@@ -691,10 +741,21 @@ class StreamLoop:
             inc_rounds=True,
         )
 
-        # 下一轮请求 = 语音播完 + cooldown。没有语音时从本轮结束开始计 cooldown。
-        speech_finished = self._turn_play_head if had_speech else time.monotonic()
-        wait_ms = (speech_finished + s.speech_cooldown_ms / 1000.0 - time.monotonic()) * 1000
-        await self._sleep_ms(wait_ms)
+        # 下一轮请求 = 语音播完 + cooldown。没有语音（ends_at 为 None）时从本轮
+        # 结束开始计 cooldown——等价于旧实现的 had_speech=False 分支。
+        if ends_at is not None:
+            delay = ends_at - time.time()
+            if delay > ROUND_DEADLINE_S:
+                # 重启/时钟错乱给出的荒唐未来时刻：不能真的睡过去
+                logger.error("neuro ends_at 距离现在 %.0fs（> deadline），按失败处理", delay)
+                round_failed = True
+                delay = 0.0
+            if turn_text:
+                # 睡眠判定从**预测播完**起算：可能已经是过去（长工具轮里语音早播完），
+                # 这时不能把计时重置到现在，否则 chatbot 会误以为她刚说完。
+                self.chatbot.note_neuro_speech(turn_text, time.monotonic() + delay)
+            await self._sleep_ms(max(0.0, delay) * 1000)
+        await self._sleep_ms(s.speech_cooldown_ms)
         if round_failed:
             # 失败轮次加长退避，防毒上游时打爆网关
             await self._sleep_ms(3000)

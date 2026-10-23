@@ -4,9 +4,12 @@
 
 - `snapshot()` → **画面快照**（`/ui/events` 与 `/ui/state`）：逐句带 `consumed`，
   正在发声那句还带 base64 `audio`，供渲染器（OBS 重载、dashboard 预览）断点续播。
-- `status()` → **状态投影**（`/status`）：只有"当前场景 + 还剩多久说话 + 最近说了什么"，
-  不含音频，供其他模块高频轮询（stream 判开场是否放完、判下一轮节奏；chatbot 判她是否
-  睡着；将来的 Discord/QQ 接入同样消费它）。
+- `status()` → **状态投影**（`/status`）：只有"当前场景 + 还剩多久说话"，
+  不含音频、不含正文，供其他模块高频轮询（stream 判开场是否放完、判下一轮节奏；
+  chatbot 判她是否睡着；将来的 Discord/QQ 接入同样消费它）。
+- `turn_text()` / `turn_segments()` / `batch()` → **内容平面**（`POST /chat`）：
+  "这一轮到底说了什么"，整轮全量、不截断；`segments` 的 `(turn_id, step, index)`
+  是唯一键。
 
 时间基准是服务端 `time.monotonic()`；`status()` 里的 `ends_at` 已换算成 unix 秒——
 **跨进程不要对 monotonic 时钟**，所以对外只给"还剩多少秒"和换算后的绝对时刻。
@@ -30,8 +33,16 @@ from ..config import get_config
 # 一轮结束后保留快照的时间窗口：足够覆盖字幕淡出，避免重连时闪出很久以前的字幕。
 TURN_GRACE_S = 10.0
 
-# status() 里"最近说了什么"的截断长度（弹幕/字幕级别的文本，给消费者回看用）
-STATUS_TEXT_CHARS = 400
+
+def strip_speech_audio(ev: Dict[str, Any]) -> Dict[str, Any]:
+    """序列化层：从 speech 事件里剥掉 audio 键（audio=false 的调用方用）。
+
+    **只能用在"发给某个连接/某个响应"的那一步**——`_Speech.audio` 必须保持全量，
+    它是 `/ui/events` snapshot 断点续播（OBS 中途重载）的唯一数据源。
+    """
+    if ev.get("type") != "speech" or "audio" not in ev:
+        return ev
+    return {k: v for k, v in ev.items() if k != "audio"}
 
 
 @dataclass
@@ -51,7 +62,11 @@ class _Turn:
     channel: str
     active: bool
     play_head: float
+    started_at: float
     speech: List[_Speech] = field(default_factory=list)
+    # 各 step 的正文（含工具调用前的话）。TTS 关闭时没有 speech 事件，
+    # 整轮文本与批量 segments 只能从这里来；TTS 开启时它也是"全量文本"的权威。
+    content: Dict[int, str] = field(default_factory=dict)
     updated_at: float = 0.0
     ended_at: Optional[float] = None
     last_step: Optional[int] = None
@@ -83,6 +98,7 @@ class UiState:
             channel=channel,
             active=True,
             play_head=now,
+            started_at=now,
             updated_at=now,
         )
         self._last_channel = channel
@@ -96,7 +112,15 @@ class UiState:
             return
 
         now = time.monotonic()
-        if typ == "speech":
+        if typ == "content":
+            # 正文按 step 分桶：agent 的 content 事件带 step（工具链前后分属不同 step）。
+            # 这是 turn_text()/批量 segments 在 TTS 关闭时唯一的数据来源。
+            step = int(ev.get("step") or 0)
+            delta = str(ev.get("delta") or "")
+            if delta:
+                turn.content[step] = turn.content.get(step, "") + delta
+                turn.updated_at = now
+        elif typ == "speech":
             try:
                 duration = max(0.0, float(ev.get("duration") or 0.0))
             except (TypeError, ValueError):
@@ -189,20 +213,24 @@ class UiState:
     # ---------- status（其他模块消费的精简投影） ----------
 
     def status(self, channel: Optional[str] = None) -> Dict[str, Any]:
-        """"我在哪个场景 / 还剩多久说话"——给别的模块轮询用，**不含音频**。
+        """"我在哪个场景 / 还剩多久说话"——给别的模块轮询用，**不含音频、不含正文**。
+
+        **平面判据**：任意时刻重读都能拿到正确值 → 状态平面（这里）；它是"发生过的
+        事实"（这一轮说过哪些句子/音频）→ 内容平面（`POST /chat` / `turn_text()`）。
 
         与 `snapshot()` 的分工：snapshot 是**画面快照**（逐句 consumed，正在发声那句还带
         base64 音频），供渲染器断点续播；status 是**状态投影**，供 stream 的直播循环判
         定开场是否放完、chatbot 判定她是不是睡着了、将来的 Discord/QQ 接入判节奏。
         字段可以重叠，但用途和频率不同——status 被 0.5s 一次地拉也不该拖几 MB。
+
+        注意：**每个 channel 至多一条在途 turn**（`new_turn()` 会覆盖同 channel 的旧
+        记录），所以调用方必须在本轮读走 `ends_at` 之后再发下一轮；否则读到的是新轮
+        的时间轴。
         """
         now = time.monotonic()
         pick = channel or self._last_channel
         turn = self._turns.get(pick) if pick else None
         remaining = max(0.0, turn.play_head - now) if turn is not None else 0.0
-        text = ""
-        if turn is not None and turn.speech:
-            text = " ".join(s.text for s in turn.speech if s.text)[:STATUS_TEXT_CHARS]
         return {
             "scene": self.scene_snapshot(now) or None,
             "speech": {
@@ -212,12 +240,124 @@ class UiState:
                 "generating": bool(turn and turn.active),
                 "speaking": remaining > 0.05,
                 "remaining_s": round(remaining, 2),
-                # 本轮语音预测播完的 unix 时刻；可能落在过去（= 她上次说完的时刻）
-                "ends_at": round(time.time() + (turn.play_head - now), 3) if turn else None,
-                "text": text,
+                # 本轮语音预测播完的 unix 时刻；可能落在过去（= 她上次说完的时刻）。
+                # 本轮还没有任何 speech（TTS 关闭/纯工具轮）→ None：下游据此跳过语音等待。
+                "ends_at": (
+                    round(time.time() + (turn.play_head - now), 3)
+                    if turn is not None and turn.speech
+                    else None
+                ),
             },
             "turns": {"in_flight": sum(1 for t in self._turns.values() if t.active)},
         }
+
+    # ---------- 内容平面（/chat 的批量响应） ----------
+
+    def _resolve_turn(
+        self, channel: Optional[str] = None, turn_id: Optional[int] = None
+    ) -> Optional[_Turn]:
+        """按 turn_id 优先、否则按 channel 找一条 turn。
+
+        turn_id 全局唯一；channel 是"当前/最后一条"（与 status() 同口径）。
+        也接受把 turn_id 直接当第一个位置参数传（`channel|turn` 的简写）。
+        """
+        if isinstance(channel, int) and turn_id is None:
+            turn_id, channel = channel, None
+        if turn_id is not None:
+            for turn in self._turns.values():
+                if turn.id == turn_id:
+                    return turn
+            return None
+        pick = channel or self._last_channel
+        return self._turns.get(pick) if pick else None
+
+    def turn_text(
+        self, channel: Optional[str] = None, turn_id: Optional[int] = None
+    ) -> str:
+        """整轮全量文本（不截断），拼接规则只在这里。
+
+        有 speech 时用实际说出口的文本（TTS 会剔 emoji、按句切分，与画面字幕
+        一致）；TTS 关闭时没有 speech，回落到按 step 记录的 content。
+        两种来源都覆盖整轮，所以这里不会退化成 `done.content`（只有最后一步）。
+        """
+        turn = self._resolve_turn(channel, turn_id)
+        if turn is None:
+            return ""
+        if turn.speech:
+            said = [s.text.strip() for s in turn.speech if s.text.strip()]
+            if said:
+                return " ".join(said)
+        parts = [
+            turn.content[step].strip()
+            for step in sorted(turn.content)
+            if turn.content[step].strip()
+        ]
+        return " ".join(parts)
+
+    def turn_segments(
+        self,
+        channel: Optional[str] = None,
+        turn_id: Optional[int] = None,
+        audio: bool = False,
+    ) -> List[Dict[str, Any]]:
+        """这一轮的 segments（内容平面）。
+
+        speech 存在时用它（句级 TTS 产物）；TTS 关闭时退化为每步一条 text segment。
+        `start` 以**本轮第一句发声时刻**为 0——生成前的等待不属于可播放时间轴，
+        这样任何调用方拿到的都是"从她开口开始算"的相对秒，且已含 step 间停顿。
+        """
+        turn = self._resolve_turn(channel, turn_id)
+        if turn is None:
+            return []
+        if turn.speech:
+            base = turn.speech[0].start
+            out: List[Dict[str, Any]] = []
+            for s in turn.speech:
+                seg: Dict[str, Any] = {
+                    "step": s.step,
+                    "index": s.index,
+                    "kind": "speech",
+                    "text": s.text,
+                    "start": round(max(0.0, s.start - base), 3),
+                    "duration": round(s.duration, 3),
+                }
+                if s.mime:
+                    seg["mime"] = s.mime
+                # 只有调用方要音频且真有字节时才出现 audio 键（null TTS 本来无字节）
+                if audio and s.audio:
+                    seg["audio"] = s.audio
+                out.append(seg)
+            return out
+        return [
+            {"step": step, "index": 0, "kind": "text", "text": text, "duration": 0}
+            for step, text in sorted(turn.content.items())
+            if text.strip()
+        ]
+
+    def batch(
+        self,
+        channel: str,
+        conversation_id: str,
+        turn_id: int,
+        terminal: str,
+        message: Optional[str] = None,
+        audio: bool = False,
+    ) -> Dict[str, Any]:
+        """`POST /chat {stream:false}` 的响应体（内容平面）。
+
+        不返回 `ends_at`/`speaking`/`remaining_s`——那些是状态平面的事，问 `/status`。
+        """
+        payload: Dict[str, Any] = {
+            "turn_id": turn_id,
+            "channel": channel,
+            "conversation_id": conversation_id,
+            "terminal": terminal,
+            "text": self.turn_text(channel, turn_id),
+            "segments": self.turn_segments(channel, turn_id, audio=audio),
+        }
+        if terminal == "error":
+            payload["message"] = message or "generation failed"
+        return payload
 
     # ---------- snapshot（画面消费） ----------
 

@@ -7,7 +7,7 @@
 import unittest
 from unittest.mock import patch
 
-from neuro_simulator.neuro_sama.ui_state import STATUS_TEXT_CHARS, TURN_GRACE_S, UiState
+from neuro_simulator.neuro_sama.ui_state import TURN_GRACE_S, UiState
 
 CLOCK = "neuro_simulator.neuro_sama.ui_state.time.monotonic"
 
@@ -217,9 +217,20 @@ class TestStatusProjection(unittest.TestCase):
         self.assertTrue(speech["generating"], "本轮还没 done")
         self.assertTrue(speech["speaking"])
         self.assertAlmostEqual(speech["remaining_s"], 4.0, places=2)
-        self.assertEqual(speech["text"], "hello there")
+        self.assertNotIn("text", speech, "正文属于内容平面，状态投影不再带 text")
         self.assertEqual(status["turns"], {"in_flight": 1})
         self.assertIsNone(status["scene"], "没切过场景就是 null，不是空对象")
+
+    def test_ends_at_is_none_without_speech(self):
+        """TTS 关闭/纯工具轮没有 speech 事件：ends_at 必须是 None，不能给个假时刻。"""
+        st = UiState()
+        with patch(CLOCK, return_value=100.0):
+            tid = st.new_turn("stream")
+            st.observe({"type": "content", "step": 1, "delta": "no tts here"}, "stream", tid)
+        with patch(CLOCK, return_value=105.0):
+            speech = st.status("stream")["speech"]
+        self.assertIsNone(speech["ends_at"])
+        self.assertFalse(speech["speaking"])
 
     def test_ends_at_is_wall_clock(self):
         """跨进程不能对 monotonic：绝对时刻必须是 unix 秒。"""
@@ -233,7 +244,7 @@ class TestStatusProjection(unittest.TestCase):
             speech = st.status("stream")["speech"]
         self.assertAlmostEqual(speech["ends_at"], real_time.time() + speech["remaining_s"], delta=1.0)
 
-    def test_finished_turn_stops_speaking_but_keeps_text(self):
+    def test_finished_turn_stops_speaking(self):
         st = UiState()
         with patch(CLOCK, return_value=100.0):
             tid = st.new_turn("stream")
@@ -244,19 +255,26 @@ class TestStatusProjection(unittest.TestCase):
         self.assertFalse(speech["generating"])
         self.assertFalse(speech["speaking"])
         self.assertEqual(speech["remaining_s"], 0.0)
-        self.assertEqual(speech["text"], "hello there", "chatbot 要拿它说 Neurdle says: ...")
+        self.assertNotIn("text", speech)
+        # 正文在内容平面仍有全量值（chatbot 用批量响应里的 text，不再读 status）
+        self.assertEqual(st.turn_text("stream"), "hello there")
 
-    def test_text_is_capped(self):
+    def test_status_never_carries_text(self):
         st = UiState()
         with patch(CLOCK, return_value=100.0):
             tid = st.new_turn("stream")
             for i in range(30):
                 st.observe(
+                    {"type": "content", "step": 0, "delta": "x" * 80},
+                    "stream", tid,
+                )
+                st.observe(
                     {"type": "speech", "step": 0, "index": i, "text": "x" * 80,
                      "duration": 0.1, "audio": "", "mime": ""},
                     "stream", tid,
                 )
-        self.assertEqual(len(st.status("stream")["speech"]["text"]), STATUS_TEXT_CHARS)
+        speech = st.status("stream")["speech"]
+        self.assertNotIn("text", speech)
 
     def test_other_channel_does_not_leak(self):
         st = UiState()
@@ -268,7 +286,7 @@ class TestStatusProjection(unittest.TestCase):
         self.assertIsNone(speech["turn_id"])
         self.assertFalse(speech["speaking"])
         self.assertEqual(speech["remaining_s"], 0.0)
-        self.assertEqual(speech["text"], "")
+        self.assertNotIn("text", speech)
 
     def test_abort_clears_generating(self):
         st = UiState()
@@ -279,6 +297,70 @@ class TestStatusProjection(unittest.TestCase):
             speech = st.status("stream")["speech"]
         self.assertFalse(speech["generating"])
         self.assertEqual(st.status("stream")["turns"]["in_flight"], 0)
+
+
+class TestContentPlane(unittest.TestCase):
+    """内容平面（`/chat` 批量响应）：整轮全量文本 + 已含 gap 的相对 start。"""
+
+    def test_turn_text_covers_every_step_not_just_done_content(self):
+        st = UiState()
+        with patch(CLOCK, return_value=100.0):
+            tid = st.new_turn("stream")
+        with patch(CLOCK, return_value=100.1):
+            st.observe({"type": "content", "step": 1, "delta": "Let me check the board!"}, "stream", tid)
+            st.observe({"type": "speech", "step": 1, "index": 0, "text": "Let me check the board!",
+                        "duration": 1.0, "audio": "", "mime": ""}, "stream", tid)
+        with patch(CLOCK, return_value=101.0):
+            st.observe({"type": "content", "step": 2, "delta": "LOLA is my guess."}, "stream", tid)
+            st.observe({"type": "speech", "step": 2, "index": 1, "text": "LOLA is my guess.",
+                        "duration": 1.0, "audio": "", "mime": ""}, "stream", tid)
+        # done.content 只有最后一步；helper 必须把工具调用前的话也带上
+        with patch(CLOCK, return_value=101.1):
+            st.observe({"type": "done", "content": "LOLA is my guess."}, "stream", tid)
+        self.assertEqual(
+            st.turn_text("stream"),
+            "Let me check the board! LOLA is my guess.",
+        )
+
+    def test_speech_segments_start_includes_step_gap(self):
+        st = UiState()
+        with patch(CLOCK, return_value=100.0):
+            tid = st.new_turn("stream")
+        with patch(CLOCK, return_value=101.0):
+            st.observe(
+                {"type": "speech", "step": 0, "index": 0, "text": "a",
+                 "duration": 2.31, "audio": "YQ==", "mime": "audio/mpeg"},
+                "stream", tid,
+            )
+        with patch(CLOCK, return_value=103.5):
+            st.observe(
+                {"type": "speech", "step": 2, "index": 1, "text": "b",
+                 "duration": 1.87, "audio": "YQ==", "mime": "audio/mpeg"},
+                "stream", tid,
+            )
+        segs = st.turn_segments("stream", audio=True)
+        self.assertEqual([s["step"] for s in segs], [0, 2])
+        self.assertAlmostEqual(segs[0]["start"], 0.0)
+        # 2.31 时长 + 1.0s 的 caption_step_gap_ms = 3.31
+        self.assertAlmostEqual(segs[1]["start"], 3.31, places=2)
+        self.assertEqual(segs[1]["audio"], "YQ==")
+
+    def test_segments_fall_back_to_text_when_tts_disabled(self):
+        st = UiState()
+        with patch(CLOCK, return_value=100.0):
+            tid = st.new_turn("stream")
+            st.observe({"type": "content", "step": 1, "delta": "first step"}, "stream", tid)
+            st.observe({"type": "content", "step": 2, "delta": "second step"}, "stream", tid)
+            st.observe({"type": "done", "content": "second step"}, "stream", tid)
+        payload = st.batch("stream", "conv", tid, "done", audio=True)
+        self.assertEqual(payload["text"], "first step second step")
+        self.assertEqual(
+            payload["segments"],
+            [
+                {"step": 1, "index": 0, "kind": "text", "text": "first step", "duration": 0},
+                {"step": 2, "index": 0, "kind": "text", "text": "second step", "duration": 0},
+            ],
+        )
 
 
 if __name__ == "__main__":

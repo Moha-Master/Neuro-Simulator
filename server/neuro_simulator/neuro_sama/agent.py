@@ -17,7 +17,7 @@ import re
 import time
 from collections import deque
 from itertools import count
-from typing import AsyncIterator
+from typing import AsyncIterator, Callable
 
 from openai import AsyncOpenAI, AsyncStream
 
@@ -118,6 +118,10 @@ async def _stream_with_cancel(stream: AsyncStream, cancel_event: asyncio.Event |
             try:
                 await asyncio.wait({chunk_task, cancel_waiter}, return_when=asyncio.FIRST_COMPLETED)
                 if cancel_waiter.done():
+                    # 两边同时完成时先取走异常，避免 "Task exception was never retrieved"
+                    if chunk_task.done():
+                        with contextlib.suppress(BaseException):
+                            chunk_task.result()
                     return
                 try:
                     yield chunk_task.result()
@@ -187,6 +191,7 @@ class NeuroAgent:
         memory: MemoryStore,
         persona: PersonaStore,
         active_game_provider=None,
+        event_sink: Callable[[dict, str, int], None] | None = None,
     ) -> None:
         self.client = client
         self.registry = registry
@@ -194,6 +199,9 @@ class NeuroAgent:
         self.memory = memory
         self.persona = persona
         self.active_game_provider = active_game_provider
+        # 产出侧记账：speech/done/cancelled/error 一产出就交给 sink（UiState.observe），
+        # 不依赖有没有人读 /chat 的 HTTP 流。sink 只记账，不懂音频裁剪。
+        self.event_sink = event_sink
 
     async def _active_game(self) -> str | None:
         if self.active_game_provider is None:
@@ -212,6 +220,29 @@ class NeuroAgent:
                 pass
 
     async def run(
+        self,
+        channel: str,
+        conversation_id: str,
+        user_text: str,
+        cancel_event: asyncio.Event | None = None,
+        turn_id: int | None = None,
+    ) -> AsyncIterator[dict]:
+        """对外入口：产出事件的同时完成时间轴记账。
+
+        记账必须在**这里**（产出侧），不能在 HTTP handler 里——否则"有没有人读
+        `/chat`"会决定权威时间轴是否存在（批量模式、内部调用都会丢状态）。
+        `audio` 的裁剪不在这里：sink 拿到的永远是全量 speech（含 base64）。
+        """
+        async for ev in self._run(channel, conversation_id, user_text, cancel_event):
+            if (
+                self.event_sink is not None
+                and turn_id is not None
+                and ev.get("type") in ("content", "speech", "done", "cancelled", "error")
+            ):
+                self.event_sink(ev, channel, turn_id)
+            yield ev
+
+    async def _run(
         self,
         channel: str,
         conversation_id: str,
@@ -332,7 +363,8 @@ class NeuroAgent:
                         finish_reason = chunk.choices[0].finish_reason
                     if delta.content:
                         content += delta.content
-                        yield {"type": "content", "delta": delta.content}
+                        # step 是 UiState 按步记正文的键（TTS 关闭时批量 segments 靠它）
+                        yield {"type": "content", "step": step, "delta": delta.content}
                         if tts_on:
                             for sentence in splitter.feed(delta.content):
                                 _enqueue_speech(sentence)
@@ -380,7 +412,7 @@ class NeuroAgent:
                     # 上游完全没有任何输出：才以 Agent 身份留一句兜底（现实中的 Neuro 行为）
                     fallback = "Someone tells Vedal there is a problem with my AI."
                     await self.storage.append_message(conv_id, {"role": "assistant", "content": fallback})
-                    yield {"type": "content", "delta": fallback}
+                    yield {"type": "content", "step": step, "delta": fallback}
                     if tts_on:
                         _enqueue_speech(fallback)
                         async for ev in _drain_all():
@@ -520,7 +552,7 @@ class NeuroAgent:
         else:
             fallback = "Someone tells Vedal there is a problem with my AI."
             await self.storage.append_message(conv_id, {"role": "assistant", "content": fallback})
-            yield {"type": "content", "delta": fallback}
+            yield {"type": "content", "step": step, "delta": fallback}
             if tts_on:
                 _enqueue_speech(fallback)
                 async for ev in _drain_all():

@@ -2,6 +2,7 @@
 
 import asyncio
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -14,62 +15,39 @@ from neuro_simulator.stream.storage import Storage
 
 
 class _FakeNeuroClient:
-    """固定事件序列：用于验证 stream 不再镜像 tool/speech 事件。"""
+    """批量模式替身：生成结果与状态都来自 neuro（stream 不再自己算时间轴）。"""
 
-    def __init__(self, url: str) -> None:
+    def __init__(self, url: str, *, ends_in_s: float = 0.0, text: str = "ta-da") -> None:
         self.url = url
+        self.ends_in_s = ends_in_s
+        self.text = text
+        self.chat_calls = 0
+        self.audio_flags: list[bool] = []
+        self.status_calls = 0
+        self.captured: dict[str, str] = {}
 
-    async def chat(self, channel: str, conversation_id: str, text: str):
-        yield {
-            "type": "tool_start",
-            "step": 1,
-            "tool_call_id": "c1",
-            "name": "model_spin",
-            "arguments": {},
+    async def chat_batch(
+        self, message: str, channel: str, conversation_id: str, audio: bool = False
+    ) -> dict:
+        self.chat_calls += 1
+        self.audio_flags.append(audio)
+        self.captured["text"] = message
+        return {
+            "turn_id": 7,
+            "terminal": "done",
+            "text": self.text,
+            "segments": [],
         }
-        yield {
-            "type": "tool_start",
-            "step": 1,
-            "tool_call_id": "c2",
-            "name": "memory_add",
-            "arguments": {"content": "not for the UI"},
+
+    async def status(self, channel=None) -> dict:
+        self.status_calls += 1
+        return {
+            "speech": {
+                "turn_id": 7,
+                "speaking": self.ends_in_s > 0,
+                "ends_at": time.time() + self.ends_in_s,
+            }
         }
-        yield {
-            "type": "tool_result",
-            "step": 1,
-            "tool_call_id": "c1",
-            "name": "model_spin",
-            "ok": True,
-            "result": "Spin command sent.",
-            "duration_ms": 0,
-        }
-        yield {"type": "speech", "step": 1, "index": 0, "text": "ta-da", "duration": 0.01}
-        yield {"type": "done", "content": "ta-da"}
-
-
-class _FakeSlowNeuroClient:
-    """先说一句，再“生成”一段时间才 done：用于验证轮间等待以语音播完为准。"""
-
-    def __init__(self, url: str) -> None:
-        self.url = url
-
-    async def chat(self, channel: str, conversation_id: str, text: str):
-        yield {"type": "speech", "index": 0, "text": "short line", "duration": 0.01}
-        await asyncio.sleep(0.05)  # 模拟工具执行 / 下一步生成：此时语音早已播完
-        yield {"type": "done", "content": "short line"}
-
-
-class _FakeTwoStepNeuroClient:
-    """两步 speech 快速产出：验证 stream 的预测时间线仍然顺序累加。"""
-
-    def __init__(self, url: str) -> None:
-        self.url = url
-
-    async def chat(self, channel: str, conversation_id: str, text: str):
-        yield {"type": "speech", "step": 1, "index": 0, "text": "first", "duration": 0.1}
-        await asyncio.sleep(0.01)
-        yield {"type": "speech", "step": 2, "index": 1, "text": "second", "duration": 0.02}
-        yield {"type": "done", "content": "first second"}
 
 
 class TestPriorityQueue(unittest.IsolatedAsyncioTestCase):
@@ -178,10 +156,10 @@ class TestPriorityQueue(unittest.IsolatedAsyncioTestCase):
         captured: dict[str, str] = {}
 
         class _CapturingClient(_FakeNeuroClient):
-            async def chat(self, channel: str, conversation_id: str, text: str):
-                captured["text"] = text
-                async for ev in super().chat(channel, conversation_id, text):
-                    yield ev
+            async def chat_batch(self, message, channel, conversation_id, audio=False):
+                result = await super().chat_batch(message, channel, conversation_id, audio)
+                captured["text"] = message
+                return result
 
         with patch("neuro_simulator.stream.loop.NeuroClient", _CapturingClient):
             await self.loop._run_round(self.settings, self.session)
@@ -203,7 +181,8 @@ class TestPriorityQueue(unittest.IsolatedAsyncioTestCase):
         self.settings.neuro_url = "http://fake"
         # settings 以 SimpleNamespace 充当 StreamSettings（_run_round 只读这几个字段）
         q = self.bus.subscribe()
-        with patch("neuro_simulator.stream.loop.NeuroClient", _FakeNeuroClient):
+        fake = _FakeNeuroClient("http://fake")
+        with patch("neuro_simulator.stream.loop.NeuroClient", lambda url: fake):
             await self.loop._run_round(self.settings, self.session)
 
         events = []
@@ -213,65 +192,61 @@ class TestPriorityQueue(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(any(e["type"] in ("tool_start", "tool_result") for e in events))
         self.assertFalse(any(e["type"] == "speech" for e in events))
         self.assertFalse(any(e["type"] in ("turn_begin", "turn_end") for e in events))
-        # 但预测播放时间线仍然推进（供轮次节奏 / game 工具闸门使用）
-        self.assertGreater(self.loop._turn_play_head, 0.0)
+        # 批量调用不带音频（音频只归 neuro 窗口）
+        self.assertEqual(fake.audio_flags, [False])
 
-    async def test_step_speech_updates_timeline_without_forwarding(self):
-        """两个 step 的 speech 顺序累加进 _turn_play_head；不再延迟转发。"""
+    async def test_round_wait_comes_from_status_ends_at_not_local_gap(self):
+        """等待时长取 neuro `/status` 的 ends_at；本地不再累加 step_gap。"""
         await self.storage.append_message(self.queue_row, "viewer", "do a trick")
-        self.settings.speech_cooldown_ms = 80
-        events: list[dict] = []
+        self.settings.speech_cooldown_ms = 0
+        # 「陷阱」：如果 stream 还在本地累加 gap，这个值会让等待多出 5 秒
+        self.settings.caption_step_gap_ms = 5000
         sleeps: list[float] = []
-        original_publish = self.loop.publish
-
-        def capture(ev: dict) -> None:
-            events.append(ev)
-            original_publish(ev)
+        fake = _FakeNeuroClient("http://fake", ends_in_s=0.12)
 
         async def record_sleep(ms: float) -> None:
             sleeps.append(float(ms))
-            await asyncio.sleep(float(ms) / 1000.0)
+            await asyncio.sleep(0)  # 不真的睡，只记录
 
-        with patch("neuro_simulator.stream.loop.NeuroClient", _FakeTwoStepNeuroClient):  # noqa: SIM117
-            with patch.object(self.loop, "publish", side_effect=capture):
-                with patch.object(self.loop, "_sleep_ms", new=record_sleep):
-                    await self.loop._run_round(self.settings, self.session)
+        with patch("neuro_simulator.stream.loop.NeuroClient", lambda url: fake):  # noqa: SIM117
+            with patch.object(self.loop, "_sleep_ms", new=record_sleep):
+                await self.loop._run_round(self.settings, self.session)
 
-        self.assertFalse(any(e["type"] == "speech" for e in events))
-        # 0.1 + 0.02 两句；轮间等待至少覆盖最后一句播完 + cooldown
-        self.assertTrue(any(ms > 50 for ms in sleeps))
-        self.assertGreater(self.loop._turn_play_head, 0.0)
+        self.assertEqual(fake.chat_calls, 1)
+        self.assertGreater(fake.status_calls, 0)
+        # 只等 ends_at（约 120ms）+ cooldown 0；绝不该出现 5000ms 级别的本地 gap
+        self.assertTrue(any(100 <= ms <= 200 for ms in sleeps), sleeps)
+        self.assertFalse(any(ms > 1000 for ms in sleeps), sleeps)
 
     async def test_pacing_uses_last_speech_end_not_generation_end(self):
-        """语音在 done 之前早已播完时，等待量应为 0（旧实现会再等整整一句时长）。"""
+        """语音在生成结束前早已播完（ends_at 在过去）时，不应再等一整句。"""
         await self.storage.append_message(self.queue_row, "viewer", "say something")
         self.settings.speech_cooldown_ms = 0
         sleeps: list[float] = []
+        fake = _FakeNeuroClient("http://fake", ends_in_s=-5.0)
 
         async def _record_sleep(ms: float) -> None:
             sleeps.append(float(ms))
             await asyncio.sleep(0)
 
-        with patch("neuro_simulator.stream.loop.NeuroClient", _FakeSlowNeuroClient):
+        with patch("neuro_simulator.stream.loop.NeuroClient", lambda url: fake):
             with patch.object(self.loop, "_sleep_ms", new=_record_sleep):
                 await self.loop._run_round(self.settings, self.session)
 
-        # 语音 0.01s，done 前又过了 0.05s：播完 + cooldown 已过，不应再有轮间等待
-        self.assertEqual(len(sleeps), 1)
-        self.assertLess(sleeps[0], 1.0)
+        self.assertTrue(all(ms == 0 for ms in sleeps), sleeps)
 
     async def test_no_turn_or_speech_events_are_emitted(self):
         """speech/turn 事件已移出 stream：neuro 窗口直接从 neuro /ui/events 消费。"""
         await self.storage.append_message(self.queue_row, "viewer", "do a trick")
         q = self.bus.subscribe()
-        with patch("neuro_simulator.stream.loop.NeuroClient", _FakeNeuroClient):
+        fake = _FakeNeuroClient("http://fake")
+        with patch("neuro_simulator.stream.loop.NeuroClient", lambda url: fake):
             await self.loop._run_round(self.settings, self.session)
 
         events = []
         while not q.empty():
             events.append(q.get_nowait())
         self.assertFalse(any(e["type"] in ("turn_begin", "turn_end", "speech") for e in events))
-        self.assertGreater(self.loop._turn_play_head, 0.0)
 
 
 if __name__ == "__main__":

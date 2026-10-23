@@ -18,9 +18,10 @@ import asyncio
 import json
 import uuid
 from contextlib import asynccontextmanager
+from typing import AsyncIterator
 
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from openai import AsyncOpenAI
 from pydantic import BaseModel
 
@@ -37,7 +38,7 @@ from .persona import PLACEHOLDERS, PersonaError, PersonaStore
 from .storage import Storage
 from .tools import ToolRegistry, build_builtin_tools
 from .ui_scene import SceneLoopError, make_runner
-from .ui_state import UiState
+from .ui_state import UiState, strip_speech_audio
 
 _DIM = "\033[2m"
 _CYAN = "\033[36m"
@@ -65,6 +66,47 @@ _UI_EVENT_TYPES = {
 
 def _sse(event: str, data: dict) -> str:
     return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
+
+
+async def _collect_batch(
+    ui_state: UiState,
+    events: AsyncIterator[dict],
+    *,
+    channel: str,
+    conversation_id: str,
+    turn_id: int,
+    audio: bool = False,
+) -> dict:
+    """消费 agent 事件流并映射成 `stream:false` 的批量响应。
+
+    记账已由 agent 的 sink 完成；这里只负责把三个终结事件映射成
+    `terminal`（done/cancelled/error）与 `error.message`。
+    """
+    terminal = None
+    error_message = None
+    try:
+        async for ev in events:
+            typ = ev.get("type")
+            if typ in ("done", "cancelled", "error"):
+                terminal = typ
+                if typ == "error":
+                    error_message = str(ev.get("message") or "")
+    except Exception as e:  # agent 正常不会抛（错误走 error 事件），兜底也要三态
+        if terminal is None:
+            terminal = "error"
+            error_message = f"{type(e).__name__}: {e}"
+    if terminal is None:
+        # 理论不该发生；仍必须满足三态之一
+        terminal = "error"
+        error_message = error_message or "generation ended without a terminal event"
+    return ui_state.batch(
+        channel,
+        conversation_id,
+        turn_id,
+        terminal,
+        message=error_message,
+        audio=audio,
+    )
 
 
 def _terminal(event: str, data: dict) -> None:
@@ -129,6 +171,10 @@ class ChatRequest(BaseModel):
     message: str
     channel: str = "web"
     conversation_id: str | None = None  # None 时服务端生成并随 start 事件回传
+    # 只影响返回给调用方的载荷，绝不影响是否合成（duration 来自合成）
+    audio: bool = True
+    # true=SSE（默认，dashboard/test_chat 的现有行为）；false=生成结束后返回批量 JSON
+    stream: bool = True
 
 
 class MessagePayload(BaseModel):
@@ -254,7 +300,17 @@ def create_app() -> FastAPI:
             if svc
             else None
         )
-        agent = NeuroAgent(client, registry, storage, memory, persona, StreamGameProvider())
+        # UiState 先于 agent 创建：agent 要在产出事件时直接记账（不依赖 HTTP 消费者）
+        ui_state = UiState()
+        agent = NeuroAgent(
+            client,
+            registry,
+            storage,
+            memory,
+            persona,
+            StreamGameProvider(),
+            event_sink=ui_state.observe,
+        )
         app.state.agent = agent
         app.state.memory = memory
         app.state.persona = persona
@@ -263,7 +319,7 @@ def create_app() -> FastAPI:
         app.state.active_streams: dict[str, asyncio.Event] = {}
         app.state.broadcaster = EventBroadcaster()
         app.state.ui_broadcaster = EventBroadcaster()
-        app.state.ui_state = UiState()
+        app.state.ui_state = ui_state
         app.state.ui_scene = make_runner(
             app.state.ui_state, app.state.ui_broadcaster.publish
         )
@@ -311,12 +367,15 @@ def create_app() -> FastAPI:
 
     @app.get("/status")
     async def status(request: Request):
-        """跨模块的状态投影：当前场景 + 语音节奏 + 在途轮次，**不含音频**。
+        """跨模块的状态投影：当前场景 + 语音节奏 + 在途轮次，**不含音频/正文**。
+
+        判据：任意时刻重读能拿到正确值 → 状态平面（本端点）；"发生过的事实"
+        （这一轮说了什么）→ 内容平面（`POST /chat`）。`speech.text` 已删除。
 
         与 `/ui/state` 的分工：那边是**画面快照**（逐句 consumed + 正在发声那句的
         base64 音频，给渲染器断点续播）；这边是**状态投影**，可以被别的模块每半秒
-        拉一次而不拖几 MB。stream 的直播循环用它判"开场是否放完"与下一轮节奏，
-        chatbot 用它判她是不是睡着了。
+        拉一次而不拖几 MB。stream 的直播循环用它判"开场是否放完"、读本轮
+        `ends_at` 决定下一轮节奏；chatbot 用它判她是不是睡着了。
         """
         cfg = get_config()
         channel = (request.query_params.get("channel") or "").strip() or None
@@ -350,40 +409,71 @@ def create_app() -> FastAPI:
         app.state.active_streams[stream_key] = cancel_event
         turn_id = app.state.ui_state.new_turn(channel)
 
+        async def drive():
+            """产出 start + agent 事件，并镜像到两条广播总线。
+
+            记账已在 agent 产出侧完成（`event_sink`）；这里只做转发/序列化。
+            `audio` 的裁剪在调用方的交付层（SSE/JSON），广播总线拿到的永远是全量。
+            """
+            svc = cfg.neuro_llm()
+            start_ev = {
+                "channel": channel,
+                "conversation_id": conversation_id,
+                "model": svc.model if svc else None,
+                "turn_id": turn_id,
+            }
+            start_evt = {"type": "start", "stream_key": stream_key, **start_ev}
+            app.state.broadcaster.publish(start_evt)
+            app.state.ui_broadcaster.publish(start_evt)
+            # 对外交付的 start 不带 stream_key（那是内部 stream 注册键，以前也不下发）
+            yield {"type": "start", **start_ev}
+            async for ev in agent.run(
+                channel, conversation_id, message, cancel_event=cancel_event, turn_id=turn_id
+            ):
+                _terminal(ev["type"], ev)
+                if ev["type"] == "done":
+                    ev = {
+                        **ev,
+                        "_memory": {
+                            "count": memory.count,
+                            "used": memory.used,
+                            "char_limit": memory.char_limit,
+                        },
+                    }
+                ev = {**ev, "turn_id": turn_id}
+                mirrored = {"stream_key": stream_key, "channel": channel, "conversation_id": conversation_id, **ev}
+                app.state.broadcaster.publish(mirrored)
+                if ev["type"] in _UI_EVENT_TYPES:
+                    app.state.ui_broadcaster.publish(mirrored)
+                yield ev
+
+        def clean_up() -> None:
+            app.state.active_streams.pop(stream_key, None)
+            app.state.ui_state.abort(channel, turn_id)
+
+        if not req.stream:
+            # 批量模式仍然逐事件消费 agent（同一套生成/记账逻辑），只是不往连接上写 SSE
+            try:
+                payload = await _collect_batch(
+                    app.state.ui_state,
+                    drive(),
+                    channel=channel,
+                    conversation_id=conversation_id,
+                    turn_id=turn_id,
+                    audio=req.audio,
+                )
+            finally:
+                clean_up()
+            return JSONResponse(payload)
+
         async def gen():
             try:
-                svc = cfg.neuro_llm()
-                start_ev = {
-                    "channel": channel,
-                    "conversation_id": conversation_id,
-                    "model": svc.model if svc else None,
-                    "turn_id": turn_id,
-                }
-                yield _sse("start", start_ev)
-                start_evt = {"type": "start", "stream_key": stream_key, **start_ev}
-                app.state.broadcaster.publish(start_evt)
-                app.state.ui_broadcaster.publish(start_evt)
-                async for ev in agent.run(channel, conversation_id, message, cancel_event=cancel_event):
-                    _terminal(ev["type"], ev)
-                    if ev["type"] == "done":
-                        ev = {
-                            **ev,
-                            "_memory": {
-                                "count": memory.count,
-                                "used": memory.used,
-                                "char_limit": memory.char_limit,
-                            },
-                        }
-                    app.state.ui_state.observe(ev, channel, turn_id)
-                    ev = {**ev, "turn_id": turn_id}
-                    mirrored = {"stream_key": stream_key, "channel": channel, "conversation_id": conversation_id, **ev}
-                    app.state.broadcaster.publish(mirrored)
-                    if ev["type"] in _UI_EVENT_TYPES:
-                        app.state.ui_broadcaster.publish(mirrored)
-                    yield _sse(ev["type"], ev)
+                async for ev in drive():
+                    # 只裁"发给这个响应"的副本：broadcaster 已经拿到全量（/ui/events 续播要用）
+                    out = ev if req.audio else strip_speech_audio(ev)
+                    yield _sse(out["type"], out)
             finally:
-                app.state.active_streams.pop(stream_key, None)
-                app.state.ui_state.abort(channel, turn_id)
+                clean_up()
 
         return StreamingResponse(
             gen(),

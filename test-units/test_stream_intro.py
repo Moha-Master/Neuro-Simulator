@@ -10,6 +10,7 @@
 """
 
 import asyncio
+import contextlib
 import json
 import tempfile
 import time
@@ -59,7 +60,7 @@ class _ScriptedNeuro:
         return {
             "module": "neuro_sama",
             "scene": {"id": sid, "duration": 0.0, "elapsed": 0.0} if sid else None,
-            "speech": {"speaking": False, "remaining_s": 0.0, "text": ""},
+            "speech": {"speaking": False, "remaining_s": 0.0},
             "turns": {"in_flight": 0},
         }
 
@@ -337,6 +338,16 @@ class _FakeLoop(StreamLoop):
         self._stop_event.set()
 
 
+class _FakeSpeechStatus:
+    """game 闸门的 neuro 替身：status 给出本轮语音预测播完的绝对时刻。"""
+
+    def __init__(self, ends_in_s: float) -> None:
+        self.ends_at = time.time() + ends_in_s
+
+    async def status(self, channel=None) -> dict:
+        return {"speech": {"turn_id": 1, "speaking": True, "ends_at": self.ends_at}}
+
+
 class TestGameSpeechGate(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -348,36 +359,44 @@ class TestGameSpeechGate(unittest.IsolatedAsyncioTestCase):
         await self.templates.load()
         self.bus = EventBroadcaster()
         self.loop = _FakeLoop(self.storage, self.bus, self.persona, self.templates)
+        self.settings = SimpleNamespace(
+            game_tool_wait_speech=True, neuro_url="http://fake", channel="stream"
+        )
 
     async def asyncTearDown(self):
         await self.storage.close()
         self.tmp.cleanup()
 
+    def _patchers(self, fake):
+        return [
+            patch.object(loop_module, "NeuroClient", lambda base_url: fake),
+            patch.object(stream_settings, "load", return_value=self.settings),
+        ]
+
     async def test_game_action_waits_for_speech_end(self):
-        self.loop._turn_play_head = time.monotonic() + 0.05
+        fake = _FakeSpeechStatus(0.05)
         started = time.monotonic()
-        with patch(
-            "neuro_simulator.stream.loop.stream_settings.load",
-            return_value=SimpleNamespace(game_tool_wait_speech=True),
-        ):
+        with contextlib.ExitStack() as stack:
+            for p in self._patchers(fake):
+                stack.enter_context(p)
             result = await self.loop.run_game_action(lambda: {"ok": True})
         self.assertTrue(result["ok"])
         self.assertGreaterEqual(time.monotonic() - started, 0.04)
 
     async def test_game_actions_are_serialized(self):
-        self.loop._turn_play_head = time.monotonic() + 0.04
+        fake = _FakeSpeechStatus(0.04)
         order: list[str] = []
 
         def act(name: str):
             order.append(name)
-            self.loop._turn_play_head = time.monotonic() + 0.04
+            # 第二动作开始前，neuro 又排了新句子（循环内重读 status 才能看到）
+            fake.ends_at = time.time() + 0.04
             return {"ok": True, "name": name}
 
         started = time.monotonic()
-        with patch(
-            "neuro_simulator.stream.loop.stream_settings.load",
-            return_value=SimpleNamespace(game_tool_wait_speech=True),
-        ):
+        with contextlib.ExitStack() as stack:
+            for p in self._patchers(fake):
+                stack.enter_context(p)
             first = asyncio.create_task(self.loop.run_game_action(lambda: act("a")))
             await asyncio.sleep(0)
             second = asyncio.create_task(self.loop.run_game_action(lambda: act("b")))
