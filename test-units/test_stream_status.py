@@ -287,7 +287,9 @@ class TestStreamStatus(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(scene["prompt_context"], "Wordle 场景应带规则指令")
 
     async def test_chatbot_partition_reports_template_error(self):
-        await self.templates.save("neuro_user", "{{ 'unterminated")
+        # 保存路径会拒绝坏模板；这里模拟"绕过保存直接写 DB"的遗留数据
+        await self.storage.upsert_prompt("{{ 'unterminated", "neuro_user")
+        await self.templates.load()
         self.templates.render("neuro_user", {"messages": "hi"})
         cur = self._status()["sections"]["chatbot"]["current"]
         self.assertEqual(cur["template_error"]["name"], "neuro_user")

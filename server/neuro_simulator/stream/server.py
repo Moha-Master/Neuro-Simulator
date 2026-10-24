@@ -560,21 +560,21 @@ def create_app() -> FastAPI:
     async def manage_save_template(name: str, payload: TemplatePayload):
         templates = app.state.templates
         try:
-            await templates.save(name, payload.content)
+            validation = await templates.save(name, payload.content)
         except TemplateError as e:
             raise HTTPException(status_code=e.status, detail=e.message) from e
         print(f"[stream] template saved: {name}", flush=True)
-        return {"status": "ok", "templates": templates.list()}
+        return {"status": "ok", "templates": templates.list(), "validation": validation}
 
     @app.post("/manage/templates/{name}/reset")
     async def manage_reset_template(name: str):
         templates = app.state.templates
         try:
-            await templates.reset(name)
+            validation = await templates.reset(name)
         except TemplateError as e:
             raise HTTPException(status_code=e.status, detail=e.message) from e
         print(f"[stream] template reset: {name}", flush=True)
-        return {"status": "ok", "templates": templates.list()}
+        return {"status": "ok", "templates": templates.list(), "validation": validation}
 
     @app.post("/manage/templates/{name}/preview")
     async def manage_preview_template(name: str, payload: TemplatePreviewPayload):

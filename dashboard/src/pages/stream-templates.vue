@@ -73,7 +73,7 @@
             :content="t.content"
             :updated-at="t.updated_at"
             :is-default="t.is_default"
-            :busy="store.busy.value"
+            :busy="store.busy.value || saving"
             :placeholders="t.placeholders"
             :required="t.required"
             :rows="14"
@@ -93,19 +93,58 @@
 
 <script lang="ts" setup>
 import { ref, watch } from 'vue'
+import { api, ApiError, describeError } from '@/stores/connection'
 import { useStreamTemplates } from '@/composables/useStreamTemplates'
 import { useModuleStatus } from '@/composables/useModuleStatus'
 import ModuleOffline from '@/components/ModuleOffline.vue'
 import PromptEditor from '@/components/persona/PromptEditor.vue'
+import type { SaveResult, TemplateInfo, TemplateValidation } from '@/types/persona'
+
+const BASE = '/manage/stream/manage/templates'
 
 const store = useStreamTemplates()
 const status = useModuleStatus('stream')
 
 const tab = ref('neuro_user')
+const saving = ref(false)
+
+/** 400 detail 是 JSON 字符串时取出原文（保留 Jinja 行号），否则用通用文案。 */
+function rawDetail(e: unknown): string {
+  if (e instanceof ApiError) {
+    try {
+      const parsed = JSON.parse(e.message)
+      if (typeof parsed === 'string') return parsed
+    } catch {
+      // detail 不是 JSON 字符串：下面原样返回
+    }
+    return e.message
+  }
+  return describeError(e)
+}
+
+/** 直接调保存端点：需要拿到 validation（gate/warnings）展示，composable 会吞掉响应体。 */
+async function saveTemplate(name: string, content: string): Promise<SaveResult> {
+  saving.value = true
+  store.error.value = ''
+  try {
+    const data = await api<{ templates: TemplateInfo[]; validation: TemplateValidation }>(
+      `${BASE}/${name}`,
+      { method: 'PUT', body: JSON.stringify({ content }) },
+    )
+    store.templates.value = data.templates
+    return { ok: true, validation: data.validation }
+  } catch (e) {
+    const detail = rawDetail(e)
+    store.error.value = '保存模板失败: ' + detail
+    return { ok: false, error: detail }
+  } finally {
+    saving.value = false
+  }
+}
 
 function templateApi(name: string) {
   return {
-    save: (content: string) => store.save(name, content),
+    save: (content: string) => saveTemplate(name, content),
     reset: () => store.reset(name),
     preview: (draft: string) => store.preview(name, draft),
   }

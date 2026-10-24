@@ -67,6 +67,26 @@
       </v-btn>
     </div>
 
+    <v-alert
+      v-if="saveError"
+      type="error"
+      variant="tonal"
+      density="compact"
+      class="mt-3"
+    >
+      保存被拒绝：{{ saveError }}
+    </v-alert>
+    <v-alert
+      v-else-if="savedWarnings.length"
+      type="warning"
+      variant="tonal"
+      density="compact"
+      class="mt-3"
+    >
+      已保存，但有无法静态验证的路径（不影响保存/生效）：
+      <code v-for="w in savedWarnings" :key="w" class="mr-2">{{ w }}</code>
+    </v-alert>
+
     <v-dialog v-model="previewDialog" max-width="1100">
       <v-card v-if="previewData">
         <v-card-title class="d-flex align-center flex-wrap ga-2">
@@ -85,6 +105,30 @@
             variant="tonal"
           >
             {{ key }} {{ len }}
+          </v-chip>
+          <v-chip
+            v-if="previewData.gate"
+            size="small"
+            variant="tonal"
+            :color="previewData.gate.g1_ok ? 'success' : 'error'"
+          >
+            G1 编译 {{ previewData.gate.g1_ok ? '通过' : '拒绝' }}
+          </v-chip>
+          <v-chip
+            v-if="previewData.gate"
+            size="small"
+            variant="tonal"
+            :color="previewData.gate.g2_ok ? 'success' : 'error'"
+          >
+            G2 最严苛 {{ previewData.gate.g2_ok ? '通过' : '拒绝' }}
+          </v-chip>
+          <v-chip
+            v-if="previewData.gate"
+            size="small"
+            variant="tonal"
+            :color="previewData.gate.skeleton_rendered ? 'success' : 'error'"
+          >
+            骨架 {{ previewData.gate.skeleton_rendered ? '已渲染' : '未通过' }}
           </v-chip>
           <v-chip
             v-for="[key, len] in Object.entries(previewData.expanded || {})"
@@ -111,17 +155,29 @@
             density="compact"
             class="mb-2"
           >
-            模板渲染失败（直播会退回上一版文本）：{{ previewData.error }}
+            实况渲染失败（直播会退回最小兜底）：{{ previewData.error }}
           </v-alert>
           <v-alert
-            v-if="previewData.unresolved_paths?.length"
+            v-if="previewData.gate_errors && Object.keys(previewData.gate_errors).length"
+            type="error"
+            variant="tonal"
+            density="compact"
+            class="mb-2"
+          >
+            保存会被拒绝：
+            <div v-for="(message, key) in previewData.gate_errors" :key="key">
+              {{ message }}
+            </div>
+          </v-alert>
+          <v-alert
+            v-if="previewData.warnings?.length"
             type="warning"
             variant="tonal"
             density="compact"
             class="mb-2"
           >
-            这些路径在当前投影里不存在（渲染为空串，仅提示）：
-            <code v-for="p in previewData.unresolved_paths" :key="p" class="mr-2">{{ p }}</code>
+            无法静态验证（不阻塞保存）：
+            <code v-for="w in previewData.warnings" :key="w" class="mr-2">{{ w }}</code>
           </v-alert>
           <v-alert
             v-if="previewData.missing_placeholders?.length"
@@ -148,7 +204,7 @@
 
 <script lang="ts" setup>
 import { computed, nextTick, ref, watch } from 'vue'
-import type { PlaceholderInfo, PreviewResult } from '@/types/persona'
+import type { PlaceholderInfo, PreviewResult, SaveResult } from '@/types/persona'
 import StatusPathPicker from '@/components/persona/StatusPathPicker.vue'
 
 /** 人设/模板共用的 prompt 编辑器：草稿状态、脏检测、占位符提示、编译预览、恢复默认。
@@ -170,7 +226,8 @@ const props = withDefaults(
     appendHint?: string
     mode?: 'template' | 'persona'
     api: {
-      save: (content: string) => Promise<boolean>
+      // persona 页面仍返回 boolean；stream 消息模板返回带 gate/warnings 的 SaveResult
+      save: (content: string) => Promise<boolean | SaveResult>
       reset: () => Promise<boolean>
       preview: (draft: string) => Promise<PreviewResult | null>
     }
@@ -199,6 +256,8 @@ const pending = ref<'save' | 'reset' | null>(null)
 const previewing = ref(false)
 const previewDialog = ref(false)
 const previewData = ref<PreviewResult | null>(null)
+const savedWarnings = ref<string[]>([])
+const saveError = ref('')
 const snackbar = ref(false)
 const snackbarText = ref('')
 
@@ -249,11 +308,18 @@ async function copy(text: string) {
 async function save() {
   if (!draft.value.trim()) return
   pending.value = 'save'
-  const ok = await props.api.save(draft.value)
+  savedWarnings.value = []
+  saveError.value = ''
+  const result = await props.api.save(draft.value)
   pending.value = null
+  const ok = result === true || (typeof result === 'object' && result.ok)
   if (ok) {
+    if (typeof result === 'object') savedWarnings.value = result.validation?.warnings || []
     notify('已保存，下一轮对话生效')
     emit('saved')
+  } else if (typeof result === 'object' && result.error) {
+    // 400 的 detail 原文（含 Jinja 行号）直接展示，便于定位
+    saveError.value = result.error
   }
 }
 
