@@ -1,31 +1,11 @@
 <template>
   <div class="prompt-editor">
-    <v-card v-if="placeholders.length" variant="tonal" class="mb-4">
-      <v-card-text class="text-body-2">
-        <div class="font-weight-medium mb-1">占位符（点击复制）</div>
-        <div class="d-flex flex-wrap ga-2 mb-2">
-          <v-chip
-            v-for="p in placeholders"
-            :key="p.key"
-            size="small"
-            variant="flat"
-            color="primary"
-            class="font-weight-medium"
-            @click="copy(p.key)"
-          >
-            {{ p.key }}
-          </v-chip>
-        </div>
-        <div
-          v-for="p in placeholders"
-          :key="p.key + '-desc'"
-          class="text-caption text-disabled mb-1"
-        >
-          <code>{{ p.key }}</code> — {{ p.description }}
-        </div>
-        <div v-if="appendHint" class="text-caption text-disabled mt-2">{{ appendHint }}</div>
-      </v-card-text>
-    </v-card>
+    <StatusPathPicker
+      :mode="mode"
+      :placeholders="placeholders"
+      @insert="insertAtCursor"
+    />
+    <div v-if="appendHint" class="text-caption text-disabled mb-2">{{ appendHint }}</div>
 
     <div class="d-flex align-center flex-wrap ga-2 mb-2">
       <v-chip size="small" variant="outlined">{{ draft.length }} chars</v-chip>
@@ -34,11 +14,11 @@
       <v-chip
         v-if="missing.length"
         size="small"
-        color="error"
+        color="warning"
         variant="tonal"
-        :title="'缺少必需占位符：' + missing.join('、')"
+        :title="'缺少占位符（仅提示，不阻止保存）：' + missing.join('、')"
       >
-        缺少 {{ missing.length }} 个必需占位符
+        缺少 {{ missing.length }} 个占位符
       </v-chip>
       <span v-if="updatedAt" class="text-caption text-disabled">updated {{ updatedAt }}</span>
       <v-spacer />
@@ -55,6 +35,7 @@
     </div>
 
     <v-textarea
+      ref="inputEl"
       v-model="draft"
       class="prompt-editor__input"
       variant="outlined"
@@ -66,7 +47,7 @@
     <div class="d-flex align-center flex-wrap ga-2 mt-3">
       <v-btn
         color="primary"
-        :disabled="!dirty || !draft.trim() || !!missing.length"
+        :disabled="!dirty || !draft.trim()"
         :loading="busy && pending === 'save'"
         @click="save"
       >
@@ -105,6 +86,15 @@
           >
             {{ key }} {{ len }}
           </v-chip>
+          <v-chip
+            v-for="[key, len] in Object.entries(previewData.expanded || {})"
+            :key="'exp-' + key"
+            size="small"
+            variant="tonal"
+            color="info"
+          >
+            {{ key }} {{ len }} chars
+          </v-chip>
           <v-spacer />
           <v-btn
             icon="mdi-content-copy"
@@ -114,6 +104,35 @@
           />
         </v-card-title>
         <v-card-text>
+          <v-alert
+            v-if="previewData.rendered === false"
+            type="error"
+            variant="tonal"
+            density="compact"
+            class="mb-2"
+          >
+            模板渲染失败（直播会退回上一版文本）：{{ previewData.error }}
+          </v-alert>
+          <v-alert
+            v-if="previewData.unresolved_paths?.length"
+            type="warning"
+            variant="tonal"
+            density="compact"
+            class="mb-2"
+          >
+            这些路径在当前投影里不存在（渲染为空串，仅提示）：
+            <code v-for="p in previewData.unresolved_paths" :key="p" class="mr-2">{{ p }}</code>
+          </v-alert>
+          <v-alert
+            v-if="previewData.missing_placeholders?.length"
+            type="warning"
+            variant="tonal"
+            density="compact"
+            class="mb-2"
+          >
+            缺少占位符（仅提示，不阻止保存）：
+            <code v-for="p in previewData.missing_placeholders" :key="p" class="mr-2">{{ p }}</code>
+          </v-alert>
           <pre class="prompt-editor__preview">{{ previewData.prompt }}</pre>
         </v-card-text>
         <v-card-actions>
@@ -128,11 +147,13 @@
 </template>
 
 <script lang="ts" setup>
-import { computed, ref, watch } from 'vue'
+import { computed, nextTick, ref, watch } from 'vue'
 import type { PlaceholderInfo, PreviewResult } from '@/types/persona'
+import StatusPathPicker from '@/components/persona/StatusPathPicker.vue'
 
-/** 人设/模板共用的 prompt 编辑器：草稿状态、脏检测、占位符校验、编译预览、恢复默认。
- *  具体读写由父页面通过 api 传入（组件不关心是哪个人设）。 */
+/** 人设/模板共用的 prompt 编辑器：草稿状态、脏检测、占位符提示、编译预览、恢复默认。
+ *  具体读写由父页面通过 api 传入（组件不关心是哪个人设）。
+ *  `mode` 决定顶部选择器：template=状态路径树（消息模板）；persona=真实占位符。 */
 const props = withDefaults(
   defineProps<{
     content: string
@@ -147,6 +168,7 @@ const props = withDefaults(
     resetLabel?: string
     resetConfirm?: string
     appendHint?: string
+    mode?: 'template' | 'persona'
     api: {
       save: (content: string) => Promise<boolean>
       reset: () => Promise<boolean>
@@ -164,13 +186,15 @@ const props = withDefaults(
     previewTitle: '编译预览',
     resetLabel: '恢复默认',
     resetConfirm: '恢复内置默认内容？当前内容会丢失。',
-    appendHint: '占位符缺失时，对应段落会自动追加到末尾（防止误删导致内容整段丢失）。',
+    appendHint: '',
+    mode: 'persona',
   },
 )
 
 const emit = defineEmits<{ (e: 'saved'): void; (e: 'reset-done'): void }>()
 
 const draft = ref(props.content)
+const inputEl = ref<{ $el?: Element } | null>(null)
 const pending = ref<'save' | 'reset' | null>(null)
 const previewing = ref(false)
 const previewDialog = ref(false)
@@ -179,10 +203,27 @@ const snackbar = ref(false)
 const snackbarText = ref('')
 
 const dirty = computed(() => draft.value !== props.content)
-// 草稿里缺必需占位符 → 保存会被服务端拒绝，前端先拦住
+// 草稿里缺占位符只做提示（服务端也不再拒绝保存）；前端不拦保存
 const missing = computed(() =>
   (props.required || []).filter((key) => !draft.value.includes(`{{${key}}}`)),
 )
+
+/** 在 textarea 光标处插入（选择器的主操作；剪贴板只是次级操作）。 */
+function insertAtCursor(text: string) {
+  const el = inputEl.value?.$el?.querySelector('textarea') as HTMLTextAreaElement | null
+  if (!el) {
+    draft.value += text
+    return
+  }
+  const start = el.selectionStart ?? draft.value.length
+  const end = el.selectionEnd ?? start
+  draft.value = draft.value.slice(0, start) + text + draft.value.slice(end)
+  void nextTick(() => {
+    el.focus()
+    const pos = start + text.length
+    el.setSelectionRange(pos, pos)
+  })
+}
 
 watch(
   () => props.content,
@@ -206,7 +247,7 @@ async function copy(text: string) {
 }
 
 async function save() {
-  if (!draft.value.trim() || missing.value.length) return
+  if (!draft.value.trim()) return
   pending.value = 'save'
   const ok = await props.api.save(draft.value)
   pending.value = null

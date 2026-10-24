@@ -8,7 +8,7 @@
 - `turn_projection()` / `scene_snapshot()` → **状态投影的原料**（`/status` 与
   `/state/events` 由 `state_kit.StateBoard` 组合）：只有"这一轮还剩多久"这类
   任意时刻重读都对的值，不含音频、不含正文，供其他模块高频轮询（stream 判开场
-  是否放完、判下一轮节奏；chatbot 判她是否睡着；将来的 Discord/QQ 接入同样消费它）。
+  是否放完、判下一轮节奏；chatbot 读 `silent_s` 由模板决定"是否睡着"的措辞）。
 - `turn_text()` / `turn_segments()` / `batch()` → **内容平面**（`POST /chat`
   与 `/chat/events`）："这一轮到底说了什么"，整轮全量、不截断；
   `segments` 的 `(turn_id, step, index)` 是唯一键。
@@ -233,12 +233,22 @@ class UiState:
         pick = channel or self._last_channel
         turn = self._turns.get(pick) if pick else None
         remaining = max(0.0, turn.play_head - now) if turn is not None else 0.0
+        speaking = remaining > 0.05
+        # 沉默时长：距最后一次语音**结束**的秒数。只在本轮确实有 speech 时有意义；
+        # 纯工具轮/TTS 关闭/从未说话 → None（没有"上一次结束"这个时刻可算）。
+        # 与 ends_at 同一时间基准：这里用 monotonic 差值，ends_at 换算成 unix。
+        silent_s: Optional[float] = None
+        if turn is not None and turn.speech:
+            silent_s = round(max(0.0, now - turn.play_head), 2)
         return {
             "turn_id": turn.id if turn is not None else None,
             "channel": pick,
             # generating = 本轮还在生成；speaking = 还有声音/字幕要播
             "generating": bool(turn and turn.active),
-            "speaking": remaining > 0.05,
+            "speaking": speaking,
+            # idle = 当前不在发声（无阈值的派生事实；"算不算睡着"是模板的策略）
+            "idle": not speaking,
+            "silent_s": silent_s,
             "remaining_s": round(remaining, 2),
             # 本轮语音预测播完的 unix 时刻；可能落在过去（= 她上次说完的时刻）。
             # 本轮还没有任何 speech（TTS 关闭/纯工具轮）→ None：下游据此跳过语音等待。

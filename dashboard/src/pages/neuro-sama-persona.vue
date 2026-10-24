@@ -63,6 +63,7 @@
         :is-default="persona.prompt.value.is_default"
         :busy="persona.busy.value"
         :placeholders="persona.placeholders.value"
+        mode="persona"
         :api="promptApi"
         reset-label="恢复默认 Prompt"
         reset-confirm="把 Prompt 模板恢复为内置默认？当前 Prompt 内容会丢失（Core Memory 不受影响）。"

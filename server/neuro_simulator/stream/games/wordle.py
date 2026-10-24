@@ -230,6 +230,16 @@ class WordleGame(Game):
 
     # ---------- 画面状态（全量快照） ----------
 
+    def narrative(self, state: Dict[str, Any]) -> str:
+        """一句叙事：只给"第几次猜测/输赢"，不 dump 棋盘字母。"""
+        used = int(state.get("guesses_used") or 0)
+        status = str(state.get("status") or "")
+        if status == "won":
+            return f"won in {used} of {MAX_ROWS} guesses"
+        if status == "lost":
+            return f"lost after {used} of {MAX_ROWS} guesses"
+        return f"playing, {used} of {MAX_ROWS} guesses used"
+
     def state(self) -> Dict[str, Any]:
         return {
             "game": self.id,

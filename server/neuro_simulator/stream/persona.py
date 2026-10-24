@@ -36,22 +36,6 @@ _CORE_HEADER = (
 _DEFAULTS_DIR = Path(__file__).parent / "defaults"
 
 
-def stream_info_line(title: str, category: str) -> str:
-    """本场的 `Now streaming: 标题 [分区]`。
-
-    两者都为空时返回空串——模板渲染会把因此产生的连续空行压掉，整行自然消失。
-    """
-    title = (title or "").strip()
-    category = (category or "").strip()
-    if title and category:
-        return f"Now streaming: {title} [{category}]"
-    if title:
-        return f"Now streaming: {title}"
-    if category:
-        return f"Now streaming in {category}"
-    return ""
-
-
 def _load_defaults() -> PersonaDefaults:
     prompt = (_DEFAULTS_DIR / "chatbot_prompt.md").read_text(encoding="utf-8").strip()
     data = json.loads(
@@ -91,33 +75,38 @@ class ChatbotPersonaStore(SharedPersonaStore):
 
 # ---------- 消息模板 ----------
 
-_SHARED_VARS = [
-    {"key": "{{datetime}}", "description": "当前时间（与直播循环一致的本地时间格式）。"},
+# 消息模板的命名空间（Jinja）。注册表只用于说明文字与搜索提示，**不再当真相**：
+# 实际可用路径由 dashboard 从 `GET /manage/state` 的实况投影生成。
+_TEMPLATE_VARS = [
     {
-        "key": "{{stream_info}}",
-        "description": "本场信息整行，例如 `Now streaming: 标题 [分区]`；未设置时整行自动消失。",
-    },
-    {"key": "{{title}}", "description": "本场直播标题的原始值（可能为空）。"},
-    {"key": "{{category}}", "description": "本场分区的原始值（可能为空）。"},
-]
-
-_NEURO_VARS = [
-    {"key": "{{scene_context}}", "description": "config 的 stream.scene_context（直播场景说明）。"},
-    {
-        "key": "{{messages}}",
+        "key": "{{ stream_status }}",
         "description": (
-            "必需。观众消息块（`- 用户名: 内容` 多行）；队列为空时这里是"
-            " config 的 placeholder_message（相当于一条系统提示，让 Neuro 自己找话说）。"
+            "stream 自己的状态机投影（分区 → current，不含 graph）。"
+            "如 `stream_status.metadata.title`、`stream_status.scene.prompt_context`、"
+            "`stream_status.games[stream_status.games.active].summary`。"
         ),
     },
-    {"key": "{{scene}}", "description": "当前画面场景 id（如 room / gameplay）。"},
-    {"key": "{{round}}", "description": "本场已进行的轮次序号。"},
-]
-
-_CHATBOT_VARS = [
     {
-        "key": "{{neuro_status}}",
-        "description": "必需。Neuro 的当前状态：刚开播 / 最近说了什么 / 疑似睡着。",
+        "key": "{{ neuro_status }}",
+        "description": (
+            "neuro 最近一次 /status 的投影（不可达时为 {}）。"
+            "如 `neuro_status.turn.silent_s`、`neuro_status.turn.idle`。"
+        ),
+    },
+    {
+        "key": "{{ neuro_said }}",
+        "description": "本轮 neuro 的正文（内容平面）；本场还没说过话时为空串。",
+    },
+    {
+        "key": "{{ messages }}",
+        "description": (
+            "观众消息块（`- 用户名: 内容` 多行）；队列为空时是 config 的 "
+            "placeholder_message。"
+        ),
+    },
+    {
+        "key": "{{ datetime }}",
+        "description": "当前本地时间字符串（墙钟不属于状态机）。",
     },
 ]
 
@@ -143,15 +132,15 @@ def build_template_store(storage) -> TemplateStore:
                 ),
                 default=d.get("neuro_user", ""),
                 required=("messages",),
-                placeholders=[*_NEURO_VARS, *_SHARED_VARS],
+                placeholders=list(_TEMPLATE_VARS),
             ),
             TemplateSpec(
                 name="chatbot_user",
                 label="Chatbot · 每轮",
                 description="每轮注入 chatbot（模拟观众）的 user message。",
                 default=d.get("chatbot_user", ""),
-                required=("neuro_status",),
-                placeholders=[*_CHATBOT_VARS, *_SHARED_VARS],
+                required=("messages",),
+                placeholders=list(_TEMPLATE_VARS),
             ),
         ],
     )

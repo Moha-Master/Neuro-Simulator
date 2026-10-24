@@ -77,12 +77,13 @@
             :placeholders="t.placeholders"
             :required="t.required"
             :rows="14"
+            mode="template"
             :api="templateApi(t.name)"
             preview-label="预览本轮实际消息"
             :preview-title="`渲染结果 · ${t.label}`"
             reset-label="恢复默认模板"
             :reset-confirm="`把「${t.label}」模板恢复为内置默认？当前内容会丢失。`"
-            append-hint="未提供的占位符会被清空（不会把 {{xxx}} 喂给模型）；必需占位符缺失时无法保存。"
+            append-hint="未定义路径渲染为空串；占位符缺失只提示、不阻止保存。渲染失败会退回上一版文本，并在 State 页的 chatbot.template_error 里可见。"
           />
         </div>
       </template>

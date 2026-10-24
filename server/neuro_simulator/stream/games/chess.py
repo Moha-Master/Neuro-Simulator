@@ -187,6 +187,19 @@ class ChessGame(Game):
             return await self.start()
         raise GameError(f"Unknown chess action {action!r}.")
 
+    def narrative(self, state: Dict[str, Any]) -> str:
+        """一句叙事：走子方/第几手/是否被将军；**不出现** FEN、棋盘或合法着法。"""
+        status = str(state.get("status") or "")
+        if status not in ("playing", "ended"):
+            return "waiting for the Lichess game to start"
+        if status == "ended":
+            result = str(state.get("result") or "").strip()
+            return f"game over{', ' + result if result else ''}"
+        side = "White" if state.get("turn") == "white" else "Black"
+        moves = len(state.get("moves") or [])
+        check = "in check" if state.get("in_check") else "not in check"
+        return f"{side} to move, {moves} moves in, {check}"
+
     def state(self) -> Dict[str, Any]:
         legal = self._legal_uci() if self.status == "playing" else []
         return {

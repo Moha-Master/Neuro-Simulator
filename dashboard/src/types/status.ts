@@ -142,12 +142,29 @@ export interface ChatbotRuntime {
   max_concurrent: number
   interval_jitter: number
   in_flight: number
+  /** 消息模板最近一次实况渲染失败（成功即清除） */
+  template_error: TemplateErrorStatus | null
+}
+
+export interface TemplateErrorStatus {
+  name: string
+  at: string
+  message: string
+}
+
+export interface GameEntry {
+  /** 由 element 快照派生的状态 id（如 wordle.typing） */
+  phase: string | null
+  /** 游戏自己给的一句叙事（英文，不含棋盘细节） */
+  summary: string
+  /** 原始 element_state 快照（与画面广播同一份对象） */
+  element: Record<string, unknown>
 }
 
 export interface GamesStatus {
   active: string | null
-  /** 活跃游戏的 element_state 全量快照（key = 游戏 id，含 phase） */
-  [gameId: string]: unknown
+  /** 活跃游戏的条目（key = 游戏 id） */
+  [gameId: string]: GameEntry | string | null
 }
 
 export interface NeuroLinkStatus {
@@ -188,6 +205,10 @@ export interface TurnStatus {
   channel: string | null
   generating: boolean
   speaking: boolean
+  /** 当前不在发声（无阈值派生事实；阈值属于模板策略） */
+  idle: boolean
+  /** 距最后一次语音结束的秒数；本轮没有 speech / 从未说话时为 null */
+  silent_s: number | null
   remaining_s: number
   /** 本轮语音预测播完的 unix 秒；本轮没有 speech 时为 null */
   ends_at: number | null

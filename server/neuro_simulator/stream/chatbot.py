@@ -1,7 +1,10 @@
 """stream 模块 Chatbot：在直播期间模拟 Twitch 弹幕发送者。
 
 持有独立循环，不受直播主循环阻塞；在 Session 启动时即刻开启，在 Session 结束时关闭。
-维护内存中的临时对话历史（不存数据库），自动判定 Neuro 的当前状态（Online / Says / Sleeping）。
+维护内存中的临时对话历史（不存数据库）。
+
+Neuro 的三态叙述（刚开播 / 说了什么 / 疑似睡着）**不在代码里**：chatbot 只缓存
+"本轮正文 + 最近一次 neuro 状态投影"，措辞与沉默阈值全部由消息模板（Jinja）决定。
 
 并发模型（固定节拍调度器）：
 - 调度循环只负责"到点发起"：每 interval_s（± jitter）spawn 一个生成任务后立刻继续排程，
@@ -26,7 +29,6 @@ from typing import Callable, Optional
 from openai import AsyncOpenAI
 
 from . import settings
-from .persona import stream_info_line
 from .usernames import random_username
 
 logger = logging.getLogger("stream.chatbot")
@@ -55,6 +57,8 @@ _EMOTE_CANON = {
 _EMOTE_WORD = re.compile(r"[A-Za-z][A-Za-z0-9]*")
 
 _HISTORY_LIMIT = 20
+# chatbot 模板能看到多少条"观众最近消息"（含自己发的行；人设 prompt 要求不复述）
+_RECENT_CHAT = 12
 # 同场次内已入列消息的签名窗口：模型爱复述自己上一批的"金句"，
 # 这里做一层廉价去重，避免刷屏式重复（并发下也兜住同一批被重复提交的极端情况）。
 _DEDUP_WINDOW = 300
@@ -73,8 +77,12 @@ class ChatbotManager:
         self._on_new_message: Optional[Callable[[], None]] = None
         self._on_message: Optional[Callable[[int, str, str], None]] = None
         self._metadata: MetadataProvider = lambda: ("", "")
-        self._last_neuro_said: Optional[str] = None
-        self._tts_finish_time: float = 0.0
+        # 内容平面缓存：本轮正文 + 最近一次 neuro 状态（剥掉 envelope/graph 的 dict）。
+        # 它们只喂给模板，不在 chatbot 侧做任何"睡没睡着"的判定。
+        self._neuro_said: str = ""
+        self._neuro_status: dict = {}
+        # loop 注入：messages 文本 → 完整 Jinja context（含 stream_status）
+        self._context_provider: Optional[Callable[[str], dict]] = None
         self._history: list[dict] = []
         self._history_lock = asyncio.Lock()
         self._seen: set[str] = set()
@@ -92,14 +100,16 @@ class ChatbotManager:
         on_new_message_cb: Callable[[], None],
         on_message_cb: Optional[Callable[[int, str, str], None]] = None,
         metadata_provider: Optional[MetadataProvider] = None,
+        context_provider: Optional[Callable[[str], dict]] = None,
     ) -> None:
         self.stop_session()
         self._queue_row = queue_row
         self._on_new_message = on_new_message_cb
         self._on_message = on_message_cb
         self._metadata = metadata_provider or (lambda: ("", ""))
-        self._last_neuro_said = None
-        self._tts_finish_time = 0.0
+        self._context_provider = context_provider
+        self._neuro_said = ""
+        self._neuro_status = {}
         self._history = []
         self._seen = set()
         self._seen_order = deque(maxlen=_DEDUP_WINDOW)
@@ -118,6 +128,7 @@ class ChatbotManager:
         self._queue_row = None
         self._on_new_message = None
         self._on_message = None
+        self._context_provider = None
 
     async def aclose(self) -> None:
         """关闭复用的 LLM 客户端（进程退出时调用）。"""
@@ -126,36 +137,42 @@ class ChatbotManager:
         if client is not None:
             await client.close()
 
-    def note_neuro_speech(self, text: str, finish_time: float) -> None:
-        """记录 Neuro 正在/刚说完的话。
+    def note_neuro_turn(self, text: str, status: dict) -> None:
+        """缓存本轮正文与最近一次 neuro 状态（纯 dict，供 Jinja context）。
 
-        finish_time 是本轮语音**预测播完**的 monotonic 时刻（服务端与画面共用同一
-        时间轴），睡眠判定从这一刻开始计时，而不是从整轮生成结束时。
+        status 是已剥掉 envelope/graph 的 `{section: current}`；这里不做任何
+        阈值判定——"多久算睡着"属于模板措辞，不是这个模块的策略。
         """
         if text and text.strip():
-            self._last_neuro_said = text.strip()
-        self._tts_finish_time = max(self._tts_finish_time, finish_time)
+            self._neuro_said = text.strip()
+        if isinstance(status, dict):
+            self._neuro_status = status
+
+    @property
+    def neuro_said(self) -> str:
+        return self._neuro_said
+
+    @property
+    def neuro_status(self) -> dict:
+        return self._neuro_status
 
     @property
     def in_flight(self) -> int:
         """当前在途的生成任务数（供 /health 与 dashboard 观察并发调度）。"""
         return sum(1 for t in self._tasks if not t.done())
 
-    def describe_status(self) -> str:
-        """Neuro 当前状态的文本描述（供模板预览复用真实逻辑）。"""
-        try:
-            timeout = settings.load().chatbot.neuro_sleep_timeout_s
-        except RuntimeError:
-            timeout = 45.0
-        return self._get_neuro_status(timeout)
-
-    def _get_neuro_status(self, sleep_timeout_s: float) -> str:
-        if self._last_neuro_said is None:
-            return "Neuro just online now! Stream is starting soon..."
-        now = time.monotonic()
-        if now <= self._tts_finish_time + sleep_timeout_s:
-            return f"Neuro says: {self._last_neuro_said}"
-        return "Neuro seems fall asleep on stream..."
+    def _context(self, messages_block: str) -> dict:
+        """模板 context：优先用 loop 注入的（带 stream_status），否则给最小集合。"""
+        if self._context_provider is not None:
+            return self._context_provider(messages_block)
+        title, category = self._metadata()
+        return {
+            "stream_status": {"metadata": {"title": title, "category": category}},
+            "neuro_status": self._neuro_status,
+            "neuro_said": self._neuro_said,
+            "messages": messages_block,
+            "datetime": time.strftime("%Y-%m-%d %H:%M:%S (%A)"),
+        }
 
     # ---------- 客户端 ----------
 
@@ -223,17 +240,20 @@ class ChatbotManager:
     # ---------- 单轮生成 ----------
 
     async def _generate_once(self, cb: settings.ChatbotSettings) -> None:
-        title, category = self._metadata()
-        user_content = self.templates.render(
-            "chatbot_user",
-            {
-                "datetime": time.strftime("%Y-%m-%d %H:%M:%S (%A)"),
-                "stream_info": stream_info_line(title, category),
-                "title": title,
-                "category": category,
-                "neuro_status": self._get_neuro_status(cb.neuro_sleep_timeout_s),
-            },
+        # chatbot 现在能看到"观众最近在聊什么"（含它自己刚发的行）：
+        # 真实弹幕会互相接话/复读，看不到历史只能凭空生成。去重仍由人设 prompt
+        # 明确要求"不复述上一批"，模板负责把来源标成 real viewer messages。
+        queue_row = self._queue_row
+        recent = (
+            await self.storage.recent_messages(queue_row, _RECENT_CHAT)
+            if queue_row is not None
+            else []
         )
+        messages_block = (
+            "\n".join(f"- {m['username']}: {m['content']}" for m in recent)
+            or "(no recent chat messages yet)"
+        )
+        user_content = self.templates.render("chatbot_user", self._context(messages_block))
         system_prompt = self.persona.render_prompt(cb.count)
         async with self._history_lock:
             history = list(self._history)

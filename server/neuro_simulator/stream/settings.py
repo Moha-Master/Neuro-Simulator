@@ -47,7 +47,6 @@ class ChatbotSettings:
     timeout: float
     interval_s: float
     count: int
-    neuro_sleep_timeout_s: float
     max_concurrent: int     # 并发生成上限（到上限的 tick 直接跳过）
     interval_jitter: float  # 间隔的 ±比例抖动，避免弹幕像节拍器
 
@@ -103,7 +102,8 @@ def load() -> StreamSettings:
     cb_model = svc.model if svc else ""
     cb_interval = float(cb.get("interval_s") if cb.get("interval_s") is not None else 10.0)
     cb_count = int(cb.get("count") if cb.get("count") is not None else 3)
-    cb_sleep = float(cb.get("neuro_sleep_timeout_s") if cb.get("neuro_sleep_timeout_s") is not None else 45.0)
+    # 老配置里的 neuro_sleep_timeout_s 是未知键，这里不读也不报错：沉默阈值
+    # 现在是模板文本的一部分（`{% if … silent_s > 45 %}`），不是配置。
     # 并发上限：固定节拍调度器允许同时在途的生成任务数（1~10）
     cb_max_concurrent = int(cb.get("max_concurrent") if cb.get("max_concurrent") is not None else 3)
     cb_max_concurrent = max(1, min(cb_max_concurrent, 10))
@@ -120,7 +120,6 @@ def load() -> StreamSettings:
         timeout=svc.timeout if svc else 60.0,
         interval_s=cb_interval,
         count=cb_count,
-        neuro_sleep_timeout_s=cb_sleep,
         max_concurrent=cb_max_concurrent,
         interval_jitter=cb_jitter,
     )

@@ -26,7 +26,6 @@ def _settings(**chatbot_overrides) -> StreamSettings:
         timeout=5.0,
         interval_s=0.1,
         count=2,
-        neuro_sleep_timeout_s=45.0,
         max_concurrent=3,
         interval_jitter=0.0,
     )
@@ -207,20 +206,20 @@ class TestChatbot(unittest.IsolatedAsyncioTestCase):
 
     # ---------- 状态 ----------
 
-    async def test_neuro_status_transitions(self):
+    async def test_note_neuro_turn_caches_said_and_status(self):
+        """chatbot 只缓存事实（正文 + 剥好的投影），不再自己判定三态。"""
         mgr = self._mgr()
-        self.assertEqual(
-            mgr._get_neuro_status(5.0),
-            "Neuro just online now! Stream is starting soon...",
+        self.assertEqual(mgr.neuro_said, "")
+        self.assertEqual(mgr.neuro_status, {})
+        mgr.note_neuro_turn(
+            "Hello everyone, I am streaming!",
+            {"turn": {"silent_s": 12.5, "idle": True}},
         )
-        mgr.note_neuro_speech(
-            "Hello everyone, I am streaming!", finish_time=time.monotonic() + 2.0
-        )
-        self.assertEqual(
-            mgr._get_neuro_status(5.0), "Neuro says: Hello everyone, I am streaming!"
-        )
-        mgr._tts_finish_time = time.monotonic() - 10.0
-        self.assertEqual(mgr._get_neuro_status(5.0), "Neuro seems fall asleep on stream...")
+        self.assertEqual(mgr.neuro_said, "Hello everyone, I am streaming!")
+        self.assertEqual(mgr.neuro_status["turn"]["silent_s"], 12.5)
+        # 空正文不覆盖上一句（纯工具轮没有台词）
+        mgr.note_neuro_turn("  ", {"turn": {"silent_s": 50}})
+        self.assertEqual(mgr.neuro_said, "Hello everyone, I am streaming!")
 
     async def test_session_lifecycle(self):
         queue_row, _ = await self.storage.create_queue("q")

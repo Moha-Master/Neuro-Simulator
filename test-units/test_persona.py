@@ -134,13 +134,19 @@ class TestPersona(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn(CORE_PLACEHOLDER, rendered)
         self.assertNotIn(SHORT_TERM_PLACEHOLDER, rendered)
 
-    async def test_missing_placeholders_are_appended(self):
+    async def test_missing_placeholders_are_not_appended(self):
+        """prompt 是作者写的文本：缺占位符不再自动追加段落（preview 只提示）。"""
         await self.persona.save_prompt("Custom prompt without placeholders.")
         rendered = self.persona.render_system(self.memory.render())
 
-        self.assertTrue(rendered.startswith("Custom prompt without placeholders."))
-        self.assertIn("## Core Memory", rendered)
-        self.assertIn("## Short-term Memory", rendered)
+        self.assertEqual(rendered, "Custom prompt without placeholders.")
+        self.assertNotIn("## Core Memory", rendered)
+        self.assertNotIn("## Short-term Memory", rendered)
+        preview = self.persona.preview_system(
+            self.memory.render(), "Custom prompt without placeholders."
+        )
+        self.assertIn("core_memory", preview["missing_placeholders"])
+        self.assertIn("short_term_memory", preview["missing_placeholders"])
 
     async def test_preview_with_draft_does_not_persist(self):
         saved = self.persona.prompt

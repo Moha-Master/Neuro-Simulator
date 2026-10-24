@@ -51,7 +51,6 @@
       "model": "",
       "interval_s": 10.0,
       "count": 3,
-      "neuro_sleep_timeout_s": 45.0,
       "max_concurrent": 3,
       "interval_jitter": 0.2
     }

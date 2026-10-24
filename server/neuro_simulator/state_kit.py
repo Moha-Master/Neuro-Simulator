@@ -142,6 +142,24 @@ class StateBoard:
         return names
 
 
+def current_sections(envelope: dict) -> dict:
+    """把 `/status` 信封剥成 `{分区: current}`（去掉 module/rev/ts 与 graph）。
+
+    模板 context 只认"现在的值"；信封与 graph 是状态机的元信息，进模板只会让
+    作者误以为可以读 rev/ts（那是任意时刻会变的投影元数据）。
+    """
+    if not isinstance(envelope, dict):
+        return {}
+    sections = envelope.get("sections")
+    if not isinstance(sections, dict):
+        return {}
+    out = {}
+    for name, entry in sections.items():
+        if isinstance(entry, dict):
+            out[str(name)] = entry.get("current")
+    return out
+
+
 def _names(raw: Optional[Sequence[str]]) -> Optional[set]:
     """把 query 里的 `a,b` / 列表归一成集合；None 表示"未指定"。"""
     if raw is None:

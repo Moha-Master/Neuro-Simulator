@@ -25,6 +25,7 @@ declare module 'vue' {
     ShortTermMemoryPanel: typeof import('./components/ShortTermMemoryPanel.vue')['default']
     StateMachineGraph: typeof import('./components/state/StateMachineGraph.vue')['default']
     StateSections: typeof import('./components/state/StateSections.vue')['default']
+    StatusPathPicker: typeof import('./components/persona/StatusPathPicker.vue')['default']
     TagInput: typeof import('./components/tags/TagInput.vue')['default']
     ThinkingBlock: typeof import('./components/chat/ThinkingBlock.vue')['default']
     ToolCallBlock: typeof import('./components/chat/ToolCallBlock.vue')['default']

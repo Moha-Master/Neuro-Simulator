@@ -113,14 +113,26 @@ def _scene_current(loop: Any) -> Optional[dict]:
     sid = str(snap.get("id") or "")
     if not sid:
         return None
+    # 场景自带的规则指令（Wordle/Chess 玩法）走状态投影；没有就用 config 的
+    # 全局 scene_context。消息模板只需读 `stream_status.scene.prompt_context`，
+    # 不再由 loop 侧单独拼一个 scene_context 变量。
+    prompt_context = scene_catalog.prompt_context(sid) or _global_scene_context()
     return {
         "id": sid,
         "label": scene_catalog.label(sid) or sid,
         "icon": scene_catalog.icon(sid),
         "desc": scene_catalog.desc(sid),
+        "prompt_context": prompt_context,
         "duration": snap.get("duration"),
         "elapsed": snap.get("elapsed"),
     }
+
+
+def _global_scene_context() -> str:
+    try:
+        return str(stream_settings.load().scene_context or "")
+    except (RuntimeError, AttributeError):
+        return ""
 
 
 def _metadata_current(loop: Any) -> dict:
@@ -155,22 +167,29 @@ def _chatbot_current(loop: Any) -> dict:
         "max_concurrent": cb.max_concurrent,
         "interval_jitter": cb.interval_jitter,
         "in_flight": loop.chatbot.in_flight,
+        # 消息模板最近一次实况渲染失败（成功即清除）；dashboard 的 State 页一眼可见
+        "template_error": loop.templates.template_error,
     }
 
 
 def _games_current(loop: Any) -> dict:
+    """三层：`{active, <game_id>: {phase, summary, element}}`。
+
+    `element` 直接复用 `GameHub.element_states()` 的那份对象（与画面广播同一份
+    快照），不重新构造、也不把 phase/summary 混进原始快照里。
+    """
     hub = loop.games
     current: Dict[str, Any] = {"active": hub.active_id}
     if hub.active is None:
         return current
-    game_id = hub.active.id
-    # 同一份 element_state 快照（GameHub.element_states() 就是 snapshot 广播用的那份）
-    snap = hub.element_states().get(hub.active.element_id) or {}
-    entry = dict(snap)
-    phase = _game_phase(game_id, snap)
-    if phase is not None:
-        entry["phase"] = phase
-    current[game_id] = entry
+    game = hub.active
+    game_id = game.id
+    snap = hub.element_states().get(game.element_id) or {}
+    current[game_id] = {
+        "phase": _game_phase(game_id, snap),
+        "summary": game.narrative(snap),
+        "element": snap,
+    }
     return current
 
 

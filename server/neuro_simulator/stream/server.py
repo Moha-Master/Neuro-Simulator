@@ -20,7 +20,6 @@
 
 import asyncio
 import json
-import time
 from contextlib import asynccontextmanager
 from typing import Any
 
@@ -45,7 +44,6 @@ from .persona import (
     CHATBOT_PLACEHOLDERS,
     ChatbotPersonaStore,
     build_template_store,
-    stream_info_line,
 )
 from .storage import Storage
 
@@ -149,31 +147,23 @@ def _core_stats(persona) -> dict:
 
 
 async def _template_vars(app: FastAPI, lp: StreamLoop, sample_messages: int) -> dict:
-    """构造一次模板渲染的变量：优先用当前场次真实上下文，无场次时用样例值。"""
+    """构造一次模板渲染的 Jinja context：优先用当前场次真实上下文，无场次时用样例值。"""
     s = stream_settings.load()
-    title, category = lp.session_metadata()
-    tpl_vars = {
-        "scene_context": s.scene_context,
-        "datetime": time.strftime("%a %Y-%m-%d %H:%M:%S"),
-        "stream_info": stream_info_line(title, category),
-        "title": title,
-        "category": category,
-        "scene": lp.last_scene or "room",
-        "round": str((lp.session or {}).get("rounds", 0) + 1),
-        "neuro_status": lp.chatbot.describe_status(),
-    }
+    context = lp.template_context("")
     if lp.session:
         msgs = await app.state.storage.recent_messages(
             lp.session["queue_row"], max(1, min(sample_messages, 20))
         )
         # 与真实循环一致：没有消息时 {{messages}} 就是 placeholder_message
-        tpl_vars["messages"] = (
+        context["messages"] = (
             "\n".join(f"- {m['username']}: {m['content']}" for m in msgs)
             or s.placeholder_message
         )
     else:
-        tpl_vars["messages"] = "- pogger_99: hello neuro\n- kappa_fan: 9+10?"
-    return tpl_vars
+        context["messages"] = (
+            "- pogger_99: hello neuro\n- kappa_fan: 9+10?"
+        )
+    return context
 
 
 def create_app() -> FastAPI:
@@ -194,6 +184,8 @@ def create_app() -> FastAPI:
         scene_catalog.set_store(scene_store)
         bus = EventBroadcaster()
         loop = StreamLoop(storage, bus, persona, templates)
+        # 模板渲染结果变化时 bump chatbot 分区（template_error 在 State 页可见）
+        templates.on_render_result = lambda: loop._touch("chatbot")
         app.state.storage = storage
         app.state.bus = bus
         app.state.loop = loop

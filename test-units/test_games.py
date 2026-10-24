@@ -141,6 +141,16 @@ class TestWordleGame(unittest.TestCase):
         self.assertEqual(game.keyboard, {})
         self.assertFalse(game.done)
 
+    def test_narrative_is_one_line_without_board_details(self):
+        game = game_with_answer("CRANE")
+        self.assertEqual(game.narrative(game.state()), "playing, 0 of 6 guesses used")
+        game.type_letters("SLATE")
+        game.submit()
+        self.assertEqual(game.narrative(game.state()), "playing, 1 of 6 guesses used")
+        game.type_letters("CRANE")
+        game.submit()
+        self.assertIn("won in 2 of 6 guesses", game.narrative(game.state()))
+
     def test_state_snapshot_hides_answer_while_playing(self):
         game = game_with_answer("CRANE")
         game.type_letters("SL")
@@ -332,6 +342,14 @@ class TestChessMirror(unittest.TestCase):
         self.assertFalse(state["in_check"])
         self.assertEqual(state["moves"], ["d2d4"])
         self.assertIn("3P4", state["fen"])
+
+    def test_narrative_has_no_fen_or_legal_moves(self):
+        game = self.make_game("e2e4 e7e5")
+        text = game.narrative(game.state())
+        self.assertEqual(text, "White to move, 2 moves in, not in check")
+        self.assertNotIn("e2e4", text)
+        self.assertNotIn("Nf3", text)
+        self.assertNotIn("/", text, "不能出现 FEN")
 
     def test_legal_moves_are_listed_as_san(self):
         game = self.make_game()

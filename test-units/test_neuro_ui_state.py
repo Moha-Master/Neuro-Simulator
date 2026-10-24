@@ -301,6 +301,40 @@ class TestStatusProjection(unittest.TestCase):
         self.assertEqual(st.turn_projection("stream")["in_flight"], 0)
 
 
+    def test_idle_and_silent_seconds(self):
+        """idle 是无阈值事实；silent_s 从最后一次语音**结束**起算（unix 换算前的秒数）。
+
+        本轮没有 speech 时不存在"上一次结束"的时刻 → silent_s = None（不是 0，
+        也不编造一个时间点）；idle 恒为 True。
+        """
+        st = UiState()
+        with patch(CLOCK, return_value=100.0):
+            tid = st.new_turn("stream")
+            self._speaking(st, tid)  # 5s 语音 → play_head = 105
+        with patch(CLOCK, return_value=101.0):
+            status = st.turn_projection("stream")
+        self.assertFalse(status["idle"])
+        self.assertEqual(status["silent_s"], 0.0, "还在说话时沉默时长是 0")
+        with patch(CLOCK, return_value=106.5):
+            status = st.turn_projection("stream")
+        self.assertTrue(status["idle"])
+        self.assertAlmostEqual(status["silent_s"], 1.5, places=2)
+
+        # 纯工具轮：有 turn、没有 speech → silent_s 为 None
+        with patch(CLOCK, return_value=200.0):
+            tid2 = st.new_turn("stream")
+            st.observe({"type": "content", "step": 0, "delta": "checking"}, "stream", tid2)
+        with patch(CLOCK, return_value=260.0):
+            status = st.turn_projection("stream")
+        self.assertTrue(status["idle"])
+        self.assertIsNone(status["silent_s"])
+
+        # 完全没有轮次
+        status = st.turn_projection("web")
+        self.assertTrue(status["idle"])
+        self.assertIsNone(status["silent_s"])
+
+
 class TestContentPlane(unittest.TestCase):
     """内容平面（`/chat` 批量响应）：整轮全量文本 + 已含 gap 的相对 start。"""
 

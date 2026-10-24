@@ -220,7 +220,6 @@
                             </v-col>
                             <v-col cols="6" sm="2"><v-text-field v-model.number="cfg.stream.chatbot.interval_s" label="Interval (s)" type="number" step="any" variant="outlined" density="compact" /></v-col>
                             <v-col cols="6" sm="2"><v-text-field v-model.number="cfg.stream.chatbot.count" label="每次条数" type="number" variant="outlined" density="compact" /></v-col>
-                            <v-col cols="6" sm="2"><v-text-field v-model.number="cfg.stream.chatbot.neuro_sleep_timeout_s" label="Sleep 判定 (s)" type="number" step="any" variant="outlined" density="compact" /></v-col>
                             <v-col cols="6" sm="2"><v-text-field v-model.number="cfg.stream.chatbot.max_concurrent" label="并发上限" type="number" variant="outlined" density="compact" /></v-col>
                             <v-col cols="6" sm="2"><v-text-field v-model.number="cfg.stream.chatbot.interval_jitter" label="间隔抖动" type="number" step="0.05" variant="outlined" density="compact" /></v-col>
                             <v-col cols="12">
@@ -572,7 +571,6 @@ const normalize = (doc: Record<string, any>) => {
   c.interval_jitter = c.interval_jitter ?? 0.2
   c.interval_s = c.interval_s ?? 10
   c.count = c.count ?? 3
-  c.neuro_sleep_timeout_s = c.neuro_sleep_timeout_s ?? 45
   doc.vedal = doc.vedal || {}
   doc.vedal.host = doc.vedal.host ?? '127.0.0.1'
   doc.vedal.port = doc.vedal.port ?? 8100

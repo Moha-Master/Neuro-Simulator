@@ -102,8 +102,8 @@ class _FakeGame:
     id = "wordle"
     element_id = "game_wordle"
 
-    def state(self):
-        return {
+    def __init__(self) -> None:
+        self.snapshot = {
             "game": "wordle",
             "status": "playing",
             "answer": None,
@@ -111,6 +111,12 @@ class _FakeGame:
             "current_row": 0,
             "guesses_used": 0,
         }
+
+    def state(self):
+        return self.snapshot
+
+    def narrative(self, state):
+        return "playing, 0 of 6 guesses used"
 
 
 class _FakeHub:
@@ -255,17 +261,56 @@ class TestStreamStatus(unittest.IsolatedAsyncioTestCase):
             body = self._status()
         self.assertEqual(body["sections"]["audience"]["current"]["viewers"], 10)
 
-    async def test_games_reuses_element_state_snapshot(self):
-        self.loop.games = _FakeHub()  # type: ignore[assignment]
-        games = self._status()["sections"]["games"]["current"]
+    async def test_games_three_layers_and_reuses_element_snapshot(self):
+        hub = _FakeHub()
+        self.loop.games = hub  # type: ignore[assignment]
+        # 直接调 provider：HTTP 会 JSON 序列化，对象身份（is）只能在这一层断言
+        games = stream_status._games_current(self.loop)
         self.assertEqual(games["active"], "wordle")
         entry = games["wordle"]
         self.assertEqual(entry["phase"], "typing")
-        self.assertEqual(entry["answer"], None, "结束前不得揭晓答案")
-        self.assertEqual(entry["rows"], [["A"]])
+        self.assertEqual(entry["summary"], "playing, 0 of 6 guesses used")
+        # element 必须复用 GameHub.element_states() 的那份对象，不复制
+        self.assertIs(entry["element"], hub.active.snapshot)
+        self.assertEqual(
+            sorted(entry), ["element", "phase", "summary"], "三层结构不能被原始快照字段撑开"
+        )
+        self.assertIsNone(entry["element"]["answer"], "结束前不得揭晓答案")
         graph = self._status()["sections"]["games"]["graph"]
         self.assertIn("wordle.typing", {s["id"] for s in graph["states"]})
         self.assertIn("chess.white_to_move", {s["id"] for s in graph["states"]})
+
+    async def test_scene_projection_carries_prompt_context(self):
+        self.loop.last_scene = "play_wordle"
+        scene = self._status()["sections"]["scene"]["current"]
+        self.assertIn("prompt_context", scene)
+        self.assertTrue(scene["prompt_context"], "Wordle 场景应带规则指令")
+
+    async def test_chatbot_partition_reports_template_error(self):
+        await self.templates.save("neuro_user", "{{ 'unterminated")
+        self.templates.render("neuro_user", {"messages": "hi"})
+        cur = self._status()["sections"]["chatbot"]["current"]
+        self.assertEqual(cur["template_error"]["name"], "neuro_user")
+        self.assertTrue(cur["template_error"]["message"])
+        await self.templates.reset("neuro_user")
+        self.templates.render("neuro_user", {"messages": "hi"})
+        self.assertIsNone(self._status()["sections"]["chatbot"]["current"]["template_error"])
+
+    async def test_template_context_is_plain_data_only(self):
+        ctx = self.loop.template_context("- a: hi")
+        self.assertEqual(set(ctx), {"stream_status", "neuro_status", "neuro_said", "messages", "datetime"})
+
+        def plain(value):
+            if value is None or isinstance(value, (bool, int, float, str)):
+                return True
+            if isinstance(value, dict):
+                return all(isinstance(k, str) and plain(v) for k, v in value.items())
+            if isinstance(value, (list, tuple)):
+                return all(plain(v) for v in value)
+            return False
+
+        self.assertTrue(plain(ctx), "模板 context 里混进了业务对象")
+        self.assertIn("metadata", ctx["stream_status"])
 
     async def test_rev_bumps_on_note_change(self):
         before = self._status()["rev"]

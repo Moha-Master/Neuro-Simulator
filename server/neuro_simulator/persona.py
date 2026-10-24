@@ -10,15 +10,20 @@ neuro_sama 用它承载 Neuro 的人设，stream 用它承载 chatbot 的观众�
 - get_meta(key) / set_meta(key, value)
 
 渲染规则：
-- sections 是 {占位符名: 段落文本}，core memory 始终作为 'core_memory' 段最先注入
-- 模板里出现 `{{name}}` 就原位替换；缺失则把该段追加到末尾（防止人工误删导致整段丢失）
+- sections 是 {占位符名: 段落文本}，core memory 作为 'core_memory' 段参与替换
+- **prompt 就是作者写的文本**：模板里出现 `{{name}}` 才原位替换，缺失不再自动
+  追加到末尾（编辑自由由作者负责；preview 的 `missing_placeholders` 只是提示）
 - 段落为空时替换成 `## <Name>\n(none yet)`，让模型明确知道"现在没有内容"
+- 渲染异常时退回进程内上一版成功文本（直播路径不能因为提示词坏了而 500）
 """
 
 import asyncio
+import logging
 import sqlite3
 from dataclasses import dataclass
 from typing import Callable, Optional
+
+logger = logging.getLogger(__name__)
 
 CORE_SECTION_KEY = "core_memory"
 CORE_PLACEHOLDER = "{{core_memory}}"
@@ -83,6 +88,8 @@ class PersonaStore:
         self._blocks: list[CoreMemoryBlock] = []
         self._loaded = False
         self._lock = asyncio.Lock()
+        # 进程内最近一次成功编译的 system prompt（渲染异常时退回它）
+        self._last_render: str = ""
 
     # ---------- 加载 / 播种 ----------
 
@@ -328,17 +335,25 @@ class PersonaStore:
         sections.update(extra_sections or {})
         out = prompt
         for key, text in sections.items():
-            body = text.strip() or _empty_section(key)
             token = placeholder_of(key)
             if token in out:
-                out = out.replace(token, body)
-            else:
-                out = out.rstrip() + "\n\n" + body
+                out = out.replace(token, text.strip() or _empty_section(key))
+        # 不再自动追加缺失的段落：prompt 是作者写的文本，替他加东西会掩盖误删
         return out.strip()
 
     def render(self, extra_sections: Optional[dict] = None) -> str:
-        """用已保存的模板 + core/额外段落拼出完整 prompt。"""
-        return self._assemble(self._prompt, extra_sections)
+        """用已保存的模板 + core/额外段落拼出完整 prompt。
+
+        渲染异常（理论上只会来自极端输入）退回上一版成功文本；从未成功过就退回
+        模板原文——直播循环不能因为提示词坏了而中断。
+        """
+        try:
+            out = self._assemble(self._prompt, extra_sections)
+        except Exception as e:  # pragma: no cover - 防御性兜底
+            logger.warning("persona prompt 渲染失败，使用上一版: %s: %s", type(e).__name__, e)
+            return self._last_render or self._prompt
+        self._last_render = out
+        return out
 
     def preview(
         self,
@@ -359,6 +374,7 @@ class PersonaStore:
                 "sections": {k: len(v) for k, v in bodies.items() if k != CORE_SECTION_KEY},
                 "total": len(rendered),
             },
+            # 非阻塞提示：缺失占位符不会再被自动追加，也不会拦保存
             "missing_placeholders": [
                 k for k in sections if placeholder_of(k) not in prompt
             ],

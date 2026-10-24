@@ -40,16 +40,14 @@ import uuid
 from datetime import datetime
 from typing import Any, Awaitable, Callable, Optional, Union
 
-from .. import scene_kit
+from .. import scene_kit, state_kit
 from ..broadcaster import EventBroadcaster
 from ..scene_kit import SceneRunner
-from . import scenes as scene_catalog
 from . import settings as stream_settings
 from .scenes import StreamScenePolicy
 from .chatbot import ChatbotManager
 from .games import GameHub
 from .neuro_client import NeuroClient, NeuroError
-from .persona import stream_info_line
 from .storage import Storage
 
 logger = logging.getLogger(__name__)
@@ -87,6 +85,9 @@ INTRO_FALLBACK_S = 3.0
 # 超时按失败轮处理（退避 3s 继续），不终结场次。
 ROUND_DEADLINE_S = 300.0
 SPEECH_POLL_INTERVAL_S = 0.2
+# 消息模板直接用最近一次 /status 的投影；超过这个秒数才重新拉。取数发生在轮次
+# 逻辑里（provider 绝不能发 HTTP），供同轮模板与 chatbot 共用。
+NEURO_STATUS_STALE_S = 5.0
 
 # 开场期间合成器落在 room_intro（neuro 全屏、不显示 chat/highlight）；
 # 她离开开场场景后切到 room，并同时推进 live。
@@ -178,6 +179,11 @@ class StreamLoop:
             "url": "",
             "error": None,
         }
+        # 最近一次 GET neuro /status 的原始信封与剥好的投影；模板与 chatbot 共用。
+        # 取数只能发生在轮次逻辑里，provider 只读这份缓存（state_kit 纪律）。
+        self._neuro_status_envelope: Optional[dict] = None
+        self._neuro_status_plain: dict = {}
+        self._neuro_status_at: float = 0.0
         # 启动时由 server 绑定：状态变化时 bump rev（未绑定时 no-op，便于单测）
         self.state_board: Optional[Any] = None
 
@@ -196,6 +202,54 @@ class StreamLoop:
             "error": error,
         }
         self._touch("neuro_link")
+
+    async def _fetch_neuro_status(
+        self, client: NeuroClient, channel: str, *, force: bool = False
+    ) -> Optional[dict]:
+        """取 neuro `/status`（带缓存）：force=False 时 5s 内直接复用。
+
+        失败时：force=True（语音时间轴必须读新的）返回 None；否则返回上一次的
+        信封（模板宁可看旧状态，也不要因为一次抖动退化成空）。
+        """
+        if (
+            not force
+            and self._neuro_status_envelope is not None
+            and time.monotonic() - self._neuro_status_at < NEURO_STATUS_STALE_S
+        ):
+            return self._neuro_status_envelope
+        try:
+            st = await client.status(channel)
+        except Exception as e:  # 网络/解析/客户端都降级，不能拖垮整轮
+            self.note_neuro_link(
+                getattr(client, "base_url", ""), False, f"{type(e).__name__}: {e}"
+            )
+            logger.warning("neuro /status 读取失败: %s", e)
+            return None if force else self._neuro_status_envelope
+        self.note_neuro_link(getattr(client, "base_url", ""), True)
+        self._neuro_status_envelope = st
+        self._neuro_status_plain = state_kit.current_sections(st)
+        self._neuro_status_at = time.monotonic()
+        return st
+
+    def stream_status_dict(self) -> dict:
+        """stream 自己的投影，剥成 `{分区: current}`（模板 context 的 stream_status）。"""
+        board = self.state_board
+        return state_kit.current_sections(board.read()) if board is not None else {}
+
+    def template_context(self, messages: str) -> dict:
+        """消息模板的完整 Jinja context：只放纯 dict/list/标量。
+
+        `neuro_said`/`neuro_status` 由 chatbot 持有（本轮正文 + 最近一次投影），
+        `stream_status` 是 stream 自己的状态机现读，`messages` 由调用方给。
+        """
+        return {
+            "stream_status": self.stream_status_dict(),
+            # 优先用 loop 刚拉到的投影（chatbot 缓存是上一轮结束时的同一份）
+            "neuro_status": self._neuro_status_plain or self.chatbot.neuro_status,
+            "neuro_said": self.chatbot.neuro_said,
+            "messages": messages,
+            "datetime": _now_human(),
+        }
 
     # ---------- 供 snapshot 的中途连接状态 ----------
 
@@ -385,6 +439,7 @@ class StreamLoop:
             self.on_new_message,
             self._announce_chatbot_message,
             metadata_provider=self.session_metadata,
+            context_provider=self.template_context,
         )
 
         self._task = asyncio.create_task(self._main(), name="stream-loop")
@@ -863,14 +918,13 @@ class StreamLoop:
         记录，晚读会拿到下一轮的时间轴。`turn_id` 不匹配时不猜，按无语音处理。
         """
         try:
-            st = await client.status(channel)
-            self.note_neuro_link(getattr(client, "base_url", ""), True)
-        except NeuroError as e:
+            st = await self._fetch_neuro_status(client, channel, force=True)
+        except Exception as e:  # 兜底：取数失败也不能把整轮打成异常
+            logger.warning("neuro /status 读取异常，本轮按无语音处理: %s", e)
+            return None
+        if st is None:
             # 生成已经成功，状态读不到只意味着本轮无法等语音：退回 cooldown
-            self.note_neuro_link(
-                getattr(client, "base_url", ""), False, f"{type(e).__name__}: {e}"
-            )
-            logger.warning("neuro /status 读取失败，本轮按无语音处理: %s", e)
+            logger.warning("neuro /status 读取失败，本轮按无语音处理")
             return None
         speech = _neuro_turn(st)
         if not speech:
@@ -902,20 +956,9 @@ class StreamLoop:
             return "wait"
 
         last_id = None
-        title, category = self.session_metadata()
-        # 消息模板（可在 dashboard 编辑）的公共变量；{{round}} 用"本轮序号"
-        tpl_vars = {
-            # 场景自带 prompt_context 就用它（如 play_wordle 会说明"正在玩 Wordle"），
-            # 否则回落到 config 的全局 scene_context。棋盘/比分这类细节不走这里——
-            # 它们只从工具返回里给（将来由通用 stream_status 变量统一承载）。
-            "scene_context": scene_catalog.prompt_context(self.last_scene) or s.scene_context,
-            "datetime": _now_human(),
-            "stream_info": stream_info_line(title, category),
-            "title": title,
-            "category": category,
-            "scene": self.last_scene or "",
-            "round": str(session.get("rounds", 0) + 1),
-        }
+        client = NeuroClient(s.neuro_url)
+        # 同轮模板用最近一次 neuro 投影；缓存超过 5s 才补拉一次（provider 不发 HTTP）
+        await self._fetch_neuro_status(client, session["channel"])
         if picked["kind"] == "placeholder":
             # 空队列：{{messages}} 换成占位指令（不推进 cursor）。
             # 不再单独维护"空队列模板"——少一条模板、少一个变量，行为也更直观。
@@ -929,11 +972,10 @@ class StreamLoop:
                 session["priority_cursor"] = last_id
             else:
                 session["cursor"] = last_id
-        text = self.templates.render("neuro_user", {**tpl_vars, "messages": messages_block})
+        text = self.templates.render("neuro_user", self.template_context(messages_block))
         round_failed = False
         turn_text = ""
         ends_at: Optional[float] = None
-        client = NeuroClient(s.neuro_url)
         try:
             r = await asyncio.wait_for(
                 client.chat_batch(text, session["channel"], session["conversation_id"], audio=False),
@@ -955,6 +997,10 @@ class StreamLoop:
         except NeuroError as e:
             logger.error("neuro 轮次失败: %s", e)
             round_failed = True
+
+        # 本轮正文（内容平面）+ 最近一次状态投影（`_speech_ends_at` 刚刷新过）
+        # 一起交给 chatbot 缓存，下一轮模板 / chatbot 都从这里读。
+        self.chatbot.note_neuro_turn(turn_text, self._neuro_status_plain)
 
         if last_id is not None:
             logger.info(
@@ -995,10 +1041,6 @@ class StreamLoop:
                 logger.error("neuro ends_at 距离现在 %.0fs（> deadline），按失败处理", delay)
                 round_failed = True
                 delay = 0.0
-            if turn_text:
-                # 睡眠判定从**预测播完**起算：可能已经是过去（长工具轮里语音早播完），
-                # 这时不能把计时重置到现在，否则 chatbot 会误以为她刚说完。
-                self.chatbot.note_neuro_speech(turn_text, time.monotonic() + delay)
             await self._sleep_ms(max(0.0, delay) * 1000)
         await self._sleep_ms(s.speech_cooldown_ms)
         if round_failed:

@@ -49,6 +49,14 @@ class Game(ABC):
     def state(self) -> Dict[str, Any]:
         """全量状态快照（广播给画面）。"""
 
+    def narrative(self, state: Dict[str, Any]) -> str:
+        """一句叙事级自述（英文、不含棋盘字母/FEN/合法着法）。
+
+        状态投影 `games.<id>.summary` 用它。默认返回游戏自报的 status（多数游戏
+        就是 phase 的同义词）；需要更具体措辞的游戏自行覆盖。
+        """
+        return str(state.get("status") or "")
+
     def exit(self) -> Union[str, Awaitable[str]]:
         return f"Left the {self.label} game."
 
