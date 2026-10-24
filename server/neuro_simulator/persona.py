@@ -23,6 +23,8 @@ import sqlite3
 from dataclasses import dataclass
 from typing import Callable, Optional
 
+from .placeholder_kit import missing_placeholders, substitute
+
 logger = logging.getLogger(__name__)
 
 CORE_SECTION_KEY = "core_memory"
@@ -56,6 +58,7 @@ class PersonaError(Exception):
 
 
 def placeholder_of(section: str) -> str:
+    """给说明文字用的规范写法；**匹配请用 `placeholder_kit`**（容忍空白）。"""
     return "{{" + section + "}}"
 
 
@@ -335,9 +338,10 @@ class PersonaStore:
         sections.update(extra_sections or {})
         out = prompt
         for key, text in sections.items():
-            token = placeholder_of(key)
-            if token in out:
-                out = out.replace(token, text.strip() or _empty_section(key))
+            # 走 placeholder_kit：作者写 `{{ core_memory }}`（带空格）与
+            # `{{core_memory}}` 是同一个占位符。曾经的裸字符串比对让带空格的
+            # 写法静默不替换——core memory 直接从 system prompt 里消失。
+            out = substitute(out, key, text.strip() or _empty_section(key))
         # 不再自动追加缺失的段落：prompt 是作者写的文本，替他加东西会掩盖误删
         return out.strip()
 
@@ -375,9 +379,7 @@ class PersonaStore:
                 "total": len(rendered),
             },
             # 非阻塞提示：缺失占位符不会再被自动追加，也不会拦保存
-            "missing_placeholders": [
-                k for k in sections if placeholder_of(k) not in prompt
-            ],
+            "missing_placeholders": missing_placeholders(prompt, sections),
             "estimated_tokens": (len(rendered) + 3) // 4,
         }
 

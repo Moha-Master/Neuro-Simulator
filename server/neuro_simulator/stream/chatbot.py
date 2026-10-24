@@ -170,7 +170,7 @@ class ChatbotManager:
             "stream_status": {"metadata": {"title": title, "category": category}},
             "neuro_status": self._neuro_status,
             "neuro_said": self._neuro_said,
-            "messages": messages_block,
+            "chat_messages": messages_block,
             "datetime": time.strftime("%Y-%m-%d %H:%M:%S (%A)"),
         }
 
@@ -240,9 +240,9 @@ class ChatbotManager:
     # ---------- 单轮生成 ----------
 
     async def _generate_once(self, cb: settings.ChatbotSettings) -> None:
-        # chatbot 现在能看到"观众最近在聊什么"（含它自己刚发的行）：
-        # 真实弹幕会互相接话/复读，看不到历史只能凭空生成。去重仍由人设 prompt
-        # 明确要求"不复述上一批"，模板负责把来源标成 real viewer messages。
+        # `chat_messages` 照常放进 context（作者想在模板里引用随时可以），但
+        # **默认模板不引用它**：给小模型看最近弹幕、再配一句 "do not copy or
+        # repeat"，实测反而更促复述。见 AGENTS 的模板作者政策。
         queue_row = self._queue_row
         recent = (
             await self.storage.recent_messages(queue_row, _RECENT_CHAT)

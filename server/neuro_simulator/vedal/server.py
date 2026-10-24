@@ -2,7 +2,7 @@
 
 与 dashboard 的通信协议（同域 HTTP，dashboard 由本模块静态托管）：
 - GET  /health                    健康检查（dashboard 只检查 vedal；vedal 顺带探测各模块）
-- GET  /state                     各模块状态机投影的全景聚合（并发扇出，原样透传）
+- GET  /manage/state              各模块状态机投影的全景聚合（并发扇出，原样透传）
 - GET  /manage/config             取 config.json 结构化内容 + 服务反查表
 - PUT  /manage/config             提交结构化 config -> 悬空引用清理 -> 校验 -> 写盘 -> 按变动 schema 热重载
 - POST /manage/config/reload-all  向所有模块和 vedal 自身执行 reload
@@ -240,7 +240,7 @@ async def _fetch_module_state(
 
     规则：只加观测字段（url/reachable/observed_at/elapsed_ms/error），不改名、
     不摊平、不合并模块返回的任何内容；任何失败都必须降级成本模块
-    `reachable=false + error`，绝不让整次 `/state` 变成 500。
+    `reachable=false + error`，绝不让整次 `/manage/state` 变成 500。
     """
     url = module_url(name)
     observed_at = _local_iso()
@@ -348,9 +348,11 @@ def create_app() -> FastAPI:
             modules[name] = {"url": url, "reachable": await _is_reachable(url)}
         return {"status": "ok", "module": "vedal", "modules": modules}
 
-    # ---------- /state：各模块状态机投影的全景聚合 ----------
+    # ---------- /manage/state：各模块状态机投影的全景聚合 ----------
+    # 必须注册在通用代理 /manage/{module}/{path} 之前；根路径 `/state` 属于 dashboard
+    # 的 State 页（spa 回退），API 挤在根上会把那个页面遮蔽掉（2026-10-24 实机踩过）。
 
-    @app.get("/state")
+    @app.get("/manage/state")
     async def state(
         want: Optional[str] = None,
         drop: Optional[str] = None,

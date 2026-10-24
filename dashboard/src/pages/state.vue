@@ -100,7 +100,7 @@
               </v-alert>
             </template>
             <v-alert v-else type="warning" variant="tonal" density="compact">
-              neuro_sama 不在 /state 聚合结果里（config 未配置该模块？）
+              neuro_sama 不在 /manage/state 聚合结果里（config 未配置该模块？）
             </v-alert>
           </v-card-text>
         </v-card>
@@ -155,7 +155,7 @@
               </v-alert>
             </template>
             <v-alert v-else type="warning" variant="tonal" density="compact">
-              stream 不在 /state 聚合结果里（config 未配置该模块？）
+              stream 不在 /manage/state 聚合结果里（config 未配置该模块？）
             </v-alert>
           </v-card-text>
         </v-card>

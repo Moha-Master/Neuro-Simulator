@@ -154,7 +154,7 @@ class TestPriorityQueue(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(picked["body"], "placeholder")
 
     async def test_empty_queue_renders_placeholder_as_messages_block(self):
-        """空队列不再走独立模板：{{messages}} 直接换成 placeholder_message。"""
+        """空队列不再走独立模板：{{chat_messages}} 直接换成 placeholder_message。"""
         self.settings.empty_queue_behavior = "placeholder"
         self.settings.placeholder_message = "Nobody is talking. Start a topic yourself."
         self.session["rounds"] = 0

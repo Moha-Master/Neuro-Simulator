@@ -110,25 +110,10 @@
             v-if="previewData.gate"
             size="small"
             variant="tonal"
-            :color="previewData.gate.g1_ok ? 'success' : 'error'"
+            :color="gateOk ? 'success' : 'error'"
+            :title="gateDetail"
           >
-            G1 编译 {{ previewData.gate.g1_ok ? '通过' : '拒绝' }}
-          </v-chip>
-          <v-chip
-            v-if="previewData.gate"
-            size="small"
-            variant="tonal"
-            :color="previewData.gate.g2_ok ? 'success' : 'error'"
-          >
-            G2 最严苛 {{ previewData.gate.g2_ok ? '通过' : '拒绝' }}
-          </v-chip>
-          <v-chip
-            v-if="previewData.gate"
-            size="small"
-            variant="tonal"
-            :color="previewData.gate.skeleton_rendered ? 'success' : 'error'"
-          >
-            骨架 {{ previewData.gate.skeleton_rendered ? '已渲染' : '未通过' }}
+            {{ gateOk ? '校验通过' : '校验不通过' }}
           </v-chip>
           <v-chip
             v-for="[key, len] in Object.entries(previewData.expanded || {})"
@@ -204,6 +189,7 @@
 
 <script lang="ts" setup>
 import { computed, nextTick, ref, watch } from 'vue'
+import { missingPlaceholders } from '@/utils/placeholders'
 import type { PlaceholderInfo, PreviewResult, SaveResult } from '@/types/persona'
 import StatusPathPicker from '@/components/persona/StatusPathPicker.vue'
 
@@ -257,15 +243,27 @@ const previewing = ref(false)
 const previewDialog = ref(false)
 const previewData = ref<PreviewResult | null>(null)
 const savedWarnings = ref<string[]>([])
+
+/** 校验结果只看总态：三道关卡的通过/拒绝是后端细节，UI 只报"过 / 不过"，
+ *  具体原因在下面的 `gate_errors` 警报里给原文（含 Jinja 行号）。 */
+const gateOk = computed(() => {
+  const gate = previewData.value?.gate
+  if (!gate) return true
+  return Object.values(gate).every(Boolean)
+})
+const gateDetail = computed(() => {
+  const errors = previewData.value?.gate_errors
+  if (errors && Object.keys(errors).length) return Object.values(errors).join('\n')
+  return gateOk.value ? '语法、沙箱与最严苛骨架都通过' : '见下方拒绝原因'
+})
 const saveError = ref('')
 const snackbar = ref(false)
 const snackbarText = ref('')
 
 const dirty = computed(() => draft.value !== props.content)
-// 草稿里缺占位符只做提示（服务端也不再拒绝保存）；前端不拦保存
-const missing = computed(() =>
-  (props.required || []).filter((key) => !draft.value.includes(`{{${key}}}`)),
-)
+// 草稿里缺占位符只做提示（服务端也不再拒绝保存）；前端不拦保存。
+// 匹配规则在 utils/placeholders.ts，与后端 `_has_placeholder` 共用同一条语义。
+const missing = computed(() => missingPlaceholders(draft.value, props.required || []))
 
 /** 在 textarea 光标处插入（选择器的主操作；剪贴板只是次级操作）。 */
 function insertAtCursor(text: string) {

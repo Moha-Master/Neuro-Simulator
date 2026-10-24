@@ -3,9 +3,9 @@ import { api } from '@/stores/connection'
 import type { VedalState } from '@/types/status'
 
 /**
- * vedal `GET /state` 的共享轮询（模块级单例）。
+ * vedal `GET /manage/state` 的共享轮询（模块级单例）。
  *
- * - **一次请求供多页共享**：Home 与 /state 页读同一份 `state`，不各自发 HTTP；
+ * - **一次请求供多页共享**：Home 与 State 页读同一份 `state`，不各自发 HTTP；
  * - 5s 节拍与 `useModuleStatus` 一致；`document.hidden` 时停表，回前台立刻刷一次；
  * - `changed(module)` 用 rev 前后值判断"这帧比上一帧新"（粗粒度，够 UI 闪一下）；
  * - 只缓存最近一次聚合结果，不写业务状态（聚合层不缓存是后端纪律，前端也不攒第二份）。
@@ -55,7 +55,9 @@ function refresh(): Promise<void> {
   inflight = (async () => {
     loading.value = true
     try {
-      const data = await api<VedalState>('/state')
+      // 注意是 /manage/state：根路径 `/state` 归 dashboard 的 State 页
+      //（API 曾挤在根上，把那个页面遮蔽成 JSON，刷新就"变成一串 JSON"）。
+      const data = await api<VedalState>('/manage/state')
       const changed: Record<string, boolean> = {}
       for (const [name, mod] of Object.entries(data.modules)) {
         const rev = mod.status?.rev
@@ -116,7 +118,7 @@ export function useModuleState() {
     stop,
     /** 该模块这一帧的 rev 是否比上一帧新 */
     changed: (module: string) => changedModules.value[module] === true,
-    /** 与 /state 的 reachable 保持一致（不额外开定时器） */
+    /** 与聚合读结果的 reachable 保持一致（不额外开定时器） */
     reachable: (module: string) => modules.value[module]?.reachable === true,
   }
 }

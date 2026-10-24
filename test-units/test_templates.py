@@ -60,7 +60,7 @@ def _context() -> dict:
         },
         "neuro_status": {"turn": {"silent_s": 90, "idle": True}},
         "neuro_said": "I think the word is crane.",
-        "messages": "- alice: hello\n- bob: LUL",
+        "chat_messages": "- alice: hello\n- bob: LUL",
         "datetime": "2026-01-01 12:00:00",
     }
 
@@ -75,7 +75,7 @@ def _plain(value) -> bool:
     return False
 
 
-def _new_store(default: str = "default {{ messages }}") -> TemplateStore:
+def _new_store(default: str = "default {{ chat_messages }}") -> TemplateStore:
     return TemplateStore(
         _Storage(),
         [TemplateSpec(name="neuro_user", label="neuro", description="", default=default)],
@@ -92,7 +92,7 @@ class TestGates(unittest.IsolatedAsyncioTestCase):
                     name="neuro_user",
                     label="neuro",
                     description="",
-                    default="default {{ messages }}",
+                    default="default {{ chat_messages }}",
                 )
             ],
         )
@@ -108,6 +108,9 @@ class TestGates(unittest.IsolatedAsyncioTestCase):
         for needle in needles:
             self.assertIn(needle, ctx.exception.message)
 
+    async def _assert_accepted(self, text: str) -> dict:
+        return await self._save(text)
+
     async def test_g1_syntax_error_is_400_with_line_number(self):
         await self._assert_rejected("line one\n{{ broken", "模板语法错误", "第 2 行")
 
@@ -119,6 +122,16 @@ class TestGates(unittest.IsolatedAsyncioTestCase):
         await self._assert_rejected(
             "{{ stream_status.metadata.titel }}", "stream_status.metadata.titel", "不存在"
         )
+
+    async def test_g2_old_messages_name_is_400(self):
+        """`messages` 已改名 `chat_messages`，旧名必须被拒而不是静默变空。
+
+        改名最大的风险是"库里的旧模板还写着旧名"：未知变量在实况下渲染成空串，
+        Neuro 会安静地收不到任何弹幕。G2 用 StrictUndefined 风格的骨架，未知根变量
+        当场拒绝，把这种漂移暴露到保存/preview 而不是直播现场。
+        """
+        await self._assert_rejected("{{ messages }}", "未知变量")
+        await self._assert_accepted("{{ chat_messages }}")
 
     async def test_g2_unguarded_comparison_is_400(self):
         await self._assert_rejected(
@@ -175,7 +188,7 @@ class TestJinjaRendering(unittest.IsolatedAsyncioTestCase):
                     name="neuro_user",
                     label="neuro",
                     description="",
-                    default="default {{ messages }}",
+                    default="default {{ chat_messages }}",
                 )
             ],
         )
@@ -193,7 +206,7 @@ class TestJinjaRendering(unittest.IsolatedAsyncioTestCase):
             "{% if neuro_status.turn.silent_s|int(0) > 45 %}"
             "Neuro has gone quiet.{% endif %}\n"
             "{% if neuro_said %}Neuro said: {{ neuro_said }}{% endif %}\n"
-            "{{ messages }}"
+            "{{ chat_messages }}"
         )
         out = self.store.render("neuro_user", _context())
         self.assertIn("Testing [Just Chatting]", out)
@@ -205,7 +218,7 @@ class TestJinjaRendering(unittest.IsolatedAsyncioTestCase):
 
     async def test_sandbox_blocks_attribute_escape(self):
         # 保存路径已经拒绝；这里验证 preview 的 G1/G2 报告不会泄露对象
-        preview = self.store.preview("neuro_user", {"messages": "hi"}, "{{ ''.__class__ }}")
+        preview = self.store.preview("neuro_user", {"chat_messages": "hi"}, "{{ ''.__class__ }}")
         self.assertTrue(preview["gate"]["g1_ok"])
         self.assertFalse(preview["gate"]["g2_ok"])
         self.assertIn("SecurityError", preview["gate_errors"]["g2"])
@@ -222,16 +235,16 @@ class TestJinjaRendering(unittest.IsolatedAsyncioTestCase):
         await self.storage.upsert_prompt("BROKEN {{ messages ", "neuro_user")
         await self.store.load()
         self.assertEqual(
-            self.store.render("neuro_user", {"messages": "- a: hi"}),
+            self.store.render("neuro_user", {"chat_messages": "- a: hi"}),
             "Recent viewer messages:\n- a: hi",
         )
         self.assertIsNotNone(self.store.template_error)
         self.assertEqual(self.store.template_error["name"], "neuro_user")
 
-        await self.storage.upsert_prompt("FIXED: {{ messages }}", "neuro_user")
+        await self.storage.upsert_prompt("FIXED: {{ chat_messages }}", "neuro_user")
         await self.store.load()
         self.assertEqual(
-            self.store.render("neuro_user", {"messages": "three"}), "FIXED: three"
+            self.store.render("neuro_user", {"chat_messages": "three"}), "FIXED: three"
         )
         self.assertIsNone(self.store.template_error)
 
@@ -250,7 +263,7 @@ class TestJinjaRendering(unittest.IsolatedAsyncioTestCase):
     async def test_preview_reports_gate_warnings_and_expanded(self):
         await self._save(
             "{{ stream_status.scene.desc }} "
-            "{{ stream_status.games[stream_status.games.active].summary }} {{ messages }}"
+            "{{ stream_status.games[stream_status.games.active].summary }} {{ chat_messages }}"
         )
         preview = self.store.preview("neuro_user", _context())
         self.assertTrue(preview["rendered"])
@@ -260,7 +273,7 @@ class TestJinjaRendering(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(preview["gate"]["skeleton_rendered"])
         self.assertEqual(len(preview["warnings"]), 1)
         self.assertIn("cannot statically verify", preview["warnings"][0])
-        self.assertEqual(preview["expanded"]["messages"], len(_context()["messages"]))
+        self.assertEqual(preview["expanded"]["chat_messages"], len(_context()["chat_messages"]))
         self.assertIn("A cozy room", preview["prompt"])
 
     async def test_preview_bad_draft_is_non_blocking(self):
@@ -290,14 +303,15 @@ class TestDefaultTemplates(unittest.IsolatedAsyncioTestCase):
 
         chatbot = self.store.content("chatbot_user")
         self.assertIn("neuro_status.turn.silent_s|int(0) > 45", chatbot)
-        self.assertIn("Recent messages in chat", chatbot)
+        # chatbot 不看观众消息：模板里既没有消息块，也没有"别复述"的反向暗示
+        self.assertNotIn("chat_messages", chatbot)
+        self.assertNotIn("Recent messages", chatbot)
         self.assertNotIn("real viewers", chatbot)
 
     def test_defaults_render_with_real_shape(self):
         out = self.store.render("chatbot_user", _context())
         self.assertIn("Neuro seems fall asleep on stream...", out)
-        self.assertIn("Recent messages in chat", out)
-        self.assertIn("- alice: hello", out)
+        self.assertNotIn("- alice: hello", out)  # 观众消息不进 chatbot 的输入
 
         out = self.store.render("neuro_user", _context())
         self.assertIn("Now streaming: Testing [Just Chatting]", out)
@@ -464,14 +478,39 @@ class TestStreamTemplateSpecs(unittest.IsolatedAsyncioTestCase):
         await store.load()
         neuro = store.content("neuro_user")
         chatbot = store.content("chatbot_user")
-        self.assertIn("{{ messages }}", neuro)
+        self.assertIn("{{ chat_messages }}", neuro)
         self.assertIn("stream_status.scene.prompt_context", neuro)
-        self.assertIn("{{ messages }}", chatbot)
         self.assertIn("neuro_said", chatbot)
         self.assertIn("neuro_status.turn.silent_s", chatbot)
         for gone in ("stream_info", "{{title}}", "{{category}}", "{{scene}}", "{{round}}"):
             self.assertNotIn(gone, neuro)
             self.assertNotIn(gone, chatbot)
+
+    async def test_missing_placeholders_tolerates_whitespace(self) -> None:
+        """`{{ chat_messages }}` 与 `{{chat_messages}}` 是同一个变量。
+
+        曾经的裸字符串比对让**默认模板自己**在编辑器顶上亮一条
+        "缺少占位符"——假的警告会把人推向"去改一个本来没坏的模板"。
+        """
+        store = build_template_store(_Storage())
+        await store.load()
+        for form in ("{{chat_messages}}", "{{ chat_messages }}", "{{  chat_messages  }}",
+                     "{{\n  chat_messages \n}}", "{{- chat_messages -}}"):
+            with self.subTest(form=repr(form)):
+                info = store.preview("neuro_user", content=f"{form}\n{{ datetime }}")
+                self.assertEqual(info["missing_placeholders"], [], form)
+
+        info = store.preview("neuro_user", content="只有 datetime：{{ datetime }}")
+        self.assertEqual(info["missing_placeholders"], ["chat_messages"])
+
+    async def test_default_templates_report_no_missing_placeholder(self) -> None:
+        """播种出来的两份默认模板必须自检干净（回归 2026-10-24 实机看到的假警告）。"""
+        store = build_template_store(_Storage())
+        await store.load()
+        for name in ("neuro_user", "chatbot_user"):
+            with self.subTest(name=name):
+                info = store.preview(name, content=store.content(name))
+                self.assertEqual(info["missing_placeholders"], [])
 
 
 if __name__ == "__main__":

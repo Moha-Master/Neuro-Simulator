@@ -14,7 +14,7 @@ export interface StreamSession {
 /**
  * stream 模块的非状态类型。
  *
- * 状态机投影（`/stream/status` 与 vedal `/state`）的类型统一在
+ * 状态机投影（`/stream/status` 与 vedal `/manage/state`）的类型统一在
  * `@/types/status.ts`——那边是契约守卫，别在这里再抄一份。
  */
 

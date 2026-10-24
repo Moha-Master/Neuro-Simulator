@@ -1,4 +1,4 @@
-"""vedal `GET /state`：全景扇出聚合的纪律测试。
+"""vedal `GET /manage/state`：全景扇出聚合的纪律测试。
 
 这里用假的 httpx.AsyncClient 替代真实模块，重点钉住四件事：
 
@@ -187,7 +187,7 @@ class VedalStateTest(unittest.TestCase):
     def test_status_is_passed_through_verbatim(self) -> None:
         self._ok_both()
         with self._client() as client:
-            resp = client.get("/state")
+            resp = client.get("/manage/state")
         self.assertEqual(resp.status_code, 200)
         body = resp.json()
 
@@ -234,7 +234,7 @@ class VedalStateTest(unittest.TestCase):
                     f"{URLS['stream']}/stream/status": {"payload": STREAM_STATUS},
                 }
                 with self._client() as client:
-                    resp = client.get("/state")
+                    resp = client.get("/manage/state")
 
                 self.assertEqual(resp.status_code, 200, "任何模块失败都不能让 /state 变 500")
                 body = resp.json()
@@ -254,7 +254,7 @@ class VedalStateTest(unittest.TestCase):
         self.names = ["orphan"]
         with patch.object(vedal_server, "module_url", return_value=None):
             with self._client() as client:
-                resp = client.get("/state")
+                resp = client.get("/manage/state")
         self.assertEqual(resp.status_code, 200)
         entry = resp.json()["modules"]["orphan"]
         self.assertFalse(entry["reachable"])
@@ -265,7 +265,7 @@ class VedalStateTest(unittest.TestCase):
     def test_want_drop_are_forwarded_to_every_module(self) -> None:
         self._ok_both()
         with self._client() as client:
-            client.get("/state", params={"want": "scene,loop", "drop": "layers"})
+            client.get("/manage/state", params={"want": "scene,loop", "drop": "layers"})
 
         sent = dict(_FakeAsyncClient.calls)
         self.assertEqual(
@@ -280,7 +280,7 @@ class VedalStateTest(unittest.TestCase):
     def test_modules_filter_limits_fanout(self) -> None:
         self._ok_both()
         with self._client() as client:
-            body = client.get("/state", params={"modules": "stream"}).json()
+            body = client.get("/manage/state", params={"modules": "stream"}).json()
 
         self.assertEqual(list(body["modules"]), ["stream"])
         self.assertEqual([url for url, _ in _FakeAsyncClient.calls], [f"{URLS['stream']}/stream/status"])
@@ -311,7 +311,7 @@ class VedalStateTest(unittest.TestCase):
             f"{URLS['stream']}/stream/status": {"payload": STREAM_STATUS, "hook": rendezvous},
         }
         with self._client() as client:
-            resp = client.get("/state")
+            resp = client.get("/manage/state")
 
         self.assertEqual(resp.status_code, 200)
         self.assertEqual(len(started), 2, "两个模块都没被请求")
@@ -323,10 +323,25 @@ class VedalStateTest(unittest.TestCase):
             f"{URLS['neuro_sama']}/status": {"payload": NEURO_STATUS},
         }
         with self._client() as client:
-            body = client.get("/state").json()
+            body = client.get("/manage/state").json()
 
         self.assertEqual(list(body["modules"]), ["neuro_sama"])
         self.assertEqual(len(_FakeAsyncClient.calls), 1)
+
+    def test_root_state_path_is_not_the_aggregator(self) -> None:
+        """`/state` 属于 dashboard 的 State 页，聚合端点在 `/manage/state`。
+
+        2026-10-24 实机踩过：API 先注册、SPA 挂在 `/`，于是直接输入或刷新
+        `:8100/state` 拿到的是 JSON——页面只有从侧边栏点进去才存在。
+        """
+        self._ok_both()
+        with self._client() as client:
+            resp = client.get("/state")
+        ctype = resp.headers.get("content-type", "")
+        if resp.status_code == 200 and "json" in ctype:
+            self.fail(
+                "/state 又变成聚合 API 了：它会把 dashboard 的 State 页遮蔽成 JSON"
+            )
 
 
 if __name__ == "__main__":

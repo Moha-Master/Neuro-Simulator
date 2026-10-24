@@ -7,7 +7,7 @@
  * 形状来源：
  * - `GET /status`（neuro_sama）
  * - `GET /stream/status`（stream）
- * - `GET /state`（vedal 聚合，`status` 原样透传上面两者的 envelope）
+ * - `GET /manage/state`（vedal 聚合，`status` 原样透传上面两者的 envelope）
  */
 
 // ---------- graph 通用形状 ----------

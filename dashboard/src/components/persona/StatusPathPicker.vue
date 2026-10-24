@@ -96,57 +96,70 @@
         </v-alert>
 
         <div v-else class="picker-tree">
-          <div v-for="group in filteredGroups" :key="group.root" class="mb-1">
+          <div v-for="tree in filteredTrees" :key="tree.root" class="mb-1">
             <div
-              class="picker-group d-flex align-center ga-2"
+              class="picker-root d-flex align-center ga-2"
               role="button"
               tabindex="0"
-              @click="toggle(group.root)"
-              @keydown.enter="toggle(group.root)"
+              @click="toggle(tree.root)"
+              @keydown.enter="toggle(tree.root)"
             >
-              <v-icon size="16">
-                {{ open[group.root] ? 'mdi-chevron-down' : 'mdi-chevron-right' }}
-              </v-icon>
-              <code class="text-body-2">{{ group.root }}</code>
-              <v-chip size="x-small" variant="outlined">{{ group.items.length }}</v-chip>
+              <v-icon size="16">{{ isOpen(tree.root) ? 'mdi-chevron-down' : 'mdi-chevron-right' }}</v-icon>
+              <code class="text-body-2 font-weight-medium">{{ tree.root }}</code>
+              <v-chip size="x-small" variant="outlined">{{ tree.sections.length }} 分区</v-chip>
             </div>
-            <template v-if="open[group.root] || query.trim()">
-              <div
-                v-for="item in group.items"
-                :key="item.path"
-                class="picker-leaf d-flex align-center ga-2"
-                :style="{ paddingLeft: `${12 + item.depth * 14}px` }"
-                role="button"
-                tabindex="0"
-                @click="insert(`{{ ${item.path} }}`)"
-                @keydown.enter="insert(`{{ ${item.path} }}`)"
-              >
-                <v-icon size="14" :color="item.big ? 'warning' : 'primary'">
-                  {{ item.big ? 'mdi-alert-outline' : 'mdi-code-braces' }}
-                </v-icon>
-                <code class="picker-path">{{ item.path }}</code>
-                <span class="picker-value text-disabled">{{ item.preview }}</span>
-                <v-spacer />
-                <v-btn
-                  v-if="item.big"
-                  icon="mdi-alert-outline"
-                  size="x-small"
-                  variant="text"
-                  color="warning"
-                  title="raw render snapshot, don't dump into a prompt"
-                  @click.stop
-                />
-                <v-btn
-                  icon="mdi-content-copy"
-                  size="x-small"
-                  variant="text"
-                  title="复制"
-                  @click.stop="copy(item.path)"
-                />
+            <template v-if="isOpen(tree.root)">
+              <div v-for="sec in tree.sections" :key="sec.key" class="picker-section">
+                <div
+                  class="picker-group d-flex align-center ga-2"
+                  role="button"
+                  tabindex="0"
+                  @click="toggle(sec.key)"
+                  @keydown.enter="toggle(sec.key)"
+                >
+                  <v-icon size="15">{{ isOpen(sec.key) ? 'mdi-chevron-down' : 'mdi-chevron-right' }}</v-icon>
+                  <code class="text-body-2">{{ sec.path }}</code>
+                  <v-chip size="x-small" variant="outlined">{{ sec.rows.length }}</v-chip>
+                </div>
+                <template v-if="isOpen(sec.key)">
+                  <div
+                    v-for="item in sec.rows"
+                    :key="item.path"
+                    class="picker-leaf d-flex align-center ga-2"
+                    :style="{ paddingLeft: `${34 + item.depth * 14}px` }"
+                    role="button"
+                    tabindex="0"
+                    @click="insert(`{{ ${item.path} }}`)"
+                    @keydown.enter="insert(`{{ ${item.path} }}`)"
+                  >
+                    <v-icon size="14" :color="item.big ? 'warning' : 'primary'">
+                      {{ item.big ? 'mdi-alert-outline' : 'mdi-code-braces' }}
+                    </v-icon>
+                    <code class="picker-path">{{ item.path }}</code>
+                    <span class="picker-value text-disabled">{{ item.preview }}</span>
+                    <v-spacer />
+                    <v-btn
+                      v-if="item.big"
+                      icon="mdi-alert-outline"
+                      size="x-small"
+                      variant="text"
+                      color="warning"
+                      title="raw render snapshot, don't dump into a prompt"
+                      @click.stop
+                    />
+                    <v-btn
+                      icon="mdi-content-copy"
+                      size="x-small"
+                      variant="text"
+                      title="复制"
+                      @click.stop="copy(item.path)"
+                    />
+                  </div>
+                </template>
               </div>
             </template>
           </div>
-          <div v-if="!filteredGroups.length" class="text-caption text-disabled px-2 py-1">
+          <div v-if="!filteredTrees.length" class="text-caption text-disabled px-2 py-1">
             没有匹配的路径。
           </div>
         </div>
@@ -166,7 +179,8 @@ import type { ModuleState, UnknownSections } from '@/types/status'
 /** 消息模板 / system prompt 共用的占位符选择器。
  *
  * - `template`：数据源是 vedal `GET /manage/state`（stream + neuro_sama 的
- *   `/status` 投影），树形展示分区 → 路径；点击在光标处插入 `{{ path }}`。
+ *   `/status` 投影）。树形为**命名空间 → 分区 → 字段**三层，默认全折叠；
+ *   点击叶子在光标处插入 `{{ path }}`，搜索时自动摊平命中路径。
  * - `persona`：system prompt 仍用字符串替换，只列真实占位符，不显示状态树。
  * 模块离线时降级为固定条目 + 提示，不报错、不挡编辑。
  */
@@ -185,12 +199,15 @@ const emit = defineEmits<{ (e: 'insert', text: string): void }>()
 
 const state = useModuleState()
 const query = ref('')
-const open = reactive<Record<string, boolean>>({ stream_status: true, neuro_status: true })
+// 默认**完全折叠**：树根是 `stream_status` / `neuro_status` 两个命名空间，
+// 展开根才看到分区，展开分区才看到字段——整棵树平铺会有上百行，塞在编辑器
+// 上方会把 prompt 文本框挤出屏幕。
+const open = reactive<Record<string, boolean>>({})
 const snackbar = ref(false)
 const snackbarText = ref('')
 
 const fixedItems = [
-  { path: 'messages', description: '观众消息块（空队列时是 placeholder_message）' },
+  { path: 'chat_messages', description: '本轮观众消息块（空队列时是 placeholder_message）' },
   { path: 'neuro_said', description: '本轮 neuro 正文；本场没说过话为空串' },
   { path: 'datetime', description: '当前本地时间字符串' },
 ]
@@ -204,9 +221,17 @@ interface Row {
   big: boolean
 }
 
-interface Group {
+interface Section {
+  /** 折叠状态用的键：命名空间 + 分区名 */
+  key: string
+  /** 展示与插入用的路径前缀，如 `stream_status.scene` */
+  path: string
+  rows: Row[]
+}
+
+interface Tree {
   root: string
-  items: Row[]
+  sections: Section[]
 }
 
 function sectionsOf(name: string): Record<string, { current?: unknown }> | null {
@@ -246,33 +271,47 @@ function walk(prefix: string, value: unknown, depth: number, rows: Row[], maxDep
   }
 }
 
-function buildGroups(root: string, sections: Record<string, { current?: unknown }> | null): Group[] {
-  if (!sections) return []
-  return Object.entries(sections).map(([name, section]) => {
+/** 两个命名空间各成一棵树：`stream_status` ← stream 的投影，`neuro_status` ← neuro 的投影。 */
+function buildTree(root: string, sections: Record<string, { current?: unknown }> | null): Tree | null {
+  if (!sections) return null
+  const nodes = Object.entries(sections).map(([name, section]) => {
     const rows: Row[] = []
     walk(`${root}.${name}`, section?.current, 0, rows)
-    return { root: `${root}.${name}`, items: rows }
+    return { key: `${root}.${name}`, path: `${root}.${name}`, rows }
   })
+  return { root, sections: nodes }
 }
 
-const groups = computed<Group[]>(() => [
-  ...buildGroups('stream_status', sectionsOf('stream')),
-  ...buildGroups('neuro_status', sectionsOf('neuro_sama')),
-])
+const trees = computed<Tree[]>(() =>
+  [
+    buildTree('stream_status', sectionsOf('stream')),
+    buildTree('neuro_status', sectionsOf('neuro_sama')),
+  ].filter((t): t is Tree => t !== null),
+)
 
-const filteredGroups = computed<Group[]>(() => {
+/** 搜索时自动摊平：过滤掉不匹配的分区/路径，省得用户逐层点开。 */
+const filteredTrees = computed<Tree[]>(() => {
   const needle = query.value.trim().toLowerCase()
-  if (!needle) return groups.value
-  return groups.value
-    .map((group) => ({
-      ...group,
-      items: group.items.filter((item) => item.path.toLowerCase().includes(needle)),
+  if (!needle) return trees.value
+  return trees.value
+    .map((tree) => ({
+      ...tree,
+      sections: tree.sections
+        .map((sec) => ({
+          ...sec,
+          rows: sec.rows.filter((row) => row.path.toLowerCase().includes(needle)),
+        }))
+        .filter((sec) => sec.rows.length > 0),
     }))
-    .filter((group) => group.items.length > 0)
+    .filter((tree) => tree.sections.length > 0)
 })
 
-function toggle(root: string) {
-  open[root] = !open[root]
+function isOpen(key: string) {
+  return Boolean(open[key]) || Boolean(query.value.trim())
+}
+
+function toggle(key: string) {
+  open[key] = !open[key]
 }
 
 function insert(text: string) {
@@ -313,6 +352,18 @@ onBeforeUnmount(() => {
   border-radius: 6px;
   background: rgba(var(--v-theme-surface), 0.55);
   padding: 4px 6px;
+}
+.picker-root {
+  cursor: pointer;
+  padding: 4px 6px;
+  border-radius: 4px;
+  background: rgba(var(--v-theme-primary), 0.06);
+}
+.picker-root:hover {
+  background: rgba(var(--v-theme-primary), 0.12);
+}
+.picker-section {
+  padding-left: 10px;
 }
 .picker-group {
   cursor: pointer;

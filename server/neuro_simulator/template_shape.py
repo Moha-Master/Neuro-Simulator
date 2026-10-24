@@ -171,7 +171,7 @@ SHAPE: Dict[str, Shape] = {
 OPTIONAL_ROOTS = frozenset({"neuro_status"})
 
 # 固定标量根（不是状态投影，但模板会用到）。
-SCALAR_ROOTS = {"messages": "str", "datetime": "str", "neuro_said": "str"}
+SCALAR_ROOTS = {"chat_messages": "str", "datetime": "str", "neuro_said": "str"}
 
 
 def worst_value(types: Iterable[str]) -> object:

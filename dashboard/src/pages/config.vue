@@ -188,7 +188,7 @@
                           />
                         </v-col>
                         <v-col cols="12">
-                          <v-textarea v-model="cfg.stream.placeholder_message" label="Placeholder message（空队列时作为 {{ '{{messages}}' }} 的内容）" variant="outlined" density="compact" rows="1" auto-grow />
+                          <v-textarea v-model="cfg.stream.placeholder_message" label="Placeholder message（空队列时作为 {{ '{{chat_messages}}' }} 的内容）" variant="outlined" density="compact" rows="1" auto-grow />
                         </v-col>
                         <v-col cols="12" sm="6"><v-text-field v-model="cfg.stream.default_title" label="默认直播标题（开播初值）" variant="outlined" density="compact" /></v-col>
                         <v-col cols="12" sm="6"><v-text-field v-model="cfg.stream.default_category" label="默认分区（开播初值）" variant="outlined" density="compact" /></v-col>

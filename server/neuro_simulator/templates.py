@@ -20,7 +20,7 @@
 
 渲染 context 只允许纯 dict/list/标量（见 `_plain`）：一旦把业务对象放进来，模板
 就能调用有副作用的方法。运行期仍可能遇到"绕过保存直接写 DB"的坏模板；这时退回
-一个只含 `messages` 事实的最小兜底，并把错误记进 `chatbot.template_error`——
+一个只含 `chat_messages` 事实的最小兜底，并把错误记进 `chatbot.template_error`——
 直播循环绝不因模板坏了而中断。不再保留进程内的"上一版成功文本"。
 """
 
@@ -35,6 +35,7 @@ from typing import Any, Callable, Optional, Sequence
 from jinja2 import ChainableUndefined, TemplateSyntaxError, meta
 from jinja2.sandbox import SandboxedEnvironment
 
+from .placeholder_kit import missing_placeholders
 from .template_shape import (
     SCALAR_ROOTS,
     SHAPE,
@@ -45,7 +46,7 @@ from .template_shape import (
 logger = logging.getLogger(__name__)
 
 _BLANK_RUNS = re.compile(r"\n{3,}")
-_TOP_KEYS = frozenset(("stream_status", "neuro_status", "neuro_said", "messages", "datetime"))
+_TOP_KEYS = frozenset(("stream_status", "neuro_status", "neuro_said", "chat_messages", "datetime"))
 
 
 @dataclass(frozen=True)
@@ -96,8 +97,8 @@ class _StrictChainableUndefined(ChainableUndefined):
         return 0.0
 
 
-def _token(key: str) -> str:
-    return "{{" + key + "}}"
+# 占位符匹配（`{{ chat_messages }}` 与 `{{chat_messages}}` 是同一个变量）统一走
+# `placeholder_kit`——曾经的裸字符串比对让默认模板自己被判成"缺少占位符"。
 
 
 def _plain(value: Any) -> Any:
@@ -308,7 +309,7 @@ class TemplateStore:
 
     def _fallback(self, name: str, context: dict) -> str:
         """绕过保存的坏模板 / 运行期意外时的最小兜底：至少保住"观众消息"这块事实。"""
-        messages = str(context.get("messages") or "").strip()
+        messages = str(context.get("chat_messages") or "").strip()
         if not messages:
             return ""
         label = "Recent chat messages:" if name == "chatbot_user" else "Recent viewer messages:"
@@ -369,6 +370,10 @@ class TemplateStore:
             rendered_ok = False
             error = f"{type(e).__name__}: {e}"
             rendered = self._fallback(name, ctx)
+        # expanded 只作展示："这个顶层变量整段展开会有多少字符"。
+        # 用宽松的词边界判断"有没有提到"，不是 has_placeholder：模板里写
+        # `{{ stream_status.games[...] }}` 时 `{{ stream_status }}` 那种整段形式
+        # 并不存在，严格匹配反而会把真正要 dump 的变量漏掉。
         expanded = {
             key: len(_stringify(value))
             for key, value in ctx.items()
@@ -386,9 +391,7 @@ class TemplateStore:
             "chars": {"template": len(source), "total": len(rendered)},
             "required": list(spec.required),
             # 非阻塞提示：必需占位符缺失不再拦保存
-            "missing_placeholders": [
-                key for key in spec.required if _token(key) not in source
-            ],
+            "missing_placeholders": missing_placeholders(source, spec.required),
             "expanded": expanded,
             "estimated_tokens": (len(rendered) + 3) // 4,
         }

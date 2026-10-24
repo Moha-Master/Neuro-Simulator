@@ -98,10 +98,10 @@ _TEMPLATE_VARS = [
         "description": "本轮 neuro 的正文（内容平面）；本场还没说过话时为空串。",
     },
     {
-        "key": "{{ messages }}",
+        "key": "{{ chat_messages }}",
         "description": (
-            "观众消息块（`- 用户名: 内容` 多行）；队列为空时是 config 的 "
-            "placeholder_message。"
+            "本轮要处理的观众消息块（`- 用户名: 内容` 多行）；队列为空时是 config 的 "
+            "placeholder_message。名字里的 chat 指 Twitch 的 chat，不是 neuro 的对话历史。"
         ),
     },
     {
@@ -127,11 +127,11 @@ def build_template_store(storage) -> TemplateStore:
                 label="Neuro · 每轮弹幕",
                 description=(
                     "直播循环每轮注入 neuro /chat 的 user message。"
-                    "队列为空（empty_queue_behavior=placeholder）时 {{messages}} 换成"
+                    "队列为空（empty_queue_behavior=placeholder）时 {{chat_messages}} 换成"
                     " config 的 placeholder_message，不再单设空队列模板。"
                 ),
                 default=d.get("neuro_user", ""),
-                required=("messages",),
+                required=("chat_messages",),
                 placeholders=list(_TEMPLATE_VARS),
             ),
             TemplateSpec(
@@ -139,7 +139,9 @@ def build_template_store(storage) -> TemplateStore:
                 label="Chatbot · 每轮",
                 description="每轮注入 chatbot（模拟观众）的 user message。",
                 default=d.get("chatbot_user", ""),
-                required=("messages",),
+                # 默认模板不引用 {{chat_messages}}（见 §6 的说明），所以不列必需项；
+                # 变量仍在 context 里，作者想加回去随时可以。
+                required=(),
                 placeholders=list(_TEMPLATE_VARS),
             ),
         ],

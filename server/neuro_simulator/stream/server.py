@@ -154,7 +154,7 @@ async def _template_vars(app: FastAPI, lp: StreamLoop, sample_messages: int) -> 
         msgs = await app.state.storage.recent_messages(
             lp.session["queue_row"], max(1, min(sample_messages, 20))
         )
-        # 与真实循环一致：没有消息时 {{messages}} 就是 placeholder_message
+        # 与真实循环一致：没有消息时 {{chat_messages}} 就是 placeholder_message
         context["messages"] = (
             "\n".join(f"- {m['username']}: {m['content']}" for m in msgs)
             or s.placeholder_message

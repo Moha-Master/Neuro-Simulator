@@ -300,7 +300,10 @@ class TestStreamStatus(unittest.IsolatedAsyncioTestCase):
 
     async def test_template_context_is_plain_data_only(self):
         ctx = self.loop.template_context("- a: hi")
-        self.assertEqual(set(ctx), {"stream_status", "neuro_status", "neuro_said", "messages", "datetime"})
+        self.assertEqual(
+            set(ctx),
+            {"stream_status", "neuro_status", "neuro_said", "chat_messages", "datetime"},
+        )
 
         def plain(value):
             if value is None or isinstance(value, (bool, int, float, str)):

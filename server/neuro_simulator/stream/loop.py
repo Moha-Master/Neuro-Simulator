@@ -240,14 +240,14 @@ class StreamLoop:
         """消息模板的完整 Jinja context：只放纯 dict/list/标量。
 
         `neuro_said`/`neuro_status` 由 chatbot 持有（本轮正文 + 最近一次投影），
-        `stream_status` 是 stream 自己的状态机现读，`messages` 由调用方给。
+        `stream_status` 是 stream 自己的状态机现读，`chat_messages` 由调用方给。
         """
         return {
             "stream_status": self.stream_status_dict(),
             # 优先用 loop 刚拉到的投影（chatbot 缓存是上一轮结束时的同一份）
             "neuro_status": self._neuro_status_plain or self.chatbot.neuro_status,
             "neuro_said": self.chatbot.neuro_said,
-            "messages": messages,
+            "chat_messages": messages,
             "datetime": _now_human(),
         }
 
@@ -960,7 +960,7 @@ class StreamLoop:
         # 同轮模板用最近一次 neuro 投影；缓存超过 5s 才补拉一次（provider 不发 HTTP）
         await self._fetch_neuro_status(client, session["channel"])
         if picked["kind"] == "placeholder":
-            # 空队列：{{messages}} 换成占位指令（不推进 cursor）。
+            # 空队列：{{chat_messages}} 换成占位指令（不推进 cursor）。
             # 不再单独维护"空队列模板"——少一条模板、少一个变量，行为也更直观。
             messages_block = picked["body"]
         else:

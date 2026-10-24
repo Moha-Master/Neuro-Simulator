@@ -134,6 +134,26 @@ class TestPersona(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn(CORE_PLACEHOLDER, rendered)
         self.assertNotIn(SHORT_TERM_PLACEHOLDER, rendered)
 
+    async def test_placeholders_match_regardless_of_whitespace(self):
+        """`{{ core_memory }}` 与 `{{core_memory}}` 是同一个占位符。
+
+        曾经的裸字符串比对让带空格的写法**静默不替换**：core memory 从 system
+        prompt 里消失，而 preview 的 `missing_placeholders` 还说它"缺失"——
+        两处不一致时作者完全看不出人设丢了。
+        """
+        await self.memory.add_entry("Chat likes cookies.")
+        spaced = "Intro.\n{{ core_memory }}\nAnd memory: {{short_term_memory}}\n"
+        await self.persona.save_prompt(spaced)
+        rendered = self.persona.render_system(self.memory.render())
+
+        self.assertIn("### Persona", rendered)          # core memory 进来了
+        self.assertIn("Chat likes cookies.", rendered)  # 短期记忆也进来了
+        self.assertNotIn("{{", rendered)                # 没留下未替换的花括号
+        self.assertEqual(
+            self.persona.preview_system(self.memory.render(), spaced)["missing_placeholders"],
+            [],
+        )
+
     async def test_missing_placeholders_are_not_appended(self):
         """prompt 是作者写的文本：缺占位符不再自动追加段落（preview 只提示）。"""
         await self.persona.save_prompt("Custom prompt without placeholders.")
