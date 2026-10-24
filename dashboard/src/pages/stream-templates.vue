@@ -83,7 +83,7 @@
             :preview-title="`渲染结果 · ${t.label}`"
             reset-label="恢复默认模板"
             :reset-confirm="`把「${t.label}」模板恢复为内置默认？当前内容会丢失。`"
-            append-hint="未定义路径渲染为空串；占位符缺失只提示、不阻止保存。语法或数据缺失会出错的模板在保存时就被拒绝；万一运行期渲染失败（只可能来自绕过保存直接改库），直播退回最小兜底文本，并在 State 页的 chatbot.template_error 里可见。"
+            append-hint="未定义路径渲染为空串；占位符缺失只提示、不阻止保存。语法或数据缺失会出错的模板在保存时就被拒绝；万一运行期渲染失败（只可能来自绕过保存直接改库），本轮会被取消（弹幕保留在队列里重试，不会被吃掉），并在 State 页的 chatbot.template_error 里可见。"
           />
         </div>
       </template>

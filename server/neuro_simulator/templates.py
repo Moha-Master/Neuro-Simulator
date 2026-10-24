@@ -19,9 +19,12 @@
 （拼写错误）→ 400；运行时下标之后的访问无法静态验证 → warning。
 
 渲染 context 只允许纯 dict/list/标量（见 `_plain`）：一旦把业务对象放进来，模板
-就能调用有副作用的方法。运行期仍可能遇到"绕过保存直接写 DB"的坏模板；这时退回
-一个只含 `chat_messages` 事实的最小兜底，并把错误记进 `chatbot.template_error`——
-直播循环绝不因模板坏了而中断。不再保留进程内的"上一版成功文本"。
+就能调用有副作用的方法。运行期仍可能遇到"绕过保存直接写 DB"的坏模板；这时
+`render()` 直接抛 `TemplateRenderError`——**本轮作废**（stream 侧 cursor 在渲染之后
+才推进，坏模板不会把弹幕吃掉），错误记进 `chatbot.template_error`，日志一条 warning。
+**没有任何兜底文本**：程序代写一句 "Recent viewer messages:" 看着温和，实际是把
+"她收不到弹幕"这件大事降级成没人注意的小事，而且那句措辞根本不属于作者。
+不再保留进程内的"上一版成功文本"。
 """
 
 import asyncio
@@ -69,6 +72,20 @@ class TemplateError(Exception):
         super().__init__(message)
         self.message = message
         self.status = status
+
+
+class TemplateRenderError(Exception):
+    """实况渲染失败（模板已入库却抛异常）。
+
+    与 `TemplateError` 分开的理由：那个是**管理接口**的 400，调用方是人；
+    这个是**运行期**的信号，调用方是直播循环，语义是"这一轮作废"。
+    只可能来自绕过保存直接写 DB——G1/G2 已经把正常保存路径挡住了。
+    """
+
+    def __init__(self, name: str, detail: str) -> None:
+        super().__init__(f"template {name!r} render failed: {detail}")
+        self.name = name
+        self.detail = detail
 
 
 class _StrictChainableUndefined(ChainableUndefined):
@@ -307,14 +324,6 @@ class TemplateStore:
         # 变量为空会留下连续空行（如未设置标题时的整行）：压成一段
         return _BLANK_RUNS.sub("\n\n", out).strip()
 
-    def _fallback(self, name: str, context: dict) -> str:
-        """绕过保存的坏模板 / 运行期意外时的最小兜底：至少保住"观众消息"这块事实。"""
-        messages = str(context.get("chat_messages") or "").strip()
-        if not messages:
-            return ""
-        label = "Recent chat messages:" if name == "chatbot_user" else "Recent viewer messages:"
-        return f"{label}\n{messages}"
-
     def _record(self, name: str, error: Optional[str]) -> None:
         changed = False
         if error is None:
@@ -335,7 +344,14 @@ class TemplateStore:
                 logger.exception("template render listener failed")
 
     def render(self, name: str, context: Optional[dict] = None, content: Optional[str] = None) -> str:
-        """渲染已保存模板（content 非 None = 草稿试渲染，不更新错误状态）。"""
+        """渲染已保存模板（content 非 None = 草稿试渲染，不更新错误状态）。
+
+        **失败就抛，不替作者写文本**。政策是"编辑者对自己写的文本负责"，那么
+        坏模板的代价就该由作者承担：这一轮不发、`chatbot.template_error` 亮出来、
+        日志一条 warning。程序代一句 "Recent viewer messages:" 看着温和，实际是把
+        "她收不到弹幕"这件大事降级成没人注意的小事——而且那句措辞根本不属于作者
+        （对 chatbot 更糟：默认模板已明确不要观众消息，兜底却硬塞回去）。
+        """
         self._check_known(name)
         ctx = context or {}
         if content is not None:
@@ -346,9 +362,9 @@ class TemplateStore:
             out = self._render_source(source, ctx)
         except Exception as e:  # 绕过保存的坏模板 / 沙箱拒绝 / 运行时错误
             error = f"{type(e).__name__}: {e}"
-            logger.warning("模板 %s 渲染失败，使用最小兜底: %s", name, error)
+            logger.warning("模板 %s 渲染失败，取消本轮: %s", name, error)
             self._record(name, error)
-            return self._fallback(name, ctx)
+            raise TemplateRenderError(name, error) from e
         self._record(name, None)
         return out
 
@@ -369,7 +385,7 @@ class TemplateStore:
         except Exception as e:
             rendered_ok = False
             error = f"{type(e).__name__}: {e}"
-            rendered = self._fallback(name, ctx)
+            rendered = ""  # 失败就不给正文：preview 的职责是报问题，不是圆场
         # expanded 只作展示："这个顶层变量整段展开会有多少字符"。
         # 用宽松的词边界判断"有没有提到"，不是 has_placeholder：模板里写
         # `{{ stream_status.games[...] }}` 时 `{{ stream_status }}` 那种整段形式

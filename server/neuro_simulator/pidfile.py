@@ -6,10 +6,12 @@
 
 - write_pid_file：已有存活实例时拒绝启动（防双开，避免覆盖别人的 PID）
 - read_pid_file：返回存活 PID；文件缺失/损坏/进程已死（残留）均返回 None
+- install_cleanup_on_shutdown：把删除动作挂进 app 的 lifespan shutdown
 - 进程被 SIGKILL 时无法自行清理，残留文件由读取方按“进程已死”识别并清理
 """
 
 import os
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Optional
 
@@ -59,3 +61,29 @@ def remove_pid_file(workdir: Path, module: str) -> None:
         pid_file_path(workdir, module).unlink()
     except OSError:
         pass
+
+
+def install_cleanup_on_shutdown(app, workdir: Path, module: str) -> None:
+    """把 pid 文件的删除挂进 app 的 lifespan shutdown（必须用这个，不能只靠 finally）。
+
+    为什么：uvicorn 在优雅关闭后会 `signal.raise_signal(captured_signal)`
+    把捕获到的 SIGTERM **重新发给自己**（见 uvicorn/server.py 的
+    `capture_signals`，它有意恢复"信号原本该有的默认行为"）。于是 `uvicorn.run()`
+    的 `finally: remove_pid_file(...)` 永远等不到执行——进程直接被杀死。
+    实机复现（strace）：`2445226 --- SIGTERM` 后紧跟 `+++ killed by SIGTERM +++`，
+    pid 文件每次都残留。
+
+    lifespan shutdown 在那个 raise_signal **之前**执行，所以清理必须挂在这里。
+    模块入口的 `finally` 仍保留：端口占用、启动即失败等不走 lifespan 的路径靠它。
+    """
+    inner = app.router.lifespan_context
+
+    @asynccontextmanager
+    async def wrapper(app_):
+        try:
+            async with inner(app_):
+                yield
+        finally:
+            remove_pid_file(workdir, module)
+
+    app.router.lifespan_context = wrapper

@@ -14,7 +14,7 @@ neuro_sama 用它承载 Neuro 的人设，stream 用它承载 chatbot 的观众�
 - **prompt 就是作者写的文本**：模板里出现 `{{name}}` 才原位替换，缺失不再自动
   追加到末尾（编辑自由由作者负责；preview 的 `missing_placeholders` 只是提示）
 - 段落为空时替换成 `## <Name>\n(none yet)`，让模型明确知道"现在没有内容"
-- 渲染异常时退回进程内上一版成功文本（直播路径不能因为提示词坏了而 500）
+- 渲染异常时退回模板原文 + warning（不存"上一版"隐式副本；裸露的占位符就是信号）
 """
 
 import asyncio
@@ -92,7 +92,6 @@ class PersonaStore:
         self._loaded = False
         self._lock = asyncio.Lock()
         # 进程内最近一次成功编译的 system prompt（渲染异常时退回它）
-        self._last_render: str = ""
 
     # ---------- 加载 / 播种 ----------
 
@@ -348,16 +347,16 @@ class PersonaStore:
     def render(self, extra_sections: Optional[dict] = None) -> str:
         """用已保存的模板 + core/额外段落拼出完整 prompt。
 
-        渲染异常（理论上只会来自极端输入）退回上一版成功文本；从未成功过就退回
-        模板原文——直播循环不能因为提示词坏了而中断。
+        这里是纯字符串替换，正常输入不会抛异常；真出了事就退回**模板原文**并记
+        一条 warning。不退回"上一版成功文本"——那是隐式的历史副本，与消息模板侧
+        删掉 `_last_ok` 的决定相冲突；原文里裸露的 `{{core_memory}}` 反而是诚实信号：
+        看 prompt 的人一眼能发现"这段没被替换"，比拿到一份没人知道的旧文本好。
         """
         try:
-            out = self._assemble(self._prompt, extra_sections)
+            return self._assemble(self._prompt, extra_sections)
         except Exception as e:  # pragma: no cover - 防御性兜底
-            logger.warning("persona prompt 渲染失败，使用上一版: %s: %s", type(e).__name__, e)
-            return self._last_render or self._prompt
-        self._last_render = out
-        return out
+            logger.warning("persona prompt 渲染失败，退回模板原文: %s: %s", type(e).__name__, e)
+            return self._prompt
 
     def preview(
         self,

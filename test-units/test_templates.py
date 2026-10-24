@@ -1,7 +1,7 @@
 """消息模板：Jinja 沙箱、三道关卡（G1 编译 / G2 最严苛 / G3 现实）、形状漂移。
 
-G1/G2/静态路径在保存时拒绝；G3 只在 preview 里展示。运行期仍保留最小兜底，
-但不再记住"上一版成功文本"。
+G1/G2/静态路径在保存时拒绝；G3 只在 preview 里展示。**运行期没有任何兜底文案**：
+实况渲染失败就抛 `TemplateRenderError`（本轮作废），也不再记"上一版成功文本"。
 """
 
 import unittest
@@ -21,7 +21,12 @@ from neuro_simulator.template_shape import (
     RUNTIME_KEY,
     STREAM_SHAPE,
 )
-from neuro_simulator.templates import TemplateError, TemplateSpec, TemplateStore
+from neuro_simulator.templates import (
+    TemplateError,
+    TemplateRenderError,
+    TemplateSpec,
+    TemplateStore,
+)
 
 
 class _Storage:
@@ -230,14 +235,18 @@ class TestJinjaRendering(unittest.IsolatedAsyncioTestCase):
         for value in ctx.values():
             self.assertIn(type(value), (dict, str, int, float, bool, type(None)))
 
-    async def test_bad_db_row_uses_minimal_fallback_and_recovers(self):
-        """绕过保存直接写 DB 的坏模板：最小兜底 + template_error，成功即清除。"""
+    async def test_bad_db_row_raises_and_records_error(self):
+        """绕过保存直接写 DB 的坏模板：抛异常 + template_error，成功渲染即清除。
+
+        政策是"编辑者对自己写的文本负责"，所以程序**不代笔**：既不编一句
+        "Recent viewer messages:"，也不端出上一版。代价由作者承担（本轮不发），
+        信号由状态平面负责（`chatbot.template_error` + 日志）。
+        """
         await self.storage.upsert_prompt("BROKEN {{ messages ", "neuro_user")
         await self.store.load()
-        self.assertEqual(
-            self.store.render("neuro_user", {"chat_messages": "- a: hi"}),
-            "Recent viewer messages:\n- a: hi",
-        )
+        with self.assertRaises(TemplateRenderError) as ctx:
+            self.store.render("neuro_user", {"chat_messages": "- a: hi"})
+        self.assertEqual(ctx.exception.name, "neuro_user")
         self.assertIsNotNone(self.store.template_error)
         self.assertEqual(self.store.template_error["name"], "neuro_user")
 
@@ -248,10 +257,19 @@ class TestJinjaRendering(unittest.IsolatedAsyncioTestCase):
         )
         self.assertIsNone(self.store.template_error)
 
-    async def test_bad_db_row_without_messages_returns_empty(self):
+    async def test_render_failure_never_fabricates_text(self):
+        """空 context + 坏模板 → 依然抛，不返回任何程序写的句子。"""
         await self.storage.upsert_prompt("BROKEN {{", "neuro_user")
         await self.store.load()
-        self.assertEqual(self.store.render("neuro_user", {}), "")
+        with self.assertRaises(TemplateRenderError):
+            self.store.render("neuro_user", {})
+
+    async def test_preview_failure_reports_error_without_text(self):
+        """preview 的职责是报问题，不是圆场：失败时 prompt 为空串。"""
+        preview = self.store.preview("neuro_user", {}, "BROKEN {{")
+        self.assertFalse(preview["rendered"])
+        self.assertEqual(preview["prompt"], "")
+        self.assertTrue(preview["error"])
 
     async def test_required_placeholders_no_longer_block_save(self):
         await self._save("No messages placeholder here.")

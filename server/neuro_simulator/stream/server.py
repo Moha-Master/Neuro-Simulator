@@ -27,7 +27,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-from .. import scene_kit
+from .. import log_kit, scene_kit
 from ..broadcaster import EventBroadcaster
 from ..config import get_config, module_url
 from ..persona import PersonaError
@@ -218,6 +218,39 @@ def create_app() -> FastAPI:
 
     def _loop() -> StreamLoop:
         return app.state.loop
+
+    # ---------- 进程日志（内存 = 活体；磁盘历史见 vedal） ----------
+
+    def _own_log() -> log_kit.ProcessLog:
+        log = log_kit.current("stream")
+        if log is None:
+            raise HTTPException(status_code=503, detail="日志未启用：本进程不是经 main() 启动的")
+        return log
+
+    @app.get("/logs")
+    async def logs(max_bytes: int = log_kit.TAIL_MAX_BYTES):
+        """本进程此刻的输出尾部，读**内存环形缓冲**（只含本次运行）。
+
+        进程死掉之后再来看日志，走 vedal 的磁盘端点（`GET /manage/logs/stream`）。
+        """
+        log = _own_log()
+        return log.snapshot(log_kit.clamp_bytes(log, max_bytes))
+
+    @app.get("/logs/events")
+    async def logs_events(since: int = -1, max_bytes: int = log_kit.TAIL_MAX_BYTES):
+        """SSE 跟随日志：首帧 `snapshot`,之后 `event: log` 增量。
+
+        `?since=<seq>` 用于断线续播；那段已被环形缓冲挤掉时先收 `gap` 再收完整
+        `snapshot`（整屏重来），不会静默丢帧。
+        """
+        log = _own_log()
+        return StreamingResponse(
+            log_kit.sse_stream(
+                log, since=since, max_bytes=log_kit.clamp_bytes(log, max_bytes)
+            ),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
 
     # ---------- 健康与状态 ----------
 

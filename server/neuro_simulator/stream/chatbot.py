@@ -28,6 +28,7 @@ from typing import Callable, Optional
 
 from openai import AsyncOpenAI
 
+from ..templates import TemplateRenderError
 from . import settings
 from .usernames import random_username
 
@@ -249,11 +250,16 @@ class ChatbotManager:
             if queue_row is not None
             else []
         )
-        messages_block = (
-            "\n".join(f"- {m['username']}: {m['content']}" for m in recent)
-            or "(no recent chat messages yet)"
-        )
-        user_content = self.templates.render("chatbot_user", self._context(messages_block))
+        # 空就是空，不替作者编一句"还没有消息"：chatbot 的措辞归模板作者，
+        # 程序只负责把事实（这里就是"没内容"）递过去。
+        messages_block = "\n".join(f"- {m['username']}: {m['content']}" for m in recent)
+        try:
+            user_content = self.templates.render("chatbot_user", self._context(messages_block))
+        except TemplateRenderError:
+            # 实况渲染失败（只可能来自绕过保存直接写库）：本轮作废。
+            # `templates.render` 已经把错误记进 chatbot.template_error，这里不重复记，
+            # 也不让异常冒出任务（否则 asyncio 会甩"Task exception was never retrieved"）。
+            return
         system_prompt = self.persona.render_prompt(cb.count)
         async with self._history_lock:
             history = list(self._history)

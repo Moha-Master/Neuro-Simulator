@@ -20,6 +20,9 @@ declare module 'vue-router/auto-routes' {
   export interface RouteNamedMap {
     '/': RouteRecordInfo<'/', '/', Record<never, never>, Record<never, never>>,
     '/config': RouteRecordInfo<'/config', '/config', Record<never, never>, Record<never, never>>,
+    '/logs': RouteRecordInfo<'/logs', '/logs', Record<never, never>, Record<never, never>>,
+    '/logs-neuro': RouteRecordInfo<'/logs-neuro', '/logs-neuro', Record<never, never>, Record<never, never>>,
+    '/logs-stream': RouteRecordInfo<'/logs-stream', '/logs-stream', Record<never, never>, Record<never, never>>,
     '/neuro-sama': RouteRecordInfo<'/neuro-sama', '/neuro-sama', Record<never, never>, Record<never, never>>,
     '/neuro-sama-memory': RouteRecordInfo<'/neuro-sama-memory', '/neuro-sama-memory', Record<never, never>, Record<never, never>>,
     '/neuro-sama-persona': RouteRecordInfo<'/neuro-sama-persona', '/neuro-sama-persona', Record<never, never>, Record<never, never>>,
@@ -48,6 +51,18 @@ declare module 'vue-router/auto-routes' {
     }
     'src/pages/config.vue': {
       routes: '/config'
+      views: never
+    }
+    'src/pages/logs.vue': {
+      routes: '/logs'
+      views: never
+    }
+    'src/pages/logs-neuro.vue': {
+      routes: '/logs-neuro'
+      views: never
+    }
+    'src/pages/logs-stream.vue': {
+      routes: '/logs-stream'
       views: never
     }
     'src/pages/neuro-sama.vue': {

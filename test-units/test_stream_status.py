@@ -10,6 +10,7 @@ from unittest.mock import patch
 from fastapi.testclient import TestClient
 
 from neuro_simulator.broadcaster import EventBroadcaster
+from neuro_simulator.templates import TemplateRenderError
 from neuro_simulator.stream import audience as audience_module
 from neuro_simulator.stream import settings as stream_settings
 from neuro_simulator.stream import status as stream_status
@@ -287,15 +288,20 @@ class TestStreamStatus(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(scene["prompt_context"], "Wordle 场景应带规则指令")
 
     async def test_chatbot_partition_reports_template_error(self):
-        # 保存路径会拒绝坏模板；这里模拟"绕过保存直接写 DB"的遗留数据
+        """坏模板（绕过保存直写 DB 的遗留数据）→ 抛异常，但状态平面仍看得见。
+
+        抛异常与可见性是配套的：本轮作废由 `chatbot.template_error` 交代原因，
+        dashboard 的 State 页不会看到"一切正常"。
+        """
         await self.storage.upsert_prompt("{{ 'unterminated", "neuro_user")
         await self.templates.load()
-        self.templates.render("neuro_user", {"messages": "hi"})
+        with self.assertRaises(TemplateRenderError):
+            self.templates.render("neuro_user", {"chat_messages": "hi"})
         cur = self._status()["sections"]["chatbot"]["current"]
         self.assertEqual(cur["template_error"]["name"], "neuro_user")
         self.assertTrue(cur["template_error"]["message"])
         await self.templates.reset("neuro_user")
-        self.templates.render("neuro_user", {"messages": "hi"})
+        self.templates.render("neuro_user", {"chat_messages": "hi"})
         self.assertIsNone(self._status()["sections"]["chatbot"]["current"]["template_error"])
 
     async def test_template_context_is_plain_data_only(self):

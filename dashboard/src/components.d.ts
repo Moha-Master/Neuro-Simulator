@@ -16,6 +16,7 @@ declare module 'vue' {
     ChatMessage: typeof import('./components/chat/ChatMessage.vue')['default']
     ChatSidebar: typeof import('./components/chat/ChatSidebar.vue')['default']
     CoreMemoryList: typeof import('./components/persona/CoreMemoryList.vue')['default']
+    LogViewer: typeof import('./components/logs/LogViewer.vue')['default']
     ModuleOffline: typeof import('./components/ModuleOffline.vue')['default']
     ModuleStateChips: typeof import('./components/state/ModuleStateChips.vue')['default']
     PromptEditor: typeof import('./components/persona/PromptEditor.vue')['default']

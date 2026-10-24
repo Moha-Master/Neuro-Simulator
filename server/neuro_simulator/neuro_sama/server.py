@@ -33,7 +33,7 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from openai import AsyncOpenAI
 from pydantic import BaseModel
 
-from .. import scene_kit, state_kit
+from .. import log_kit, scene_kit, state_kit
 from ..broadcaster import EventBroadcaster
 from ..config import get_config
 from . import tts, ui_media
@@ -734,6 +734,39 @@ def create_app() -> FastAPI:
         await storage.close()
 
     app = FastAPI(title="neuro-sama", lifespan=lifespan)
+
+    # ---------- 进程日志（内存 = 活体；磁盘历史见 vedal） ----------
+
+    @app.get("/logs")
+    async def logs(max_bytes: int = log_kit.TAIL_MAX_BYTES):
+        """本进程此刻的输出尾部，读**内存环形缓冲**（只含本次运行）。
+
+        不读磁盘文件：网页能打开的前提就是本进程活着，内存既更实时、又不会掺进上一次
+        运行的内容。进程死掉之后再来看日志，走 vedal 的磁盘端点
+        （`GET /manage/logs/neuro_sama`）。
+        """
+        log = log_kit.current("neuro_sama")
+        if log is None:
+            raise HTTPException(status_code=503, detail="日志未启用：本进程不是经 main() 启动的")
+        return log.snapshot(log_kit.clamp_bytes(log, max_bytes))
+
+    @app.get("/logs/events")
+    async def logs_events(since: int = -1, max_bytes: int = log_kit.TAIL_MAX_BYTES):
+        """SSE 跟随日志：首帧 `snapshot`,之后 `event: log` 增量。
+
+        `?since=<seq>` 用于断线续播；那段已被环形缓冲挤掉时先收 `gap` 再收完整
+        `snapshot`（整屏重来），不会静默丢帧——与 `/state/events` 的 `rev` 跳号同一条纪律。
+        """
+        log = log_kit.current("neuro_sama")
+        if log is None:
+            raise HTTPException(status_code=503, detail="日志未启用：本进程不是经 main() 启动的")
+        return StreamingResponse(
+            log_kit.sse_stream(
+                log, since=since, max_bytes=log_kit.clamp_bytes(log, max_bytes)
+            ),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
 
     # ---------- 健康检查 ----------
 

@@ -4,7 +4,7 @@
 # --- General / OS ----------------------------------------------------------
 # ---------------------------------------------------------------------------
 # Logs and databases
-logs
+/logs
 *.log
 *.sql
 *.sqlite
@@ -130,5 +130,6 @@ config.yaml
 /project_code_archive.md
 
 AGENTS.md
+TODO.md
 .playwright-cli/
 references/

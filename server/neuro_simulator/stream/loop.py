@@ -968,11 +968,15 @@ class StreamLoop:
             # 优先消息与普通消息对 neuro 完全同格式：不带 type/value，不加标注
             messages_block = "\n".join(f"- {m['username']}: {m['content']}" for m in msgs)
             last_id = msgs[-1]["id"]
+        # **先渲染、后推进水位线**：模板坏了就不该把弹幕吃掉。事实留在队列里，
+        # 下一轮重试同一批；配合 `chatbot.template_error` 与日志，表现是
+        # "她停摆且看得见为什么"，而不是"队列被清空、她一直沉默"。
+        text = self.templates.render("neuro_user", self.template_context(messages_block))
+        if last_id is not None:
             if picked["kind"] == "priority":
                 session["priority_cursor"] = last_id
             else:
                 session["cursor"] = last_id
-        text = self.templates.render("neuro_user", self.template_context(messages_block))
         round_failed = False
         turn_text = ""
         ends_at: Optional[float] = None

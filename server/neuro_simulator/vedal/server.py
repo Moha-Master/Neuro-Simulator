@@ -10,6 +10,8 @@
 - POST /manage/module_run/<module_name>    以子进程方式启动模块（python -m neuro_simulator.<module>.main --dir <workdir>）
 - POST /manage/module_stop/<module_name>   停止模块（托管进程直接发信号；外部实例经 <workdir>/<module>.pid 定位）
 - POST /manage/module_restart/<module_name> 重启
+- GET  /manage/vedal/logs[/events]     vedal 自己的内存日志（活体；形状与其它模块经代理的一致）
+- GET  /manage/logs/<module>           读某模块磁盘日志的尾部（死档；进程不在了也能读）
 - /manage/<module>/<path...>      代理到目标模块的 /<path...>（完整路径转发；
                                     模块名 = config.json 中的 schema 名；
                                     模块 URL = external_url 或 http://{host}:{port}；
@@ -18,8 +20,13 @@
 
 各模块是独立进程（各自一个 uvicorn + 独立可执行入口）；模块启动时写
 <workdir>/<module>.pid（见 pidfile.py），因此 vedal 能管理任何入口启动的
-实例（命令行手动、子进程托管、甚至 vedal 重启前遗留的）。子进程日志写
-<workdir>/logs/<module>.log。vedal 自身不接受被自身管理（run/stop/restart 返回 400）。
+实例（命令行手动、子进程托管、甚至 vedal 重启前遗留的）。vedal 自身不接受被
+自身管理（run/stop/restart 返回 400）。
+
+**日志由进程自己写**（见 log_kit.py）：每个入口在 main() 里把 stdout/stderr 套一层
+tee 落到 <workdir>/logs/<模块名>.log，所以手动跑的实例与 vedal 托管的实例都有日志，
+vedal 不再重定向子进程输出（否则每行双写）。代价是：进程在装 tee 之前（import 期）
+就崩的话，日志文件是空的——那种情况的 traceback 只在 vedal 的终端里。
 """
 
 import asyncio
@@ -42,7 +49,7 @@ from fastapi.responses import Response, StreamingResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.staticfiles import StaticFiles
 
-from .. import pidfile
+from .. import log_kit, pidfile
 from ..config import (
     CONFIG_FILENAME,
     SERVER_SCHEMA,
@@ -84,12 +91,15 @@ async def _is_reachable(url: Optional[str]) -> bool:
         return False
 
 
-def _log_tail(path: Path, lines: int = 5) -> str:
-    try:
-        content = path.read_text(encoding="utf-8", errors="replace").splitlines()
-        return " | ".join(content[-lines:])[:500]
-    except OSError:
-        return ""
+def _log_tail(module_name: str, pid: int) -> str:
+    """某次运行（按 pid）在磁盘上留下的输出末尾，用于启动失败的 detail。
+
+    磁盘文件是跨运行追加的（进程死后它是唯一证据，绝不能启动时截断），所以必须按
+    **运行分隔行**取本次那一段：否则进程秒崩、一行没写时，detail 会端出上一个运行的
+    尾巴冒充本次崩溃原因——这是旧实现真实踩过的坑（旧代码用追加模式读整个文件）。
+    """
+    return log_kit.read_run_tail(get_config().WORKDIR, module_name, pid)
+
 
 
 def _live_pid(module_name: str) -> Optional[int]:
@@ -167,18 +177,13 @@ async def _run_module(module_name: str) -> dict[str, Any]:
             detail=f"module {module_name} 已在运行但没有 {module_name}.pid 文件，无法启动新实例",
         )
 
-    log_path = cfg.WORKDIR / "logs" / f"{module_name}.log"
+    log_path = log_kit.log_path(cfg.WORKDIR, module_name)
     log_path.parent.mkdir(parents=True, exist_ok=True)
-    log_f = open(log_path, "ab")
-    try:
-        proc = subprocess.Popen(
-            [sys.executable, "-m", f"neuro_simulator.{module_name}.main", "--dir", str(cfg.WORKDIR)],
-            stdout=log_f,
-            stderr=subprocess.STDOUT,
-        )
-    except Exception:
-        log_f.close()
-        raise
+    # **不再重定向子进程 stdout**：日志由进程自己 tee（log_kit），vedal 再指一次就是
+    # 每行双写。子进程继承 vedal 的 stdout，操作者终端照样看得见它的输出。
+    proc = subprocess.Popen(
+        [sys.executable, "-m", f"neuro_simulator.{module_name}.main", "--dir", str(cfg.WORKDIR)],
+    )
     _managed[module_name] = _ManagedModule(proc=proc, log_path=log_path)
     print(f"[vedal] module {module_name} started (pid={proc.pid}, log={log_path})", flush=True)
 
@@ -186,21 +191,18 @@ async def _run_module(module_name: str) -> dict[str, Any]:
     for _ in range(20):
         await asyncio.sleep(0.5)
         if proc.poll() is not None:
-            log_f.close()
             _managed.pop(module_name, None)
             raise HTTPException(
                 status_code=500,
-                detail=f"module {module_name} 启动后退出 (code={proc.returncode}): {_log_tail(log_path)}",
+                detail=f"module {module_name} 启动后退出 (code={proc.returncode}): {_log_tail(module_name, proc.pid)}",
             )
         if await _is_reachable(module_url(module_name)):
-            log_f.close()
             return {"status": "started", "module": module_name, "pid": proc.pid}
-    log_f.close()
     return {
         "status": "started_unverified",
         "module": module_name,
         "pid": proc.pid,
-        "detail": "进程存活但 10s 内健康检查未通过，请检查 <workdir>/logs/ 下日志",
+        "detail": f"进程存活但 10s 内健康检查未通过，见 dashboard 的 Logs 页或 {log_path}",
     }
 
 
@@ -213,6 +215,10 @@ def module_url(name: str) -> Optional[str]:
     """模块访问 URL（实现在共享 config.module_url：external_url 优先，其次 host/port）。"""
     return _module_url(get_config(), name)
 
+
+# 磁盘日志一次最多给多少：这是死档阅读窗口，比内存端点的夹取更宽（文件可以整体比
+# 内存上限大得多），但仍要有界——不能把一个可能上百 MB 的历史甩给浏览器。
+DISK_READ_MAX_BYTES = 2 * 1024 * 1024
 
 # 状态机投影的读超时：模块的 provider 是同步无 I/O 的，2s 足够；这是聚合层的
 # 观测纪律，不进 config（改它没有业务含义，只会让 dashboard 更慢）。
@@ -530,6 +536,56 @@ def create_app() -> FastAPI:
         return await _run_module(module_name)
 
     # ---------- /manage/<module>/...：模块请求代理（完整路径转发 + SSE 流式透传） ----------
+
+    # ---------- 进程日志 ----------
+    #
+    # 两条路径、两个语义（与"读状态"那套 /status vs /state/events 的分工同构）：
+    # - `/manage/vedal/logs[/events]`   vedal **自己**的内存（活体；路径形状与其它模块
+    #   经代理的 `/manage/<module>/logs` 一致，前端一套 URL 模式吃三个模块）
+    # - `/manage/logs/<module>`         磁盘文件（vedal 读，进程死了仍可读）
+    # 模块活着时前端走内存；探测到不可达就回落到磁盘端点，并明确告诉用户
+    # "这不是实时输出，是那个进程最后留下的记录"。
+
+    @app.get("/manage/vedal/logs")
+    async def own_logs(max_bytes: int = log_kit.TAIL_MAX_BYTES):
+        """vedal 自己的输出尾部（内存环形缓冲，只含本次运行）。"""
+        log = log_kit.current("vedal")
+        if log is None:
+            raise HTTPException(status_code=503, detail="日志未启用：vedal 不是经 main() 启动的")
+        return log.snapshot(log_kit.clamp_bytes(log, max_bytes))
+
+    @app.get("/manage/vedal/logs/events")
+    async def own_logs_events(since: int = -1, max_bytes: int = log_kit.TAIL_MAX_BYTES):
+        """vedal 自己日志的 SSE 跟随。"""
+        log = log_kit.current("vedal")
+        if log is None:
+            raise HTTPException(status_code=503, detail="日志未启用：vedal 不是经 main() 启动的")
+        return StreamingResponse(
+            log_kit.sse_stream(
+                log, since=since, max_bytes=log_kit.clamp_bytes(log, max_bytes)
+            ),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
+
+    @app.get("/manage/logs/{module_name}")
+    async def module_logs_from_disk(module_name: str, max_bytes: int = log_kit.TAIL_MAX_BYTES):
+        """某模块磁盘日志的尾部（进程不在了才需要它，故它读文件而不是转发请求）。
+
+        只读**当前**那个文件（`.log`）；更早的内容在 `.log.1`/`.log.2`，响应里的
+        `disk.files` 会列出它们，前端据此说明"总共还有多少可翻"。
+        """
+        cfg = get_config()
+        if module_name not in cfg.data:
+            raise HTTPException(status_code=404, detail=f"unknown module: {module_name}")
+        info = log_kit.read_disk_tail(
+            cfg.WORKDIR, module_name, max_bytes=max(1, min(int(max_bytes), DISK_READ_MAX_BYTES))
+        )
+        # 只报"有没有活着的进程"（读 PID 文件），不报 URL/可达性：那个的权威是
+        # /manage/modules，前端已经有它，这里抄第二份就会有两个真相。
+        info["pid"] = _live_pid(module_name)
+        info["running"] = info["pid"] is not None
+        return info
 
     @app.api_route("/manage/{module}/{path:path}", methods=["GET", "POST", "PUT", "DELETE"])
     async def proxy_module(module: str, path: str, request: Request):

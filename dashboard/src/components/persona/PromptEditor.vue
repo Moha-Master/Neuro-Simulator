@@ -140,7 +140,7 @@
             density="compact"
             class="mb-2"
           >
-            实况渲染失败（直播会退回最小兜底）：{{ previewData.error }}
+            实况渲染失败：{{ previewData.error }}
           </v-alert>
           <v-alert
             v-if="previewData.gate_errors && Object.keys(previewData.gate_errors).length"

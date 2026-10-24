@@ -10,6 +10,7 @@ from unittest.mock import patch
 
 from neuro_simulator.broadcaster import EventBroadcaster
 from neuro_simulator.stream.loop import StreamLoop
+from neuro_simulator.templates import TemplateRenderError
 from neuro_simulator.stream.persona import ChatbotPersonaStore, build_template_store
 from neuro_simulator.stream.storage import Storage
 
@@ -175,6 +176,40 @@ class TestPriorityQueue(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("{{", text)
         # 占位轮不推进 cursor
         self.assertEqual(self.session["cursor"], 0)
+
+    async def test_bad_template_cancels_round_without_consuming_queue(self):
+        """实况渲染失败 → 本轮作废、弹幕不消费、错误可见。
+
+        程序不代笔（已经没有"最小兜底"），也不推进水位线。坏模板的表现必须是
+        "她停摆、原因看得见"，而不是"队列被清空、她安静地沉默"——后者把大事
+        降级成没人注意的小事，还顺手销毁了内容平面的事实。
+        """
+        await self.storage.append_message(self.queue_row, "viewer", "hello")
+        await self.storage.upsert_prompt("BROKEN {{", "neuro_user")
+        await self.templates.load()
+        sent: list[str] = []
+
+        class _CapturingClient(_FakeNeuroClient):
+            async def chat_batch(self, message, channel, conversation_id, audio=False):
+                sent.append(message)
+                return await super().chat_batch(message, channel, conversation_id, audio)
+
+        with patch("neuro_simulator.stream.loop.NeuroClient", _CapturingClient):
+            with self.assertRaises(TemplateRenderError):
+                await self.loop._run_round(self.settings, self.session)
+
+        self.assertEqual(sent, [], "坏模板不该向 neuro 发出任何请求")
+        self.assertEqual(self.session["cursor"], 0, "渲染失败却推进了水位线 = 弹幕被吃掉")
+        self.assertIsNotNone(self.templates.template_error)
+
+        # 修好之后，同一批弹幕仍在队列里，下一轮照常消费
+        await self.storage.upsert_prompt("Say: {{ chat_messages }}", "neuro_user")
+        await self.templates.load()
+        with patch("neuro_simulator.stream.loop.NeuroClient", _CapturingClient):
+            await self.loop._run_round(self.settings, self.session)
+        self.assertIn("- viewer: hello", sent[-1])
+        self.assertEqual(self.session["cursor"], 1)
+        self.assertIsNone(self.templates.template_error)
 
     async def test_only_two_message_templates(self):
         names = [t["name"] for t in self.templates.list()]

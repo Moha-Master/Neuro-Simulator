@@ -89,6 +89,37 @@
             <v-list-item-title>Message Templates</v-list-item-title>
           </v-list-item>
         </v-list-group>
+        <v-list-group v-model="logsOpen" value="logs">
+          <template #activator="{ props }">
+            <v-list-item
+              v-bind="props"
+              :active="$route.path.startsWith('/logs')"
+            >
+              <template #prepend>
+                <v-icon>mdi-file-document-outline</v-icon>
+              </template>
+              <v-list-item-title>Logs</v-list-item-title>
+            </v-list-item>
+          </template>
+          <v-list-item to="/logs" :active="$route.path === '/logs'">
+            <template #prepend>
+              <v-icon>mdi-file-document-outline</v-icon>
+            </template>
+            <v-list-item-title>Logs (vedal)</v-list-item-title>
+          </v-list-item>
+          <v-list-item to="/logs-neuro" :active="$route.path === '/logs-neuro'">
+            <template #prepend>
+              <v-icon>mdi-brain</v-icon>
+            </template>
+            <v-list-item-title>Neuro Logs</v-list-item-title>
+          </v-list-item>
+          <v-list-item to="/logs-stream" :active="$route.path === '/logs-stream'">
+            <template #prepend>
+              <v-icon>mdi-cast</v-icon>
+            </template>
+            <v-list-item-title>Stream Logs</v-list-item-title>
+          </v-list-item>
+        </v-list-group>
       </v-list>
     </v-navigation-drawer>
 
@@ -151,6 +182,15 @@ watch(
   () => route.path,
   (p) => {
     if (p.startsWith('/stream')) streamOpen.value = true
+  },
+)
+
+// Logs 侧边栏分组：三项都在 /logs 前缀下（/logs-neuro、/logs-stream 也一样）
+const logsOpen = ref(route.path.startsWith('/logs'))
+watch(
+  () => route.path,
+  (p) => {
+    if (p.startsWith('/logs')) logsOpen.value = true
   },
 )
 </script>
