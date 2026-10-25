@@ -57,6 +57,8 @@ _PIECE_NAMES = {
     "k": "king",
 }
 
+_PIECE_VALUES = {"p": 1, "n": 3, "b": 3, "r": 5, "q": 9, "k": 0}
+
 _STATUS_TEXT = {
     "mate": "checkmate",
     "resign": "resignation",
@@ -94,6 +96,9 @@ class ChessGame(Game):
         self.winner: Optional[str] = None
         self.result: str = "*"
         self.last_move: Optional[Dict[str, str]] = None
+        # esca 的本地事实快照：只在重放棋局后算一次（facts() 0.2~0.4ms，状态 provider
+        # 是同步无 I/O 的，绝不能在那里现算）。viewer() 只读这份缓存。
+        self._facts: Optional[Dict[str, Any]] = None
         self.error: Optional[str] = None
         self.white_name = "Neuro"
         self.black_name = "Lichess AI"
@@ -149,6 +154,7 @@ class ChessGame(Game):
         self.initial_fen = START_FEN
         self.moves = []
         self.board = esca.Game()
+        self._facts = None
         self.status = "playing"
         self.lichess_status = "started"
         self.error = None
@@ -199,6 +205,245 @@ class ChessGame(Game):
         moves = len(state.get("moves") or [])
         check = "in check" if state.get("in_check") else "not in check"
         return f"{side} to move, {moves} moves in, {check}"
+
+    # ---------- 观众解说（chatbot 用；不查 Stockfish / Lichess eval） ----------
+
+    def viewer(self, state: Dict[str, Any]) -> str:
+        """面向观众的大众化英文解说：只读本地缓存的事实，不产生任何 I/O。
+
+        禁止 SAN/UCI（`Nf3`、`O-O`、`e2e4`）。`_facts` 缺失时退回 narrative，
+        宁可少说，也不在状态 provider 里现算 `facts()`。
+        """
+        status = str(state.get("status") or "")
+        if status not in ("playing", "ended"):
+            return self.narrative(state)
+        if self._facts is None:
+            return self.narrative(state)
+
+        sentences = [f"Chess vs {self._opponent_name()}."]
+        last_move = state.get("last_move") or {}
+        move_sentence = self._viewer_move(last_move)
+        if move_sentence:
+            sentences.append(move_sentence)
+
+        material = self._material_sentence(state)
+        if status == "ended":
+            sentences.extend(self._result_sentences(state))
+            if material:
+                sentences.append(material)
+            return " ".join(sentences[:5])
+
+        turn = str(state.get("turn") or self.turn)
+        turn_name = self._named_side(turn)
+        if state.get("in_check"):
+            sentences.append(f"It is {turn_name}'s turn and {turn_name} is in check.")
+        else:
+            sentences.append(f"It is {turn_name}'s turn.")
+        if material:
+            sentences.append(material)
+
+        clocks = self._clock_sentences(state)
+        # 战术事实最多 2 条，但要给低时钟留位置（总数 3~5 句）。
+        budget = max(0, min(2, 5 - len(sentences) - len(clocks)))
+        sentences.extend(self._tactics_sentences(state)[:budget])
+        sentences.extend(clocks)
+        return " ".join(sentences[:5])
+
+    def _named_side(self, color: Optional[str]) -> str:
+        return "Neuro" if color == self.my_color else self._opponent_name()
+
+    @staticmethod
+    def _piece_owner(piece: str) -> str:
+        return "white" if str(piece).isupper() else "black"
+
+    def _viewer_move(self, info: Dict[str, Any]) -> str:
+        """最后一步的观众版措辞（不含 SAN/UCI）。"""
+        if not info:
+            return ""
+        color = str(info.get("by") or "")
+        mover = self._named_side(color)
+        pronoun = "her" if color == self.my_color else "its"
+        san = str(info.get("san") or "")
+        target = info.get("to") or ""
+        captured = info.get("captured")
+
+        if san.startswith("O-O-O"):
+            return f"{mover} castled queenside."
+        if san.startswith("O-O"):
+            return f"{mover} castled kingside."
+        if "=" in san:
+            promoted = san.split("=")[-1].lstrip("(").rstrip("+#!")[:1].lower()
+            name = _PIECE_NAMES.get(promoted, "queen")
+            return f"{mover} promoted {pronoun} pawn to a {name} on {target}."
+        if captured:
+            victim = self._named_side(self._piece_owner(str(captured)))
+            name = _PIECE_NAMES.get(str(captured).lower(), "piece")
+            mover_piece = _PIECE_NAMES.get(str(info.get("piece") or "").lower(), "piece")
+            return f"{mover}'s {mover_piece} captured {victim}'s {name} on {target}."
+
+        name = _PIECE_NAMES.get(str(info.get("piece") or "").lower(), "piece")
+        return f"{mover} moved {pronoun} {name} to {target}."
+
+    def _material_sentence(self, state: Dict[str, Any]) -> str:
+        facts = self._facts or {}
+        values = ((facts.get("material") or {}).get("value") or {})
+        white = int(values.get("white") or 0)
+        black = int(values.get("black") or 0)
+        diff = (white - black) if self.my_color == "white" else (black - white)
+        if diff == 0:
+            return "Material is even."
+        parts = self._material_parts(abs(diff))
+        if not parts:
+            return ""
+        amount = self._join_parts(parts)
+        if diff > 0:
+            return f"Neuro is up {amount}."
+        return f"Neuro is down {amount}."
+
+    @staticmethod
+    def _material_parts(value: int) -> List[str]:
+        """把子力差拆成 9/5/3/1 的组合（皇后/车/轻子/兵）。"""
+        parts: List[str] = []
+        for worth, single, plural in ((9, "queen", "queens"), (5, "rook", "rooks"),
+                                      (3, "piece", "pieces"), (1, "pawn", "pawns")):
+            count, value = divmod(value, worth)
+            if count == 1:
+                parts.append(f"a {single}")
+            elif count > 1:
+                parts.append(f"{count} {plural}")
+        return parts
+
+    @staticmethod
+    def _join_parts(parts: List[str]) -> str:
+        if len(parts) == 1:
+            return parts[0]
+        if len(parts) == 2:
+            return f"{parts[0]} and {parts[1]}"
+        return ", ".join(parts[:-1]) + f" and {parts[-1]}"
+
+    def _result_sentences(self, state: Dict[str, Any]) -> List[str]:
+        """结束状态用 Lichess 的 status/winner（esca 的 outcome 不知道 resign/timeout）。"""
+        lichess = str(state.get("lichess_status") or "")
+        winner = state.get("winner")
+        if lichess == "mate":
+            if winner == self.my_color:
+                return ["Checkmate — Neuro won."]
+            if winner:
+                return [f"Checkmate — {self._opponent_name()} won."]
+            return ["Checkmate — draw."]
+        if lichess == "stalemate":
+            return ["Stalemate — draw."]
+        if lichess == "aborted":
+            return ["The game was aborted."]
+        if winner:
+            label = _STATUS_TEXT.get(lichess, lichess) or "game over"
+            return [f"{label.capitalize()} — {self._named_side(str(winner))} won."]
+        return ["Draw."]
+
+    def _tactics_sentences(self, state: Dict[str, Any]) -> List[str]:
+        """本地事实里的战术提示，按优先级最多两条。"""
+        facts = self._facts or {}
+        tactics = facts.get("tactics") or {}
+        turn = str(state.get("turn") or self.turn)
+        if turn not in ("white", "black"):
+            return []
+        opponent = "black" if turn == "white" else "white"
+        turn_name = self._named_side(turn)
+        opponent_name = self._named_side(opponent)
+        candidates: List[str] = []
+
+        mate_in_1 = tactics.get("mate_in_1") or {}
+        if mate_in_1.get(turn):
+            candidates.append(f"{turn_name} can checkmate in one move.")
+        elif mate_in_1.get(opponent):
+            candidates.append(f"{opponent_name} is threatening checkmate in one move.")
+        else:
+            hanging = (facts.get("attacks") or {}).get("hanging") or {}
+            pick = self._hanging_pick(hanging, opponent) or self._hanging_pick(hanging, turn)
+            if pick:
+                color, square, piece = pick
+                name = _PIECE_NAMES.get(piece, "piece")
+                candidates.append(
+                    f"{self._named_side(color)}'s {name} on {square} is undefended."
+                )
+            else:
+                winning = tactics.get("winning_capture_available") or {}
+                if winning.get(turn):
+                    gain = int((tactics.get("winning_capture_max_gain") or {}).get(turn) or 0)
+                    candidates.append(
+                        f"{turn_name} can win {self._value_phrase(gain)} for free."
+                    )
+
+        # 开局双方 back_rank_risk 都是 True，单看这个标志只会制造噪音：
+        # 必须对方确实存在底线杀威胁时才提，且报的是受害方。
+        risk = (facts.get("king") or {}).get("back_rank_risk") or {}
+        threats = (facts.get("tactics") or {}).get("back_rank_mate_threat") or {}
+        for victim in (opponent, turn):
+            attacker = "black" if victim == "white" else "white"
+            if risk.get(victim) and threats.get(attacker):
+                candidates.append(f"{self._named_side(victim)}'s back rank is weak.")
+                break
+
+        passers = (facts.get("pawns") or {}).get("passer_unstoppable") or {}
+        for color in (turn, opponent):
+            if passers.get(color):
+                candidates.append(
+                    f"{self._named_side(color)} has a pawn that cannot be stopped."
+                )
+                break
+
+        return candidates[:2]
+
+    def _hanging_pick(
+        self, hanging: Dict[str, Any], color: str
+    ) -> Optional[tuple[str, str, str]]:
+        """最高价值的悬子；返回 (颜色, 格子, 兵种字母)。"""
+        best: Optional[tuple[str, str, str]] = None
+        best_value = 0
+        for square in hanging.get(color) or []:
+            piece = self._piece_at_from_facts(str(square))
+            if not piece:
+                continue
+            value = _PIECE_VALUES.get(piece, 0)
+            if value > best_value:
+                best_value = value
+                best = (color, str(square), piece)
+        return best
+
+    def _piece_at_from_facts(self, square: str) -> str:
+        """从缓存的 placement 反查格子上的兵种字母（小写；不调用 facts()）。"""
+        placement = (self._facts or {}).get("placement") or {}
+        for key, piece in (
+            ("pawns", "p"), ("knights", "n"), ("bishops", "b"),
+            ("rooks", "r"), ("queens", "q"), ("kings", "k"),
+        ):
+            for squares in (placement.get(key) or {}).values():
+                if square in (squares or []):
+                    return piece
+        return ""
+
+    @staticmethod
+    def _value_phrase(gain: int) -> str:
+        if gain >= 9:
+            return "a queen"
+        if gain >= 5:
+            return "a rook"
+        if gain >= 3:
+            return "a piece"
+        return "a pawn"
+
+    def _clock_sentences(self, state: Dict[str, Any]) -> List[str]:
+        clock = state.get("clock") or {}
+        out: List[str] = []
+        for color in ("white", "black"):
+            ms = clock.get(f"{color}_ms")
+            if isinstance(ms, (int, float)) and ms < 30000:
+                seconds = max(0, int(ms // 1000))
+                out.append(
+                    f"{self._named_side(color)} is low on time "
+                    f"({seconds // 60}:{seconds % 60:02d})."
+                )
+        return out
 
     def state(self) -> Dict[str, Any]:
         legal = self._legal_uci() if self.status == "playing" else []
@@ -450,6 +695,7 @@ class ChessGame(Game):
         san = str(self.board.move_to_san(mv))
         destination = str(mv.destination)
         captured = pos.piece_at(destination)
+        piece = pos.piece_at(str(mv.origin))
         uci = self._uci_of(mv)
         if san.startswith("O-O"):
             # esca 用"王吃车"表示易位：mv.destination 是车格，不是王落点
@@ -460,6 +706,7 @@ class ChessGame(Game):
             "san": san,
             "from": str(mv.origin),
             "to": destination,
+            "piece": piece,
             "by": str(pos.side_to_move),
             "captured": captured,
         }
@@ -481,6 +728,18 @@ class ChessGame(Game):
                 self.error = f"Failed to replay Lichess move {uci!r}: {e}"
                 logger.warning(self.error)
                 break
+        self._refresh_facts()
+
+    def _refresh_facts(self) -> None:
+        """重放后缓存 esca 的本地事实（状态 provider / viewer 都只读缓存）。"""
+        if self.error:
+            self._facts = None
+            return
+        try:
+            self._facts = self.board.facts().to_dict()
+        except Exception as e:
+            self._facts = None
+            logger.warning("failed to compute chess facts: %s: %s", type(e).__name__, e)
 
     def _resolve_move(self, raw: str) -> str:
         text = raw.strip().strip("`'\"").rstrip(".")

@@ -162,6 +162,31 @@ class TestHighlightQueue(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(ev["id"], msg_id)
         self.assertNotIn("highlight_type", ev)
 
+    async def test_append_messages_batches_in_one_entrypoint(self):
+        """chatbot 批量入列：逐条广播、深度累加、整批只唤醒一次。"""
+        self.loop.session = self.session
+        calls: list[int] = []
+        original = self.loop.on_new_message
+
+        def _count():
+            calls.append(1)
+            original()
+
+        self.loop.on_new_message = _count  # type: ignore[method-assign]
+        q = self.bus.subscribe()
+        ids = await self.loop.append_messages([("a", "one"), ("b", "two")])
+
+        events = [q.get_nowait(), q.get_nowait()]
+        self.assertEqual([e["type"] for e in events], ["chat_message", "chat_message"])
+        self.assertEqual([e["id"] for e in events], ids)
+        self.assertEqual([e["content"] for e in events], ["one", "two"])
+        self.assertEqual(self.loop.queue_depth, 2)
+        self.assertEqual(self.loop.last_message_id, ids[-1])
+        self.assertEqual(len(calls), 1, "整批只能唤醒一次")
+
+        rows = await self.storage.list_messages(self.queue_row)
+        self.assertEqual([r["content"] for r in rows], ["one", "two"])
+
     async def test_pause_skips_highlight_track_without_advancing_cursor(self):
         n1 = await self.storage.append_message(self.queue_row, "a", "normal 1")
         p1 = await self.storage.append_message(

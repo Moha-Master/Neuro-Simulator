@@ -42,7 +42,7 @@ import random
 import time
 import uuid
 from datetime import datetime
-from typing import Any, Awaitable, Callable, Optional, Union
+from typing import Any, Awaitable, Callable, Optional, Sequence, Union
 
 from .. import scene_kit, state_kit
 from ..broadcaster import EventBroadcaster
@@ -448,11 +448,11 @@ class StreamLoop:
         # 而 chat 不该盖在开场动画上（真实开场没有弹幕）。
         self.on_scene(SCENE_ROOM_INTRO)
 
-        # 启动 chatbot 循环（本场标题/分区作为其消息模板的变量来源）
+        # 启动 chatbot 循环（本场标题/分区作为其消息模板的变量来源）。
+        # 入列与 HTTP 端点走同一个入口，广播/深度/唤醒行为完全一致。
         self.chatbot.start_session(
             queue_row,
-            self.on_new_message,
-            self._announce_chatbot_message,
+            self.append_messages,
             metadata_provider=self.session_metadata,
             context_provider=self.template_context,
         )
@@ -672,12 +672,6 @@ class StreamLoop:
             ev["value"] = value
         self.publish(ev)
 
-    def _announce_chatbot_message(self, msg_id: int, username: str, content: str) -> None:
-        """Chatbot 直接写库后的广播回调（不含唤醒，批量入列由 chat 循环统一触发）。"""
-        # chatbot 绕过 append_message 直接写库，深度缓存要在同一条真实路径上补记
-        self._note_appended(None, msg_id)
-        self._announce_message(msg_id, username, content)
-
     def _note_appended(self, highlight_type: Optional[str], msg_id: int) -> None:
         """入列后的深度缓存（未消费数 + 最近消息 id）。"""
         if highlight_type:
@@ -686,6 +680,37 @@ class StreamLoop:
             self.queue_depth += 1
         self.last_message_id = max(self.last_message_id, int(msg_id))
         self._touch("chat")
+
+    async def _append_rows(
+        self,
+        rows: Sequence[tuple[str, str]],
+        *,
+        highlight_type: Optional[str] = None,
+        value: int = 0,
+    ) -> list[int]:
+        """批量入列的唯一写入口（HTTP 单条 / chatbot 整批共用）。
+
+        逐条写库 → 广播 → 记深度；整批结束后只唤醒一次。返回各条消息 id。
+        """
+        if self.session is None:
+            raise StreamConflict("当前没有进行中的直播场次，消息无处入列")
+        ids: list[int] = []
+        for username, content in rows:
+            msg_id = await self.storage.append_message(
+                self.session["queue_row"],
+                username,
+                content,
+                highlight_type=highlight_type,
+                value=value,
+            )
+            self._announce_message(
+                msg_id, username, content, highlight_type=highlight_type, value=value
+            )
+            self._note_appended(highlight_type, msg_id)
+            ids.append(msg_id)
+        if ids:
+            self.on_new_message()
+        return ids
 
     async def append_message(
         self,
@@ -696,21 +721,14 @@ class StreamLoop:
         value: int = 0,
     ) -> int:
         """API 入列：写库 → 广播 → 唤醒（静默等待模式）。"""
-        if self.session is None:
-            raise StreamConflict("当前没有进行中的直播场次，消息无处入列")
-        msg_id = await self.storage.append_message(
-            self.session["queue_row"],
-            username,
-            content,
-            highlight_type=highlight_type,
-            value=value,
+        ids = await self._append_rows(
+            [(username, content)], highlight_type=highlight_type, value=value
         )
-        self._announce_message(
-            msg_id, username, content, highlight_type=highlight_type, value=value
-        )
-        self._note_appended(highlight_type, msg_id)
-        self.on_new_message()
-        return msg_id
+        return ids[0]
+
+    async def append_messages(self, messages: Sequence[tuple[str, str]]) -> list[int]:
+        """chatbot 批量入列：普通消息，逐条广播、整批只唤醒一次。"""
+        return await self._append_rows(messages)
 
     # ---------- 主循环 ----------
 

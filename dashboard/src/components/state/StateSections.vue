@@ -243,6 +243,13 @@ const chatbotRows = computed<Row[]>(() => {
     { label: 'max_concurrent', value: fmt(v.max_concurrent) },
     { label: 'interval_jitter', value: fmt(v.interval_jitter) },
     { label: 'in_flight', value: fmt(v.in_flight) },
+    { label: 'discarded', value: fmt(v.discarded) },
+    {
+      label: 'last_discard',
+      value: v.last_discard
+        ? `${v.last_discard.reason}: ${v.last_discard.preview}`
+        : '—',
+    },
   ]
 })
 

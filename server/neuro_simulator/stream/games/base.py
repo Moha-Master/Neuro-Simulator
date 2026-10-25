@@ -57,6 +57,10 @@ class Game(ABC):
         """
         return str(state.get("status") or "")
 
+    def viewer(self, state: Dict[str, Any]) -> str:
+        """面向观众的紧凑解说（大众化语言）；stream 原样转发。默认复用 narrative()。"""
+        return self.narrative(state)
+
     def exit(self) -> Union[str, Awaitable[str]]:
         return f"Left the {self.label} game."
 

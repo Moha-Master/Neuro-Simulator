@@ -100,6 +100,8 @@ STREAM_SHAPE = Shape(
             "max_concurrent": T("int"),
             "interval_jitter": T("float", "int"),
             "in_flight": T("int"),
+            "discarded": T("int"),
+            "last_discard": T("dict", "none"),
             "template_error": T("dict", "none"),
         },
         "games": {

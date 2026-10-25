@@ -148,6 +148,10 @@ export interface ChatbotRuntime {
   max_concurrent: number
   interval_jitter: number
   in_flight: number
+  /** tool call 之外/失败的工具调用被静默丢弃的累计次数 */
+  discarded: number
+  /** 最近一次丢弃（reason + preview），成功批次不清空 */
+  last_discard: { at: string; reason: string; preview: string } | null
   /** 消息模板最近一次实况渲染失败（成功即清除） */
   template_error: TemplateErrorStatus | null
 }
@@ -163,6 +167,8 @@ export interface GameEntry {
   phase: string | null
   /** 游戏自己给的一句叙事（英文，不含棋盘细节） */
   summary: string
+  /** 面向观众的大众化解说（chatbot 用；同样不含 SAN/UCI） */
+  viewer: string
   /** 原始 element_state 快照（与画面广播同一份对象） */
   element: Record<string, unknown>
 }

@@ -134,6 +134,9 @@ const runtime = computed(
       max_concurrent: 0,
       interval_jitter: 0,
       in_flight: 0,
+      discarded: 0,
+      last_discard: null,
+      template_error: null,
     },
 )
 

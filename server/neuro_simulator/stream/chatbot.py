@@ -19,12 +19,14 @@ Neuro 的三态叙述（刚开播 / 说了什么 / 疑似睡着）**不在代码
 """
 
 import asyncio
+import json
 import logging
 import random
 import re
 import time
+import uuid
 from collections import deque
-from typing import Callable, Optional
+from typing import Awaitable, Callable, Optional
 
 from openai import AsyncOpenAI
 
@@ -57,14 +59,66 @@ _EMOTE_CANON = {
 }
 _EMOTE_WORD = re.compile(r"[A-Za-z][A-Za-z0-9]*")
 
-_HISTORY_LIMIT = 20
+_HISTORY_BATCHES = 6
 # chatbot 模板能看到多少条"观众最近消息"（含自己发的行；人设 prompt 要求不复述）
 _RECENT_CHAT = 12
 # 同场次内已入列消息的签名窗口：模型爱复述自己上一批的"金句"，
 # 这里做一层廉价去重，避免刷屏式重复（并发下也兜住同一批被重复提交的极端情况）。
 _DEDUP_WINDOW = 300
 
+# 工具调用是唯一的发言通道：普通 assistant 正文一律丢弃。
+_CHAT_TOOL = "send_chat_message"
+
+# tool_choice 兼容档位：先点名具体函数，网关不认再退 required / auto。
+# 档位在进程内缓存（不随场次重置），避免每个 session 都重新撞一次 400。
+_TOOL_CHOICES: tuple[object, ...] = (
+    {"type": "function", "function": {"name": _CHAT_TOOL}},
+    "required",
+    "auto",
+)
+
+_CHAT_CONTRACT = (
+    "\n\n# Chat output contract\n"
+    "Your normal reply text is never shown to viewers: only tool calls are visible. "
+    f"You MUST call the `{_CHAT_TOOL}` tool to speak; each item in `messages` is one "
+    "complete chat line from one viewer. Do not add usernames, numbering, markdown, "
+    "or explanations. If any format instruction above conflicts with this, the tool "
+    "call wins."
+)
+
 MetadataProvider = Callable[[], "tuple[str, str]"]
+AppendMessages = Callable[[list[tuple[str, str]]], Awaitable[list[int]]]
+
+
+def _tool_schema(count: int) -> dict:
+    """按本轮条数生成工具 schema（maxItems 跟 config 走）。"""
+    return {
+        "type": "function",
+        "function": {
+            "name": _CHAT_TOOL,
+            "description": (
+                "Send one or more messages to the live Twitch chat as viewer(s). "
+                "This is the only way to speak; your normal reply text is discarded. "
+                "Each item is one complete chat line from one viewer."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "messages": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "minItems": 1,
+                        "maxItems": max(1, int(count)),
+                        "description": (
+                            "Chat lines, one per viewer. Plain text, no usernames, "
+                            "no numbering."
+                        ),
+                    }
+                },
+                "required": ["messages"],
+            },
+        },
+    }
 
 
 class ChatbotManager:
@@ -75,8 +129,7 @@ class ChatbotManager:
         self._scheduler: Optional[asyncio.Task] = None
         self._tasks: set[asyncio.Task] = set()
         self._queue_row: Optional[int] = None
-        self._on_new_message: Optional[Callable[[], None]] = None
-        self._on_message: Optional[Callable[[int, str, str], None]] = None
+        self._append_messages: Optional[AppendMessages] = None
         self._metadata: MetadataProvider = lambda: ("", "")
         # 内容平面缓存：本轮正文 + 最近一次 neuro 状态（剥掉 envelope/graph 的 dict）。
         # 它们只喂给模板，不在 chatbot 侧做任何"睡没睡着"的判定。
@@ -84,7 +137,9 @@ class ChatbotManager:
         self._neuro_status: dict = {}
         # loop 注入：messages 文本 → 完整 Jinja context（含 stream_status）
         self._context_provider: Optional[Callable[[str], dict]] = None
-        self._history: list[dict] = []
+        # 按批保存：每批 = assistant(tool_calls) + tool 结果。半截 tool 对会让
+        # 部分网关直接 400，所以裁剪只能整批丢。
+        self._history: list[list[dict]] = []
         self._history_lock = asyncio.Lock()
         self._seen: set[str] = set()
         self._seen_order: deque[str] = deque(maxlen=_DEDUP_WINDOW)
@@ -92,21 +147,23 @@ class ChatbotManager:
         self._skipped = False
         self._client: Optional[AsyncOpenAI] = None
         self._client_key: tuple | None = None
+        # 工具档位与丢弃计数都是进程级可观测事实；start_session 只重置后者。
+        self._tool_choice_index: int = 0
+        self.discarded: int = 0
+        self.last_discard: Optional[dict] = None
 
     # ---------- 生命周期 ----------
 
     def start_session(
         self,
         queue_row: int,
-        on_new_message_cb: Callable[[], None],
-        on_message_cb: Optional[Callable[[int, str, str], None]] = None,
+        append_messages_cb: AppendMessages,
         metadata_provider: Optional[MetadataProvider] = None,
         context_provider: Optional[Callable[[str], dict]] = None,
     ) -> None:
         self.stop_session()
         self._queue_row = queue_row
-        self._on_new_message = on_new_message_cb
-        self._on_message = on_message_cb
+        self._append_messages = append_messages_cb
         self._metadata = metadata_provider or (lambda: ("", ""))
         self._context_provider = context_provider
         self._neuro_said = ""
@@ -115,6 +172,10 @@ class ChatbotManager:
         self._seen = set()
         self._seen_order = deque(maxlen=_DEDUP_WINDOW)
         self._skipped = False
+        self.discarded = 0
+        self.last_discard = None
+        # 注意：不重置 _tool_choice_index。网关兼容性是进程级事实，降级后
+        # 后续场次直接沿用，不必每场重新撞一次 400。
         self._scheduler = asyncio.create_task(self._scheduler_loop())
         print(f"[stream.chatbot] Session {queue_row} chatbot loop started", flush=True)
 
@@ -127,8 +188,7 @@ class ChatbotManager:
                 task.cancel()
         self._tasks.clear()
         self._queue_row = None
-        self._on_new_message = None
-        self._on_message = None
+        self._append_messages = None
         self._context_provider = None
 
     async def aclose(self) -> None:
@@ -260,36 +320,26 @@ class ChatbotManager:
             # `templates.render` 已经把错误记进 chatbot.template_error，这里不重复记，
             # 也不让异常冒出任务（否则 asyncio 会甩"Task exception was never retrieved"）。
             return
-        system_prompt = self.persona.render_prompt(cb.count)
+        system_prompt = self.persona.render_prompt(cb.count) + _CHAT_CONTRACT
         async with self._history_lock:
-            history = list(self._history)
+            history = [msg for batch in self._history for msg in batch]
 
-        try:
-            client = await self._client_for(cb)
-            resp = await client.chat.completions.create(
-                model=cb.model,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    *history,
-                    {"role": "user", "content": user_content},
-                ],
-                max_tokens=300,
-                temperature=0.8,
-                extra_body=cb.extra_body or None,
-            )
-            raw_output = resp.choices[0].message.content or ""
-        except asyncio.CancelledError:
-            raise
-        except Exception as e:
-            logger.warning(f"Chatbot LLM call failed: {type(e).__name__}: {e}")
+        message = await self._request_completion(
+            cb, system_prompt, history, user_content
+        )
+        if message is None:
             return
 
-        if not raw_output.strip():
+        raw_output, content_preview = self._read_tool_calls(message)
+        if raw_output is None:
             return
-
         bodies = self._parse_output(raw_output, cb.count)
+        if not bodies:
+            self._discard("empty", content_preview)
+            return
+
         queue_row = self._queue_row
-        if not bodies or queue_row is None:
+        if queue_row is None or self._append_messages is None:
             return
         fresh: list[tuple[str, str]] = []
         for body in bodies:
@@ -301,27 +351,163 @@ class ChatbotManager:
             # 用 (纳秒时间戳, 内容) 播种：每条消息独立随机，不做撞名规避
             # （真实 chat 里同一个人连发多条很正常）。
             fresh.append((random_username(f"{time.time_ns()}:{body}"), body))
-        # 历史只记实际发出去的行：模型爱复述自己上一批的"金句"，
-        # 把重复内容回灌只会让它越抄越起劲。
-        async with self._history_lock:
-            self._history.append({"role": "user", "content": user_content})
-            self._history.append(
-                {
-                    "role": "assistant",
-                    "content": "\n".join(f"{u}: {m}" for u, m in fresh) or "(nothing posted)",
-                }
-            )
-            if len(self._history) > _HISTORY_LIMIT:
-                self._history = self._history[-_HISTORY_LIMIT:]
-
         if not fresh:
+            # 全部重复是正常现象（模型复述金句），不是失败：不记 discard、不写历史。
             return
-        for uname, msg in fresh:
-            msg_id = await self.storage.append_message(queue_row, uname, msg)
-            if self._on_message:
-                self._on_message(msg_id, uname, msg)
-        if self._on_new_message:
-            self._on_new_message()
+
+        try:
+            await self._append_messages(fresh)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            # 入列是 loop 的职责；它失败只说明本轮没发出去，不能让任务异常冒出去
+            logger.warning(f"Chatbot append failed: {type(e).__name__}: {e}")
+            return
+
+        self._record_history(fresh)
+
+    async def _request_completion(
+        self,
+        cb: settings.ChatbotSettings,
+        system_prompt: str,
+        history: list[dict],
+        user_content: str,
+    ):
+        """发一次 chat.completions；tool_choice 不兼容时就地降档重试。
+
+        返回 `message`；请求失败/全部档位都不可用时返回 None（discard 已记）。
+        """
+        tool = _tool_schema(cb.count)
+        while True:
+            choice = _TOOL_CHOICES[self._tool_choice_index]
+            try:
+                client = await self._client_for(cb)
+                resp = await client.chat.completions.create(
+                    model=cb.model,
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        *history,
+                        {"role": "user", "content": user_content},
+                    ],
+                    max_tokens=300,
+                    temperature=0.8,
+                    extra_body=cb.extra_body or None,
+                    tools=[tool],
+                    tool_choice=choice,
+                )
+                return resp.choices[0].message
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                if not self._is_tool_error(e):
+                    self._discard("api_error", f"{type(e).__name__}: {e}")
+                    return None
+                if self._tool_choice_index + 1 >= len(_TOOL_CHOICES):
+                    self._discard("tools_unsupported", f"{type(e).__name__}: {e}")
+                    return None
+                self._tool_choice_index += 1
+                logger.warning(
+                    "Chatbot tool_choice=%r 被网关拒绝（%s: %s），降级为 %r",
+                    choice,
+                    type(e).__name__,
+                    e,
+                    _TOOL_CHOICES[self._tool_choice_index],
+                )
+
+    @staticmethod
+    def _is_tool_error(exc: Exception) -> bool:
+        # 不能按状态码判定：400/422 里还混着 context length、auth、消息格式等
+        # 与工具无关的失败，误降档会重复请求并可能错记 tools_unsupported。
+        text = f"{exc} {getattr(exc, 'body', '')}".lower()
+        return any(k in text for k in ("tool_choice", "tools", "function"))
+
+    def _read_tool_calls(self, message) -> tuple[Optional[str], str]:
+        """从 assistant message 取工具参数。
+
+        返回 `(raw_text, content_preview)`；`raw_text is None` 表示本轮已记 discard。
+        普通正文只作为 `last_discard.preview` 的来源，**永远不入队**。
+        """
+        content = getattr(message, "content", "") or ""
+        calls = getattr(message, "tool_calls", None) or []
+        chunks: list[str] = []
+        matched = False
+        for call in calls:
+            function = getattr(call, "function", None)
+            if function is None and isinstance(call, dict):
+                function = call.get("function")
+            if function is None:
+                continue
+            name = getattr(function, "name", None)
+            if name is None and isinstance(function, dict):
+                name = function.get("name")
+            if name != _CHAT_TOOL:
+                continue
+            matched = True
+            arguments = getattr(function, "arguments", None)
+            if arguments is None and isinstance(function, dict):
+                arguments = function.get("arguments")
+            try:
+                payload = json.loads(arguments or "")
+            except (TypeError, ValueError):
+                self._discard("bad_arguments", content or str(arguments))
+                return None, content
+            if not isinstance(payload, dict) or "messages" not in payload:
+                self._discard("bad_arguments", content or str(arguments))
+                return None, content
+            value = payload["messages"]
+            if isinstance(value, str):
+                chunks.append(value)
+            elif isinstance(value, list):
+                chunks.extend(item for item in value if isinstance(item, str))
+            else:
+                self._discard("bad_arguments", content or str(arguments))
+                return None, content
+
+        if not matched:
+            self._discard("no_tool_call", content)
+            return None, content
+        return "\n".join(chunks), content
+
+    def _record_history(self, fresh: list[tuple[str, str]]) -> None:
+        """只记录实际入列的整批（assistant tool_calls + tool 结果）。"""
+        texts = [body for _, body in fresh]
+        call_id = f"call_{uuid.uuid4().hex[:12]}"
+        batch = [
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": call_id,
+                        "type": "function",
+                        "function": {
+                            "name": _CHAT_TOOL,
+                            "arguments": json.dumps({"messages": texts}, ensure_ascii=False),
+                        },
+                    }
+                ],
+            },
+            {
+                "role": "tool",
+                "tool_call_id": call_id,
+                "content": f"Posted {len(texts)} messages.",
+            },
+        ]
+        self._history.append(batch)
+        if len(self._history) > _HISTORY_BATCHES:
+            self._history = self._history[-_HISTORY_BATCHES:]
+
+    def _discard(self, reason: str, preview: object) -> None:
+        """记录一次静默丢弃（不入队、不写历史）。"""
+        self.discarded += 1
+        one_line = " ".join(str(preview or "").split())
+        self.last_discard = {
+            "at": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "reason": reason,
+            "preview": one_line[:120],
+        }
+        log = logger.info if reason == "no_tool_call" else logger.warning
+        log("Chatbot discarded (%s): %s", reason, self.last_discard["preview"])
 
     def _remember(self, key: str) -> None:
         """记录已入列签名；窗口满时按 FIFO 淘汰最旧的。"""

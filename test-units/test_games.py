@@ -151,6 +151,33 @@ class TestWordleGame(unittest.TestCase):
         game.submit()
         self.assertIn("won in 2 of 6 guesses", game.narrative(game.state()))
 
+    def test_viewer_is_public_summary_and_hides_answer(self):
+        game = game_with_answer("CRANE")
+        text = game.viewer(game.state())
+        self.assertIn("Wordle, 5 letters, 0/6 guesses.", text)
+        self.assertIn("No guesses yet.", text)
+        self.assertNotIn("CRANE", text)
+
+        game.type_letters("SLATE")
+        game.submit()
+        text = game.viewer(game.state())
+        self.assertIn("SLATE:", text)
+        self.assertIn("green", text)
+        self.assertIn("yellow", text)
+        self.assertNotIn("CRANE", text, "进行中绝不能泄露答案")
+
+    def test_viewer_reveals_answer_after_win_or_loss(self):
+        game = game_with_answer("CRANE")
+        game.type_letters("CRANE")
+        game.submit()
+        self.assertIn("Solved! The answer was CRANE.", game.viewer(game.state()))
+
+        lost = game_with_answer("CRANE")
+        for guess in ("SLATE", "DUMBS", "FIGHT", "VENOM", "BOOZY", "BREAD"):
+            lost.type_letters(guess)
+            lost.submit()
+        self.assertIn("Out of guesses. The answer was CRANE.", lost.viewer(lost.state()))
+
     def test_state_snapshot_hides_answer_while_playing(self):
         game = game_with_answer("CRANE")
         game.type_letters("SL")
@@ -278,8 +305,7 @@ class TestChessMirror(unittest.TestCase):
         game.status = "playing"
         game.my_color = "white"
         game.color_known = True
-        if moves:
-            game._set_moves(moves)
+        game._set_moves(moves)
         return game
 
     def test_color_is_detected_from_game_full(self):
@@ -350,6 +376,67 @@ class TestChessMirror(unittest.TestCase):
         self.assertNotIn("e2e4", text)
         self.assertNotIn("Nf3", text)
         self.assertNotIn("/", text, "不能出现 FEN")
+
+    def test_move_info_has_piece(self):
+        game = self.make_game()
+        mv = game.board.position.parse_uci("g1f3")
+        info = game._move_info(mv)
+        self.assertEqual(info["piece"], "N")
+
+    def test_viewer_is_public_and_has_no_san_or_uci(self):
+        game = self.make_game("e2e4 e7e5 g1f3")
+        text = game.viewer(game.state())
+        self.assertIn("moved her knight to f3", text)
+        self.assertNotIn("Nf3", text)
+        self.assertNotIn("g1f3", text)
+        self.assertNotIn("White to move", text)
+        self.assertNotIn("e2e4", text)
+
+    def test_viewer_reports_capture_and_material(self):
+        game = self.make_game("e2e4 d7d5 e4d5")
+        text = game.viewer(game.state())
+        self.assertIn("captured", text)
+        self.assertIn("pawn captured", text)
+        self.assertIn("up a pawn", text)
+
+    def test_viewer_reports_castling(self):
+        game = self.make_game("e2e4 e7e5 g1f3 b8c6 f1c4 f8c5 e1g1")
+        self.assertIn("castled kingside", game.viewer(game.state()))
+
+    def test_viewer_reports_checkmate_with_opponent_name(self):
+        game = self.make_game("f2f3 e7e5 g2g4 d8h4")
+        game.black_name = "Stockfish level 3"
+        game.status = "ended"
+        game.lichess_status = "mate"
+        game.winner = "black"
+        text = game.viewer(game.state())
+        self.assertIn("Checkmate", text)
+        self.assertIn("Stockfish level 3 won", text)
+
+    def test_viewer_reports_low_clock(self):
+        game = self.make_game()
+        game.clock["white_ms"] = 12000
+        text = game.viewer(game.state())
+        self.assertIn("low on time", text)
+        self.assertIn("0:12", text)
+
+    def test_viewer_reports_material_deficit(self):
+        game = self.make_game()
+        game.initial_fen = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/1NBQKBNR w Kkq - 0 1"
+        game._set_moves("")
+        self.assertIn("down a rook", game.viewer(game.state()))
+
+    def test_viewer_has_no_back_rank_noise_at_start(self):
+        game = self.make_game()
+        self.assertNotIn("back rank", game.viewer(game.state()))
+
+    def test_viewer_reports_back_rank_only_when_mate_threat_is_real(self):
+        game = self.make_game()
+        # White 的 Re8# 威胁；受害者是黑方（Lichess AI）
+        game.initial_fen = "6k1/5ppp/8/8/8/8/8/4R1K1 w - - 0 1"
+        game._set_moves("")
+        text = game.viewer(game.state())
+        self.assertIn("Lichess AI's back rank is weak.", text)
 
     def test_legal_moves_are_listed_as_san(self):
         game = self.make_game()

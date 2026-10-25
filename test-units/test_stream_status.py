@@ -119,6 +119,9 @@ class _FakeGame:
     def narrative(self, state):
         return "playing, 0 of 6 guesses used"
 
+    def viewer(self, state):
+        return "Wordle, 5 letters, 0/6 guesses. No guesses yet."
+
 
 class _FakeHub:
     def __init__(self) -> None:
@@ -304,10 +307,15 @@ class TestStreamStatus(unittest.IsolatedAsyncioTestCase):
         entry = games["wordle"]
         self.assertEqual(entry["phase"], "typing")
         self.assertEqual(entry["summary"], "playing, 0 of 6 guesses used")
+        self.assertEqual(
+            entry["viewer"], "Wordle, 5 letters, 0/6 guesses. No guesses yet."
+        )
         # element 必须复用 GameHub.element_states() 的那份对象，不复制
         self.assertIs(entry["element"], hub.active.snapshot)
         self.assertEqual(
-            sorted(entry), ["element", "phase", "summary"], "三层结构不能被原始快照字段撑开"
+            sorted(entry),
+            ["element", "phase", "summary", "viewer"],
+            "三层结构不能被原始快照字段撑开",
         )
         self.assertIsNone(entry["element"]["answer"], "结束前不得揭晓答案")
         graph = self._status()["sections"]["games"]["graph"]
@@ -320,12 +328,22 @@ class TestStreamStatus(unittest.IsolatedAsyncioTestCase):
         self.assertIn("prompt_context", scene)
         self.assertTrue(scene["prompt_context"], "Wordle 场景应带规则指令")
 
-    async def test_chatbot_partition_reports_template_error(self):
+    async def test_chatbot_partition_reports_discards_and_template_error(self):
         """坏模板（绕过保存直写 DB 的遗留数据）→ 抛异常，但状态平面仍看得见。
 
         抛异常与可见性是配套的：本轮作废由 `chatbot.template_error` 交代原因，
         dashboard 的 State 页不会看到"一切正常"。
         """
+        self.loop.chatbot.discarded = 2
+        self.loop.chatbot.last_discard = {
+            "at": "2026-01-01 00:00:00",
+            "reason": "no_tool_call",
+            "preview": "hello",
+        }
+        cur = self._status()["sections"]["chatbot"]["current"]
+        self.assertEqual(cur["discarded"], 2)
+        self.assertEqual(cur["last_discard"]["reason"], "no_tool_call")
+
         await self.storage.upsert_prompt("{{ 'unterminated", "neuro_user")
         await self.templates.load()
         with self.assertRaises(TemplateRenderError):

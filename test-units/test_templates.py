@@ -60,7 +60,11 @@ def _context() -> dict:
             },
             "games": {
                 "active": "wordle",
-                "wordle": {"phase": "typing", "summary": "playing, 2 of 6 guesses used"},
+                "wordle": {
+                    "phase": "typing",
+                    "summary": "playing, 2 of 6 guesses used",
+                    "viewer": "Wordle, 5 letters, 2/6 guesses. SLATE: 1 green, 2 yellow.",
+                },
             },
         },
         "neuro_status": {"turn": {"silent_s": 90, "idle": True}},
@@ -321,14 +325,25 @@ class TestDefaultTemplates(unittest.IsolatedAsyncioTestCase):
 
         chatbot = self.store.content("chatbot_user")
         self.assertIn("neuro_status.turn.silent_s|int(0) > 45", chatbot)
+        # 默认模板带当前画面 + 游戏观众解说
+        self.assertIn("stream_status.scene.desc", chatbot)
+        self.assertIn(".viewer", chatbot)
         # chatbot 不看观众消息：模板里既没有消息块，也没有"别复述"的反向暗示
         self.assertNotIn("chat_messages", chatbot)
         self.assertNotIn("Recent messages", chatbot)
         self.assertNotIn("real viewers", chatbot)
+        # 保存路径的 G1/G2/静态路径必须放行（运行时下标只给 warning）
+        validation = self.store.validate("chatbot_user", chatbot)
+        self.assertTrue(validation["gate"]["g1_ok"])
+        self.assertTrue(validation["gate"]["g2_ok"])
 
     def test_defaults_render_with_real_shape(self):
         out = self.store.render("chatbot_user", _context())
         self.assertIn("Neuro seems fall asleep on stream...", out)
+        self.assertIn("On screen: A cozy room", out)
+        self.assertIn(
+            "Game: Wordle, 5 letters, 2/6 guesses. SLATE: 1 green, 2 yellow.", out
+        )
         self.assertNotIn("- alice: hello", out)  # 观众消息不进 chatbot 的输入
 
         out = self.store.render("neuro_user", _context())
@@ -377,7 +392,9 @@ class TestShapeDrift(unittest.TestCase):
             highlight_paused=False,
             highlight_source=None,
             last_message_id=3,
-            chatbot=SimpleNamespace(in_flight=0),
+            chatbot=SimpleNamespace(
+                in_flight=0, discarded=0, last_discard=None
+            ),
             templates=SimpleNamespace(template_error=None),
             games=SimpleNamespace(active_id=None, active=None),
             neuro_link={"reachable": False, "observed_at": None, "url": "", "error": None},

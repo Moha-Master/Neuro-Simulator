@@ -170,16 +170,19 @@ def _chatbot_current(loop: Any) -> dict:
         "max_concurrent": cb.max_concurrent,
         "interval_jitter": cb.interval_jitter,
         "in_flight": loop.chatbot.in_flight,
+        "discarded": loop.chatbot.discarded,
+        "last_discard": loop.chatbot.last_discard,
         # 消息模板最近一次实况渲染失败（成功即清除）；dashboard 的 State 页一眼可见
         "template_error": loop.templates.template_error,
     }
 
 
 def _games_current(loop: Any) -> dict:
-    """三层：`{active, <game_id>: {phase, summary, element}}`。
+    """三层 + 观众解说：`{active, <game_id>: {phase, summary, viewer, element}}`。
 
     `element` 直接复用 `GameHub.element_states()` 的那份对象（与画面广播同一份
-    快照），不重新构造、也不把 phase/summary 混进原始快照里。
+    快照），不重新构造、也不把 phase/summary/viewer 混进原始快照里。
+    `summary` 给 neuro（`narrative`），`viewer` 给 chatbot（大众化解说）。
     """
     hub = loop.games
     current: Dict[str, Any] = {"active": hub.active_id}
@@ -191,6 +194,7 @@ def _games_current(loop: Any) -> dict:
     current[game_id] = {
         "phase": _game_phase(game_id, snap),
         "summary": game.narrative(snap),
+        "viewer": game.viewer(snap),
         "element": snap,
     }
     return current

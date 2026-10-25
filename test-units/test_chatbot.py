@@ -2,6 +2,7 @@
 
 import asyncio
 import inspect
+import json
 import tempfile
 import time
 import unittest
@@ -9,10 +10,28 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from neuro_simulator.stream.chatbot import ChatbotManager
+from neuro_simulator.stream.chatbot import (
+    _CHAT_TOOL,
+    _HISTORY_BATCHES,
+    ChatbotManager,
+)
 from neuro_simulator.stream.persona import ChatbotPersonaStore, build_template_store
 from neuro_simulator.stream.settings import ChatbotSettings, ChessSettings, StreamSettings
 from neuro_simulator.stream.storage import Storage
+
+
+def _tool_message(lines: list[str], content: str = ""):
+    """造一个 OpenAI tool call 响应（arguments 是 JSON 字符串）。"""
+    call = SimpleNamespace(
+        id="call_test",
+        function=SimpleNamespace(
+            name=_CHAT_TOOL,
+            arguments=json.dumps({"messages": lines}),
+        ),
+    )
+    return SimpleNamespace(
+        choices=[SimpleNamespace(message=SimpleNamespace(content=content, tool_calls=[call]))]
+    )
 
 
 def _settings(**chatbot_overrides) -> StreamSettings:
@@ -59,7 +78,8 @@ def _settings(**chatbot_overrides) -> StreamSettings:
 class _FakeLLM:
     """按固定延迟返回 N 条弹幕的假客户端，同时记录并发峰值与调用次数。
 
-    每批内容都带 call 序号，因此"同一批被重复提交"这类缺陷会被去重逻辑暴露出来。
+    走 `send_chat_message`：每批内容都带 call 序号，因此"同一批被重复提交"这类
+    缺陷会被去重逻辑暴露出来。
     """
 
     def __init__(self, latency: float, lines: int = 2) -> None:
@@ -69,9 +89,13 @@ class _FakeLLM:
         self.active = 0
         self.max_active = 0
         self.last_messages: list[dict] = []
+        self.last_kwargs: dict = {}
+        self.tool_choices: list[object] = []
 
     async def create(self, **kwargs):
         self.last_messages = kwargs.get("messages") or []
+        self.last_kwargs = kwargs
+        self.tool_choices.append(kwargs.get("tool_choice"))
         self.calls += 1
         # 序号必须在 await **之前**取：并发完成时如果之后再读 self.calls，
         # 多个调用会拿到同一个序号 → 生成的文本相同 → 被产品的去重逻辑丢弃，
@@ -83,10 +107,38 @@ class _FakeLLM:
             await asyncio.sleep(self.latency)
         finally:
             self.active -= 1
-        body = "\n".join(f"viewer_{i}: hello from call {n} ({i})" for i in range(self.lines))
-        return SimpleNamespace(
-            choices=[SimpleNamespace(message=SimpleNamespace(content=body))]
-        )
+        lines = [f"hello from call {n} ({i})" for i in range(self.lines)]
+        return _tool_message(lines)
+
+    def as_client(self):
+        return SimpleNamespace(chat=SimpleNamespace(completions=self))
+
+
+class _FakeToolError(Exception):
+    def __init__(self, message: str, status_code: int = 400) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+
+
+class _ScriptedLLM:
+    """按脚本逐次返回响应 / 抛异常（tool_choice 降级、坏 JSON 等用）。"""
+
+    def __init__(self, script) -> None:
+        self.script = list(script)
+        self.calls = 0
+        self.last_messages: list[dict] = []
+        self.last_kwargs: dict = {}
+        self.tool_choices: list[object] = []
+
+    async def create(self, **kwargs):
+        self.calls += 1
+        self.last_messages = kwargs.get("messages") or []
+        self.last_kwargs = kwargs
+        self.tool_choices.append(kwargs.get("tool_choice"))
+        item = self.script.pop(0)
+        if isinstance(item, BaseException):
+            raise item
+        return item
 
     def as_client(self):
         return SimpleNamespace(chat=SimpleNamespace(completions=self))
@@ -112,8 +164,43 @@ class TestChatbot(unittest.IsolatedAsyncioTestCase):
         async def _client_for(cb):
             return fake.as_client()
 
+        async def _append(fresh):
+            ids = []
+            for username, content in fresh:
+                ids.append(await self.storage.append_message(queue_row, username, content))
+            return ids
+
         mgr._client_for = _client_for
-        mgr.start_session(queue_row, lambda: None, metadata_provider=lambda: ("T", "C"))
+        mgr.start_session(
+            queue_row, _append, metadata_provider=lambda: ("T", "C")
+        )
+        return mgr
+
+    def _bare_manager(self, fake: _FakeLLM | None = None) -> ChatbotManager:
+        mgr = ChatbotManager(self.storage, self.persona, self.templates)
+        if fake is not None:
+            async def _client_for(cb):
+                return fake.as_client()
+
+            mgr._client_for = _client_for
+        return mgr
+
+    async def _run_once(
+        self, fake: _FakeLLM, settings: StreamSettings, queue_row: int
+    ) -> ChatbotManager:
+        """直接跑一轮生成（不启动调度器，避免测试与定时器赛跑）。"""
+        mgr = self._bare_manager(fake)
+        mgr._queue_row = queue_row
+        mgr._metadata = lambda: ("T", "C")
+
+        async def _append(fresh):
+            ids = []
+            for username, content in fresh:
+                ids.append(await self.storage.append_message(queue_row, username, content))
+            return ids
+
+        mgr._append_messages = _append
+        await mgr._generate_once(settings.chatbot)
         return mgr
 
     async def _drain(self, mgr: ChatbotManager, fake: _FakeLLM, seconds: float):
@@ -305,20 +392,243 @@ class TestChatbot(unittest.IsolatedAsyncioTestCase):
 
         msgs = await self.storage.list_messages(queue_row)
         self.assertEqual(len(msgs), 1, f"重复行未被过滤：{[m['content'] for m in msgs]}")
-        assistant_lines = [
-            m["content"] for m in fake.last_messages if m.get("role") == "assistant"
-        ]
-        joined = "\n".join(assistant_lines)
+        # 历史里 assistant 的正文是 None：唯一能复述来源是 tool_calls 的参数
+        # 与 tool 结果；重复行只应出现一次。
+        fragments: list[str] = []
+        for message in fake.last_messages:
+            if message.get("role") == "tool":
+                fragments.append(str(message.get("content") or ""))
+            for call in message.get("tool_calls") or []:
+                fragments.append(str((call.get("function") or {}).get("arguments") or ""))
+        joined = "\n".join(fragments)
         self.assertEqual(joined.count("same old line"), 1, joined)
 
     async def _replay_once(self, fake: _FakeLLM, kwargs: dict):
         """前两次返回完全相同的一行，之后返回空（避免制造无意义的重复入列）。"""
         fake.last_messages = kwargs.get("messages") or []
+        fake.last_kwargs = kwargs
         fake.calls += 1
-        body = "viewer_x: same old line\n" if fake.calls <= 2 else ""
+        if fake.calls <= 2:
+            return _tool_message(["same old line"])
         return SimpleNamespace(
-            choices=[SimpleNamespace(message=SimpleNamespace(content=body))]
+            choices=[SimpleNamespace(message=SimpleNamespace(content="", tool_calls=None))]
         )
+
+    # ---------- 工具调用 ----------
+
+    async def test_tool_call_enqueues_cleaned_lines_with_generated_usernames(self):
+        queue_row, _ = await self.storage.create_queue("q")
+        fake = _ScriptedLLM([
+            _tool_message(["- hello LUL", "bob: neuroicant says hi", "4. calm down chat"])
+        ])
+        mgr = await self._run_once(fake, _settings(count=5), queue_row)
+
+        msgs = await self.storage.list_messages(queue_row)
+        self.assertEqual(
+            [m["content"] for m in msgs],
+            ["hello LUL", "neuroICANT says hi", "calm down chat"],
+        )
+        self.assertTrue(all(m["username"] for m in msgs))
+        self.assertEqual(mgr.discarded, 0)
+        # 请求里必须带工具与 tool_choice，普通 content 不作为输出
+        self.assertEqual(len(fake.last_kwargs["tools"]), 1)
+        self.assertEqual(fake.last_kwargs["tools"][0]["function"]["name"], _CHAT_TOOL)
+        self.assertIn("tool_choice", fake.last_kwargs)
+
+    async def test_multiple_tool_calls_flatten_newlines_and_truncate(self):
+        queue_row, _ = await self.storage.create_queue("q")
+
+        def _two_calls():
+            calls = [
+                SimpleNamespace(
+                    function=SimpleNamespace(
+                        name=_CHAT_TOOL,
+                        arguments=json.dumps({"messages": ["first\nsecond"]}),
+                    )
+                ),
+                SimpleNamespace(
+                    function=SimpleNamespace(
+                        name="some_other_tool",
+                        arguments=json.dumps({"messages": ["ignored"]}),
+                    )
+                ),
+                SimpleNamespace(
+                    function=SimpleNamespace(
+                        name=_CHAT_TOOL,
+                        arguments=json.dumps({"messages": ["third"]}),
+                    )
+                ),
+            ]
+            return SimpleNamespace(
+                choices=[SimpleNamespace(message=SimpleNamespace(content="", tool_calls=calls))]
+            )
+
+        fake = _ScriptedLLM([_two_calls()])
+        await self._run_once(fake, _settings(count=2), queue_row)
+        msgs = await self.storage.list_messages(queue_row)
+        self.assertEqual([m["content"] for m in msgs], ["first", "second"])
+
+    async def test_plain_content_without_tool_call_is_discarded(self):
+        queue_row, _ = await self.storage.create_queue("q")
+        fake = _ScriptedLLM([
+            SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        message=SimpleNamespace(content="hello chat", tool_calls=None)
+                    )
+                ]
+            )
+        ])
+        mgr = await self._run_once(fake, _settings(), queue_row)
+
+        self.assertEqual(await self.storage.list_messages(queue_row), [])
+        self.assertEqual(mgr.discarded, 1)
+        self.assertEqual(mgr.last_discard["reason"], "no_tool_call")
+        self.assertIn("hello chat", mgr.last_discard["preview"])
+
+    async def test_bad_json_arguments_are_discarded(self):
+        queue_row, _ = await self.storage.create_queue("q")
+        call = SimpleNamespace(
+            function=SimpleNamespace(name=_CHAT_TOOL, arguments="{not json")
+        )
+        fake = _ScriptedLLM([
+            SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        message=SimpleNamespace(content="", tool_calls=[call])
+                    )
+                ]
+            )
+        ])
+        mgr = await self._run_once(fake, _settings(), queue_row)
+        self.assertEqual(await self.storage.list_messages(queue_row), [])
+        self.assertEqual(mgr.discarded, 1)
+        self.assertEqual(mgr.last_discard["reason"], "bad_arguments")
+
+    async def test_all_duplicates_are_not_counted_as_discard(self):
+        queue_row, _ = await self.storage.create_queue("q")
+        fake = _ScriptedLLM([
+            _tool_message(["same old line"]),
+            _tool_message(["same old line"]),
+        ])
+        mgr = self._bare_manager(fake)
+        mgr._queue_row = queue_row
+        mgr._metadata = lambda: ("T", "C")
+
+        async def _append(fresh):
+            ids = []
+            for username, content in fresh:
+                ids.append(await self.storage.append_message(queue_row, username, content))
+            return ids
+
+        mgr._append_messages = _append
+        await mgr._generate_once(_settings().chatbot)
+        await mgr._generate_once(_settings().chatbot)
+
+        self.assertEqual(len(await self.storage.list_messages(queue_row)), 1)
+        self.assertEqual(mgr.discarded, 0)
+        self.assertIsNone(mgr.last_discard)
+
+    async def test_tool_choice_degrades_only_on_tool_related_errors(self):
+        queue_row, _ = await self.storage.create_queue("q")
+        fake = _ScriptedLLM([
+            _FakeToolError("tool_choice is not supported", status_code=400),
+            _tool_message(["works now"]),
+        ])
+        mgr = await self._run_once(fake, _settings(), queue_row)
+
+        self.assertEqual(fake.calls, 2)
+        self.assertEqual(fake.tool_choices[1], "required")
+        self.assertEqual(mgr._tool_choice_index, 1)
+        self.assertEqual(len(await self.storage.list_messages(queue_row)), 1)
+
+        # 非工具相关错误不降级，直接 api_error 丢弃
+        queue2, _ = await self.storage.create_queue("q2")
+        other = _ScriptedLLM([RuntimeError("gateway exploded")])
+        mgr2 = await self._run_once(other, _settings(), queue2)
+        self.assertEqual(other.calls, 1)
+        self.assertEqual(mgr2._tool_choice_index, 0)
+        self.assertEqual(mgr2.last_discard["reason"], "api_error")
+
+    async def test_context_length_400_does_not_downgrade(self):
+        queue_row, _ = await self.storage.create_queue("q")
+        fake = _ScriptedLLM([
+            _FakeToolError("context length exceeded", status_code=400),
+        ])
+        mgr = await self._run_once(fake, _settings(), queue_row)
+
+        self.assertEqual(fake.calls, 1)
+        self.assertEqual(mgr._tool_choice_index, 0)
+        self.assertEqual(mgr.last_discard["reason"], "api_error")
+
+    async def test_all_tool_choice_levels_failing_marks_tools_unsupported(self):
+        queue_row, _ = await self.storage.create_queue("q")
+        fake = _ScriptedLLM([
+            _FakeToolError("tools are not supported", status_code=400),
+            _FakeToolError("tools are not supported", status_code=400),
+            _FakeToolError("tools are not supported", status_code=400),
+        ])
+        mgr = await self._run_once(fake, _settings(), queue_row)
+        self.assertEqual(fake.calls, 3)
+        self.assertEqual(mgr.last_discard["reason"], "tools_unsupported")
+        self.assertEqual(mgr.discarded, 1)
+
+    async def test_system_prompt_contains_tool_contract(self):
+        queue_row, _ = await self.storage.create_queue("q")
+        fake = _ScriptedLLM([_tool_message(["hi"])])
+        await self._run_once(fake, _settings(), queue_row)
+        system = fake.last_messages[0]
+        self.assertEqual(system["role"], "system")
+        self.assertIn("send_chat_message", system["content"])
+        self.assertIn("normal reply text is never shown", system["content"])
+
+    async def test_history_is_batched_and_trimmed_by_whole_batches(self):
+        queue_row, _ = await self.storage.create_queue("q")
+        script = [_tool_message([f"line {i}"]) for i in range(_HISTORY_BATCHES + 1)]
+        fake = _ScriptedLLM(script)
+        mgr = self._bare_manager(fake)
+        mgr._queue_row = queue_row
+        mgr._metadata = lambda: ("T", "C")
+
+        async def _append(fresh):
+            ids = []
+            for username, content in fresh:
+                ids.append(await self.storage.append_message(queue_row, username, content))
+            return ids
+
+        mgr._append_messages = _append
+        for _ in range(_HISTORY_BATCHES + 1):
+            await mgr._generate_once(_settings().chatbot)
+
+        self.assertEqual(len(mgr._history), _HISTORY_BATCHES)
+        # 最后一次请求里，每条历史批都是完整的一对（assistant tool_calls + tool）
+        roles = [m["role"] for m in fake.last_messages]
+        self.assertEqual(roles.count("assistant"), _HISTORY_BATCHES)
+        self.assertEqual(roles.count("tool"), _HISTORY_BATCHES)
+        assistant = next(m for m in fake.last_messages if m["role"] == "assistant")
+        self.assertIsNone(assistant["content"])
+        self.assertEqual(assistant["tool_calls"][0]["function"]["name"], _CHAT_TOOL)
+        self.assertIn("Posted 1 messages.", "".join(
+            m["content"] for m in fake.last_messages if m["role"] == "tool"
+        ))
+
+    async def test_start_session_resets_discard_but_keeps_tool_choice(self):
+        queue_row, _ = await self.storage.create_queue("q")
+        mgr = self._bare_manager()
+        mgr.discarded = 7
+        mgr.last_discard = {"at": "x", "reason": "no_tool_call", "preview": "x"}
+        mgr._tool_choice_index = 2
+
+        async def _append(fresh):
+            return []
+
+        mgr.start_session(queue_row, _append)
+        try:
+            self.assertEqual(mgr.discarded, 0)
+            self.assertIsNone(mgr.last_discard)
+            self.assertEqual(mgr._tool_choice_index, 2, "工具档位是进程级缓存")
+        finally:
+            mgr.stop_session()
 
     # ---------- 人设 / 模板接线 ----------
 
@@ -335,7 +645,8 @@ class TestChatbot(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(messages[0]["role"], "system")
         self.assertIn("You are the chat of Neuro-sama", messages[0]["content"])
         self.assertIn("### Timeline", messages[0]["content"])  # core memory 已注入
-        self.assertIn("Exactly 2 chat messages", messages[0]["content"])  # {{count}}
+        self.assertIn("1 to 2 chat messages", messages[0]["content"])  # {{count}}
+        self.assertIn("send_chat_message", messages[0]["content"])  # 工具契约
         user = messages[-1]["content"]
         self.assertIn("Now streaming: T [C]", user)
         self.assertIn("Neuro just online now", user)

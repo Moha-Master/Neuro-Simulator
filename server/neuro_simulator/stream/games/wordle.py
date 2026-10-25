@@ -240,6 +240,38 @@ class WordleGame(Game):
             return f"lost after {used} of {MAX_ROWS} guesses"
         return f"playing, {used} of {MAX_ROWS} guesses used"
 
+    def viewer(self, state: Dict[str, Any]) -> str:
+        """面向观众的大众化解说：棋盘摘要 + 每行 green/yellow 数量。
+
+        进行中**绝不**提答案（`state["answer"]` 本来只在结束后有值，仍然防御）。
+        """
+        word_len = int(state.get("word_len") or 0)
+        used = int(state.get("guesses_used") or 0)
+        status = str(state.get("status") or "")
+        theme = " (Neuro-themed word)" if state.get("neuro_word") else ""
+        head = f"Wordle{theme}, {word_len} letters, {used}/{MAX_ROWS} guesses."
+
+        rows = state.get("rows") or []
+        statuses = state.get("statuses") or []
+        summaries: List[str] = []
+        for row, marks in zip(rows, statuses):
+            if not marks:
+                continue
+            guess = "".join(str(ch) for ch in row)
+            green = sum(1 for m in marks if m == CORRECT)
+            yellow = sum(1 for m in marks if m == PRESENT)
+            summaries.append(f"{guess}: {green} green, {yellow} yellow.")
+        if not summaries:
+            summaries.append("No guesses yet.")
+
+        tail = ""
+        answer = state.get("answer")
+        if status == "won" and answer:
+            tail = f" Solved! The answer was {answer}."
+        elif status == "lost" and answer:
+            tail = f" Out of guesses. The answer was {answer}."
+        return " ".join([head, *summaries]) + tail
+
     def state(self) -> Dict[str, Any]:
         return {
             "game": self.id,
