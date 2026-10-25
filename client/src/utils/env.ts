@@ -1,1 +1,0 @@
-export const IS_TAURI = typeof window !== 'undefined' && !!window.__TAURI__;
