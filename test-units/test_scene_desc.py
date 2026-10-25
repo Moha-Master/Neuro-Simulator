@@ -83,7 +83,7 @@ class TestOverviewCarriesDesc(unittest.TestCase):
         self.assertEqual(
             by_id["room"]["desc"],
             "The default shot: Neuro's room background fills the frame, her avatar is centred "
-            "with captions near the bottom, and chat plus priority overlays sit on the left.",
+            "with captions near the bottom, and the chat overlay sits on the left.",
         )
         body = TestClient(create_stream_app()).get("/stream/scenes").json()
         self.assertTrue(all(s["desc"] for s in body["scenes"]))

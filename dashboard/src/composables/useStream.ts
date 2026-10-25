@@ -140,7 +140,7 @@ export function useStream() {
   async function postMessage(
     username: string,
     content: string,
-    priority?: { type: 'bits' | 'points'; value: number },
+    highlight?: { type: 'bits' | 'points'; value: number },
   ): Promise<boolean> {
     error.value = ''
     try {
@@ -149,10 +149,26 @@ export function useStream() {
         body: JSON.stringify({
           username,
           content,
-          ...(priority ? { type: priority.type, value: priority.value } : {}),
+          ...(highlight ? { type: highlight.type, value: highlight.value } : {}),
         }),
       })
       void pollQueue()
+      return true
+    } catch (e) {
+      error.value = describeError(e)
+      return false
+    }
+  }
+
+  /** 暂停/恢复高亮消息队列消费（PUT /stream/highlight，来源记为 manual）。 */
+  async function setHighlightPaused(paused: boolean): Promise<boolean> {
+    error.value = ''
+    try {
+      await api(`/manage/${MODULE}/stream/highlight`, {
+        method: 'PUT',
+        body: JSON.stringify({ paused }),
+      })
+      await refreshStatus()
       return true
     } catch (e) {
       error.value = describeError(e)
@@ -189,6 +205,7 @@ export function useStream() {
     pollQueue,
     resetQueue,
     postMessage,
+    setHighlightPaused,
     deleteSession,
   }
 }

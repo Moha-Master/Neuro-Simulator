@@ -3,8 +3,8 @@
 表结构：
 - queues：观众消息队列（每场直播一个，queue_id 为对外 uuid）
 - queue_messages：队列消息（只加不减；自增 id 即注入水位线 cursor 的刻度）
-  双轨：priority_type 为空 = 普通消息；非空（bits/points）= 优先消息，
-  由 sessions.priority_cursor 独立消费，普通轨永不抽取优先消息。
+  双轨：highlight_type 为空 = 普通消息；非空（bits/points）= 高亮消息，
+  由 sessions.highlight_cursor 独立消费，普通轨永不抽取高亮消息。
 - sessions：直播场次（state: online / online_pause / offline；ended_at 为空 = 进行中）
 
 并发：单 event loop 单连接 + WAL + busy_timeout。
@@ -31,9 +31,9 @@ CREATE TABLE IF NOT EXISTS queue_messages (
     queue_row     INTEGER NOT NULL REFERENCES queues(id) ON DELETE CASCADE,
     username      TEXT NOT NULL,
     content       TEXT NOT NULL,
-    created_at    TEXT NOT NULL,
-    priority_type TEXT,
-    value         INTEGER NOT NULL DEFAULT 0
+    created_at     TEXT NOT NULL,
+    highlight_type TEXT,
+    value          INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS ix_queue_messages_queue ON queue_messages (queue_row, id);
 
@@ -46,8 +46,8 @@ CREATE TABLE IF NOT EXISTS sessions (
     state           TEXT NOT NULL DEFAULT 'online',
     started_at      TEXT NOT NULL,
     ended_at        TEXT,
-    cursor_msg      INTEGER NOT NULL DEFAULT 0,
-    priority_cursor INTEGER NOT NULL DEFAULT 0,
+    cursor_msg       INTEGER NOT NULL DEFAULT 0,
+    highlight_cursor INTEGER NOT NULL DEFAULT 0,
     rounds          INTEGER NOT NULL DEFAULT 0,
     title           TEXT,
     category        TEXT,
@@ -134,21 +134,37 @@ class Storage:
         await self._db.commit()
 
     async def _migrate(self) -> None:
-        """给既有库补列（CREATE TABLE IF NOT EXISTS 不会改已存在的表）。"""
-        await self._ensure_column("queue_messages", "priority_type", "priority_type TEXT")
+        """给既有库补列，并把旧的 priority_* 列改名为 highlight_*。
+
+        `CREATE TABLE IF NOT EXISTS` 不会改已存在的表；老库里的两列是
+        `priority_type` / `priority_cursor`。SQLite 的 RENAME COLUMN 保留数据，
+        先看 PRAGMA 再改，重复执行不会二次改名。
+        """
+        await self._rename_column("queue_messages", "priority_type", "highlight_type")
+        await self._rename_column("sessions", "priority_cursor", "highlight_cursor")
+        await self._ensure_column("queue_messages", "highlight_type", "highlight_type TEXT")
         await self._ensure_column(
             "queue_messages", "value", "value INTEGER NOT NULL DEFAULT 0"
         )
         await self._ensure_column(
-            "sessions", "priority_cursor", "priority_cursor INTEGER NOT NULL DEFAULT 0"
+            "sessions", "highlight_cursor", "highlight_cursor INTEGER NOT NULL DEFAULT 0"
         )
         await self._ensure_column("sessions", "title", "title TEXT")
         await self._ensure_column("sessions", "category", "category TEXT")
         await self._ensure_column("sessions", "tags", "tags TEXT")
 
-    async def _ensure_column(self, table: str, column: str, ddl: str) -> None:
+    async def _columns(self, table: str) -> set[str]:
         cur = await self.db.execute(f"PRAGMA table_info({table})")
-        cols = {row[1] for row in await cur.fetchall()}
+        return {row[1] for row in await cur.fetchall()}
+
+    async def _rename_column(self, table: str, old: str, new: str) -> None:
+        cols = await self._columns(table)
+        if old in cols and new not in cols:
+            # table/column 均为内部常量，不接受外部输入
+            await self.db.execute(f"ALTER TABLE {table} RENAME COLUMN {old} TO {new}")
+
+    async def _ensure_column(self, table: str, column: str, ddl: str) -> None:
+        cols = await self._columns(table)
         if column not in cols:
             # table/ddl 均为内部常量拼装，不接受外部输入
             await self.db.execute(f"ALTER TABLE {table} ADD COLUMN {ddl}")
@@ -183,15 +199,15 @@ class Storage:
         username: str,
         content: str,
         *,
-        priority_type: Optional[str] = None,
+        highlight_type: Optional[str] = None,
         value: int = 0,
     ) -> int:
-        """追加消息。priority_type 非空即进入优先轨（bits/points + value）。"""
+        """追加消息。highlight_type 非空即进入高亮轨（bits/points + value）。"""
         cur = await self.db.execute(
             "INSERT INTO queue_messages "
-            "(queue_row, username, content, created_at, priority_type, value) "
+            "(queue_row, username, content, created_at, highlight_type, value) "
             "VALUES (?, ?, ?, ?, ?, ?)",
-            (queue_row, username, content, _now(), priority_type, value),
+            (queue_row, username, content, _now(), highlight_type, value),
         )
         await self.db.commit()
         return int(cur.lastrowid)
@@ -201,7 +217,7 @@ class Storage:
     ) -> list[dict[str, Any]]:
         """尾读：id > after_id 的消息正序（dashboard 增量轮询 / 注入候选）。"""
         cur = await self.db.execute(
-            "SELECT id, username, content, created_at, priority_type, value "
+            "SELECT id, username, content, created_at, highlight_type, value "
             "FROM queue_messages WHERE queue_row=? AND id>? ORDER BY id LIMIT ?",
             (queue_row, after_id, limit),
         )
@@ -210,31 +226,31 @@ class Storage:
     async def list_normal_messages(
         self, queue_row: int, after_id: int = 0, limit: int = 200
     ) -> list[dict[str, Any]]:
-        """普通轨候选（排除优先消息）。"""
+        """普通轨候选（排除高亮消息）。"""
         cur = await self.db.execute(
-            "SELECT id, username, content, created_at, priority_type, value "
+            "SELECT id, username, content, created_at, highlight_type, value "
             "FROM queue_messages "
-            "WHERE queue_row=? AND id>? AND priority_type IS NULL ORDER BY id LIMIT ?",
+            "WHERE queue_row=? AND id>? AND highlight_type IS NULL ORDER BY id LIMIT ?",
             (queue_row, after_id, limit),
         )
         return [dict(r) for r in await cur.fetchall()]
 
-    async def list_priority_messages(
+    async def list_highlight_messages(
         self, queue_row: int, after_id: int = 0, limit: int = 1
     ) -> list[dict[str, Any]]:
-        """优先轨最早未消费消息（id > priority_cursor，正序）。"""
+        """高亮轨最早未消费消息（id > highlight_cursor，正序）。"""
         cur = await self.db.execute(
-            "SELECT id, username, content, created_at, priority_type, value "
+            "SELECT id, username, content, created_at, highlight_type, value "
             "FROM queue_messages "
-            "WHERE queue_row=? AND id>? AND priority_type IS NOT NULL ORDER BY id LIMIT ?",
+            "WHERE queue_row=? AND id>? AND highlight_type IS NOT NULL ORDER BY id LIMIT ?",
             (queue_row, after_id, limit),
         )
         return [dict(r) for r in await cur.fetchall()]
 
     async def recent_messages(self, queue_row: int, limit: int = 30) -> list[dict[str, Any]]:
-        """最近 N 条（含优先消息），正序返回；供 /ui snapshot 重连恢复聊天层。"""
+        """最近 N 条（含高亮消息），正序返回；供 /ui snapshot 重连恢复聊天层。"""
         cur = await self.db.execute(
-            "SELECT id, username, content, created_at, priority_type, value "
+            "SELECT id, username, content, created_at, highlight_type, value "
             "FROM queue_messages WHERE queue_row=? ORDER BY id DESC LIMIT ?",
             (queue_row, limit),
         )
@@ -250,20 +266,20 @@ class Storage:
         return dict(row) if row else None
 
     async def queue_depth_after(self, queue_row: int, cursor_msg: int) -> int:
-        """普通轨未消费深度（优先消息不计入）。"""
+        """普通轨未消费深度（高亮消息不计入）。"""
         cur = await self.db.execute(
             "SELECT COUNT(*) FROM queue_messages "
-            "WHERE queue_row=? AND id>? AND priority_type IS NULL",
+            "WHERE queue_row=? AND id>? AND highlight_type IS NULL",
             (queue_row, cursor_msg),
         )
         row = await cur.fetchone()
         return int(row[0])
 
-    async def priority_depth_after(self, queue_row: int, priority_cursor: int) -> int:
+    async def highlight_depth_after(self, queue_row: int, highlight_cursor: int) -> int:
         cur = await self.db.execute(
             "SELECT COUNT(*) FROM queue_messages "
-            "WHERE queue_row=? AND id>? AND priority_type IS NOT NULL",
-            (queue_row, priority_cursor),
+            "WHERE queue_row=? AND id>? AND highlight_type IS NOT NULL",
+            (queue_row, highlight_cursor),
         )
         row = await cur.fetchone()
         return int(row[0])
@@ -307,7 +323,7 @@ class Storage:
         state: Optional[str] = None,
         ended: bool = False,
         cursor_msg: Optional[int] = None,
-        priority_cursor: Optional[int] = None,
+        highlight_cursor: Optional[int] = None,
         inc_rounds: bool = False,
         title: Optional[str] = None,
         category: Optional[str] = None,
@@ -324,9 +340,9 @@ class Storage:
         if cursor_msg is not None:
             sets.append("cursor_msg=?")
             params.append(cursor_msg)
-        if priority_cursor is not None:
-            sets.append("priority_cursor=?")
-            params.append(priority_cursor)
+        if highlight_cursor is not None:
+            sets.append("highlight_cursor=?")
+            params.append(highlight_cursor)
         if title is not None:
             sets.append("title=?")
             params.append(title)
@@ -347,7 +363,7 @@ class Storage:
     async def get_active_session(self) -> Optional[dict[str, Any]]:
         cur = await self.db.execute(
             "SELECT s.id, s.session_id, s.queue_row, q.queue_id, s.channel, s.conversation_id, "
-            "s.state, s.started_at, s.cursor_msg, s.priority_cursor, s.rounds, "
+            "s.state, s.started_at, s.cursor_msg, s.highlight_cursor, s.rounds, "
             "s.title, s.category, s.tags "
             "FROM sessions s JOIN queues q ON q.id=s.queue_row "
             "WHERE s.ended_at IS NULL ORDER BY s.id DESC LIMIT 1"
@@ -358,7 +374,7 @@ class Storage:
     async def get_session(self, session_id: str) -> Optional[dict[str, Any]]:
         cur = await self.db.execute(
             "SELECT s.id, s.session_id, s.queue_row, q.queue_id, s.channel, s.conversation_id, "
-            "s.state, s.started_at, s.ended_at, s.priority_cursor, s.rounds, s.title, s.category, s.tags "
+            "s.state, s.started_at, s.ended_at, s.highlight_cursor, s.rounds, s.title, s.category, s.tags "
             "FROM sessions s JOIN queues q ON q.id=s.queue_row "
             "WHERE s.session_id=?",
             (session_id,),

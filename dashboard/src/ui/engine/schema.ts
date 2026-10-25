@@ -124,6 +124,9 @@ export interface SceneDef {
   icon?: string
   /** 注入 LLM 的本场景说明；空 = 回落到 config 的 stream.scene_context */
   prompt_context?: string
+  /** 该场景是否允许/显示高亮消息（stream: 是否消费高亮轨；neuro: 是否显示浮层）。
+   *  省略 = true。 */
+  highlight_messages?: boolean
   /** 默认 false；true = 只能程序化调用（on_scene），不出现在 dashboard /
    *  GET /stream/scenes，且 POST /scene 拒绝。starting_soon 这类内部场景设 true。 */
   hidden?: boolean
@@ -149,6 +152,6 @@ export interface SceneManifest {
   /** 进程启动/画面首帧落到的场景（neuro 窗口用） */
   default_scene?: string
   /** 代码需要认出的元素（工具动作、字幕实例都按这里的 id 取） */
-  refs?: { avatar?: string, caption?: string }
+  refs?: { avatar?: string, caption?: string, highlight?: string }
   scenes: SceneDef[]
 }

@@ -41,18 +41,18 @@
 
         <template v-for="m in messages" :key="m.id">
           <div
-            v-if="m.priority_type"
+            v-if="m.highlight_type"
             class="tw-chat__highlight"
-            :class="`tw-chat__highlight--${m.priority_type}`"
+            :class="`tw-chat__highlight--${m.highlight_type}`"
           >
             <div class="tw-chat__highlight-head">
               <TwitchIcon
-                :name="m.priority_type === 'bits' ? 'bits' : 'star'"
+                :name="m.highlight_type === 'bits' ? 'bits' : 'star'"
                 :size="14"
               />
               <span>高亮消息</span>
               <span v-if="m.value > 0" class="tw-chat__highlight-value">
-                {{ m.value }} {{ m.priority_type === 'bits' ? 'Bits' : 'Points' }}
+                {{ m.value }} {{ m.highlight_type === 'bits' ? 'Bits' : 'Points' }}
               </span>
             </div>
             <div class="tw-chat__line">
@@ -82,18 +82,18 @@
       <div v-if="active && !connected" class="tw-chat__banner">正在重新连接聊天…</div>
       <div v-else-if="!active" class="tw-chat__banner">聊天已关闭</div>
 
-      <div v-if="priorityMode" class="tw-cheer">
-        <TwitchIcon :name="priorityMode === 'bits' ? 'bits' : 'star'" :size="16" />
-        <span class="tw-cheer__label">{{ priorityMode === 'bits' ? 'Bits' : 'Points' }}</span>
+      <div v-if="highlightMode" class="tw-cheer">
+        <TwitchIcon :name="highlightMode === 'bits' ? 'bits' : 'star'" :size="16" />
+        <span class="tw-cheer__label">{{ highlightMode === 'bits' ? 'Bits' : 'Points' }}</span>
         <input
-          v-model.number="priorityValue"
+          v-model.number="highlightValue"
           class="tw-cheer__value"
           type="number"
           min="1"
           step="1"
           aria-label="金额"
         />
-        <button class="tw-cheer__cancel" type="button" @click="priorityMode = null">取消</button>
+        <button class="tw-cheer__cancel" type="button" @click="highlightMode = null">取消</button>
       </div>
 
       <div class="tw-chat__box" :class="{ 'tw-chat__box--disabled': !active }">
@@ -120,7 +120,7 @@
           type="button"
           title="欢呼（Bits）"
           :disabled="!active"
-          @click="togglePriority('bits')"
+          @click="toggleHighlight('bits')"
         >
           <TwitchIcon name="cheer" :size="20" />
         </button>
@@ -138,22 +138,22 @@
         <div class="tw-chat__toolbar-left">
           <button
             class="tw-chat__points"
-            :class="{ 'tw-chat__points--selected': priorityMode === 'bits' }"
+            :class="{ 'tw-chat__points--selected': highlightMode === 'bits' }"
             type="button"
             title="欢呼（Bits）"
             :disabled="!active"
-            @click="togglePriority('bits')"
+            @click="toggleHighlight('bits')"
           >
             <TwitchIcon name="bits" :size="18" />
             <span class="tw-chat__points-value">0</span>
           </button>
           <button
             class="tw-chat__points"
-            :class="{ 'tw-chat__points--selected': priorityMode === 'points' }"
+            :class="{ 'tw-chat__points--selected': highlightMode === 'points' }"
             type="button"
             title="频道点数"
             :disabled="!active"
-            @click="togglePriority('points')"
+            @click="toggleHighlight('points')"
           >
             <img class="tw-chat__points-icon" :src="channelPointsUrl" alt="" />
             <span class="tw-chat__points-value">0</span>
@@ -243,7 +243,7 @@ const props = defineProps<{
   connected: boolean
   send: (
     content: string,
-    priority?: { type: 'bits' | 'points'; value: number },
+    highlight?: { type: 'bits' | 'points'; value: number },
   ) => Promise<boolean>
 }>()
 
@@ -290,8 +290,8 @@ watch(showTimestamps, (value) => localStorage.setItem(TIMESTAMP_KEY, value ? '1'
 
 const text = ref('')
 const sending = ref(false)
-const priorityMode = ref<'bits' | 'points' | null>(null)
-const priorityValue = ref(100)
+const highlightMode = ref<'bits' | 'points' | null>(null)
+const highlightValue = ref(100)
 
 const canSend = computed(() => props.active && text.value.trim().length > 0)
 
@@ -362,25 +362,25 @@ watch(collapsed, async (value) => {
   scrollToBottom()
 })
 
-function togglePriority(mode: 'bits' | 'points'): void {
-  priorityMode.value = priorityMode.value === mode ? null : mode
+function toggleHighlight(mode: 'bits' | 'points'): void {
+  highlightMode.value = highlightMode.value === mode ? null : mode
 }
 
 async function submit(): Promise<void> {
   const content = text.value.trim()
   if (!content || !props.active || sending.value) return
   sending.value = true
-  const priority = priorityMode.value
+  const highlight = highlightMode.value
     ? {
-        type: priorityMode.value,
-        value: Math.max(1, Math.floor(Number(priorityValue.value) || 1)),
+        type: highlightMode.value,
+        value: Math.max(1, Math.floor(Number(highlightValue.value) || 1)),
       }
     : undefined
-  const ok = await props.send(content, priority)
+  const ok = await props.send(content, highlight)
   if (ok) {
     text.value = ''
     // Twitch 的 Cheer / 频道点数弹窗发送后即关闭
-    if (priority) priorityMode.value = null
+    if (highlight) highlightMode.value = null
   }
   sending.value = false
 }
@@ -495,7 +495,7 @@ async function submit(): Promise<void> {
   font-weight: 400;
 }
 
-/* ---- 优先消息 = Twitch Highlighted Message ---- */
+/* ---- 高亮消息 = Twitch Highlighted Message ---- */
 .tw-chat__highlight {
   margin: 4px 8px;
   padding: 5px 8px;
@@ -737,7 +737,7 @@ async function submit(): Promise<void> {
   opacity: 1;
 }
 
-/* ---- 优先消息输入（Bits / Points 金额） ---- */
+/* ---- 高亮消息输入（Bits / Points 金额） ---- */
 .tw-cheer {
   display: flex;
   align-items: center;

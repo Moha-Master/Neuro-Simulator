@@ -1,6 +1,6 @@
 """stream 场景清单的服务端视角（机制在 `..scene_kit`，这里只写 stream 的策略）。
 
-场景（背景/游戏/chat/highlight + neuro 窗口配置）是**服务端的数据**
+场景（背景/游戏/chat + neuro 窗口配置）是**服务端的数据**
 （`stream/defaults/scenes.json`，包内数据文件），服务端做五件事：
 
 1. 校验切场景的 id 是否存在且不是 `hidden` 内部场景（`POST /scene`、`on_scene`）；
@@ -166,6 +166,19 @@ def prompt_context(scene_id: Optional[str]) -> str:
     return str(scene.get("prompt_context") or "") if scene else ""
 
 
+def highlight_messages_enabled(scene_id: Optional[str]) -> bool:
+    """该 stream 场景是否允许高亮消息进入队列消费。
+
+    字段缺失 / 未知场景都按 True 处理（与"所有 stream 场景都启用"的现状一致），
+    只有场景数据显式写 false 才关闭。
+    """
+    scene = find(scene_id)
+    if scene is None:
+        return True
+    flag = scene.get("highlight_messages")
+    return flag if isinstance(flag, bool) else True
+
+
 def element_ids(scene_id: str) -> List[str]:
     return [str(e.get("id")) for e in require(scene_id).get("elements") or []]
 
@@ -229,6 +242,7 @@ def overview() -> List[Dict[str, Any]]:
             "icon": s.get("icon") or "mdi-image-frame",
             "desc": s.get("desc") or "",
             "prompt_context": s.get("prompt_context") or "",
+            "highlight_messages": highlight_messages_enabled(str(s.get("id") or "")),
             "elements": [
                 {
                     "id": e.get("id"),
@@ -304,6 +318,10 @@ def _validate(data: Any) -> None:
         # desc 是面向机器/LLM 的状态自述（英文陈述句）；非必填，保持旧清单可用
         if "desc" in scene and not isinstance(scene.get("desc"), str):
             raise SceneError(f"场景 {sid}: desc 必须是字符串")
+        if "highlight_messages" in scene and not isinstance(
+            scene.get("highlight_messages"), bool
+        ):
+            raise SceneError(f"场景 {sid}: highlight_messages 必须是布尔")
 
     for scene in items:
         sid = str(scene.get("id"))

@@ -2,11 +2,13 @@
  *
  * | 平面 | 地址 | 用途 |
  * |---|---|---|
- * | 内容 | `/chat/events?channel=<ch>&audio=1&drop=reasoning,content` | 字幕逐句推进、音频、`tool_start` 立绘动作、跨轮清空、首帧 snapshot 续播 |
+ * | 内容 | `/chat/events?channel=<ch>&audio=1&drop=reasoning,content` | 字幕逐句推进、音频、`tool_start` 立绘动作、`highlight` 高亮消息浮层、跨轮清空、首帧 snapshot 续播 |
  * | 状态 | `/state/events?want=scene,caption,layers,manifest` | 场景（含 `elapsed` 恢复时间线）、字幕设置、层显隐基线、清单变更 |
  *
  * 内容事件永远是全量（音频不裁），`drop` 只影响这条连接收到的类型；状态事件
  * 只推"离散变化"（`elapsed`/`remaining_s` 这类时间流逝不推，前端自己推演）。
+ * `highlight` 是瞬时浮层事件（`start` 之后、正文之前），snapshot 不保存它——
+ * 重连不续播已弹过的浮层。
  * 两条连接都靠 EventSource 原生重连，`close()` 一起关。
  */
 
@@ -63,6 +65,7 @@ const CONTENT_EVENT_NAMES = [
   'start',
   'reasoning',
   'content',
+  'highlight',
   'speech',
   'tool_start',
   'tool_result',

@@ -163,6 +163,20 @@ class TestSceneValidation(unittest.TestCase):
     def test_rejects_missing_neuro_geometry(self):
         self.bad(lambda data: data["scenes"][0]["neuro"].pop("w"))
 
+    def test_rejects_non_bool_highlight_messages(self):
+        self.bad(lambda data: data["scenes"][0].update(highlight_messages="yes"))
+
+    def test_highlight_messages_defaults_to_true_when_missing(self):
+        with _with_scenes([ROOM, BUMPER]):
+            self.assertTrue(scene_catalog.highlight_messages_enabled("room"))
+            self.assertTrue(scene_catalog.highlight_messages_enabled("ghost"))
+
+    def test_highlight_messages_flag_is_projected_in_overview(self):
+        flagged = {**ROOM, "highlight_messages": False}
+        with _with_scenes([flagged, BUMPER]):
+            by_id = {s["id"]: s for s in scene_catalog.overview()}
+        self.assertFalse(by_id["room"]["highlight_messages"])
+
 
 class TestSceneSteps(unittest.TestCase):
     def test_at_end_resolves_against_declared_duration(self):

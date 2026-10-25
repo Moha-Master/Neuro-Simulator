@@ -2,23 +2,27 @@
 
 状态：offline → starting（neuro 窗口播放开场）→ live ⇄ paused → offline
 
-每轮：先查优先轨（有则只消费最早 1 条），否则从普通轨随机抽取 ≤N 条未消费消息
+每轮：先查高亮轨（有则只消费最早 1 条），否则从普通轨随机抽取 ≤N 条未消费消息
 （按时间正序呈现）→ 拼装场景化 user message 调 neuro /chat（批量模式）→
 读 `GET /status` 的 `sections.turn.current.ends_at` 拿本轮语音预测播完的绝对时刻 →
 等“播完 + speech_cooldown_ms” → 下一轮。**stream 不自己累加字幕时间线**：neuro 的
 `UiState` 是唯一权威。
-优先消息在注入时与普通消息完全同格式（对模型只是降噪）；入列即广播
-chat_message / priority_message 给画面。空队列行为可配（占位消息 / 静默等待，
-静默模式下由入列事件即时唤醒，无需轮询）。
+高亮消息在注入时与普通消息完全同格式（对模型只是降噪）；入列即广播
+chat_message / highlight_message 给画面。真正的浮层属于 neuro 场景：选中高亮消息后
+随 `POST /chat` 把元数据发给 neuro，由 neuro 窗口弹窗。空队列行为可配（占位消息 /
+静默等待，静默模式下由入列事件即时唤醒，无需轮询）。
+
+高亮队列暂停开关（`highlight_paused`）：暂停时不消费高亮轨（游标不推进），普通消息
+照常循环；来源可为 `scene:stream` / `scene:neuro` / `manual`，最后写入者生效。
 
 对外广播（EventBroadcaster → /ui/events）：session_begin / session_end / state /
-scene_set / element_state（游戏等元素的全量状态）/ chat_message / priority_message /
+scene_set / element_state（游戏等元素的全量状态）/ chat_message / highlight_message /
 stream_metadata / settings。**speech/tool/turn 事件不再走 stream 画面**——neuro
 窗口（合成器里的 iframe）直接订阅 neuro 自己的 `/chat/events`（内容平面）与
 `/state/events`（场景/字幕设置）。
 
 开播：先探测 neuro 健康，再 POST neuro /ui/intro 触发开场（拿她切到的**场景 id**，
-不拿时长）；合成器落到 room_intro（只有 neuro 全屏，不叠 chat/highlight），随后
+不拿时长）；合成器落到 room_intro（只有 neuro 全屏，不叠 chat），随后
 **订阅** `GET neuro /state/events?want=scene` 等 `sections.scene.current.id` 离开
 开场场景——**她离开那个场景 = 开场放完** → 切 room 并推进 starting→live。
 订阅在 `INTRO_FALLBACK_S` 内没有任何消息（或建立失败）时退回 0.5s 轮询
@@ -44,7 +48,7 @@ from .. import scene_kit, state_kit
 from ..broadcaster import EventBroadcaster
 from ..scene_kit import SceneRunner
 from . import settings as stream_settings
-from .scenes import StreamScenePolicy
+from .scenes import StreamScenePolicy, highlight_messages_enabled
 from .chatbot import ChatbotManager
 from .games import GameHub
 from .neuro_client import NeuroClient, NeuroError
@@ -89,10 +93,13 @@ SPEECH_POLL_INTERVAL_S = 0.2
 # 逻辑里（provider 绝不能发 HTTP），供同轮模板与 chatbot 共用。
 NEURO_STATUS_STALE_S = 5.0
 
-# 开场期间合成器落在 room_intro（neuro 全屏、不显示 chat/highlight）；
+# 开场期间合成器落在 room_intro（neuro 全屏、不显示 chat）；
 # 她离开开场场景后切到 room，并同时推进 live。
 SCENE_ROOM_INTRO = "room_intro"
 SCENE_ROOM = "room"
+
+# neuro 场景订阅断线后的重连间隔（不终结直播，只更新 neuro_link）
+NEURO_SCENE_RETRY_S = 3.0
 
 
 class StreamConflict(Exception):
@@ -138,6 +145,22 @@ def _scene_from_state_event(event: Any) -> Any:
     return str((current or {}).get("id") or "")
 
 
+def _scene_current_from_state_event(event: Any) -> Any:
+    """从 `/state/events` 的一帧里取 `sections.scene.current` 对象。
+
+    返回 `_NO_SCENE` 表示这帧没带 scene 分区（调用方应忽略）；返回 `None` 表示
+    scene 分区存在但 current 为 null（neuro 刚重启/场景数据缺失）。
+    """
+    if not isinstance(event, dict):
+        return _NO_SCENE
+    sections = event.get("sections")
+    if not isinstance(sections, dict) or "scene" not in sections:
+        return _NO_SCENE
+    section = sections.get("scene")
+    current = section.get("current") if isinstance(section, dict) else None
+    return current if isinstance(current, dict) else None
+
+
 
 class StreamLoop:
     def __init__(self, storage: Storage, bus: EventBroadcaster, persona, templates) -> None:
@@ -157,6 +180,8 @@ class StreamLoop:
         # 直播里可被 Neuro 工具驱动的本地小游戏（同时至多一个活跃游戏）
         self.games = GameHub(publish=self.publish, set_scene=self.on_scene)
         self._task: Optional[asyncio.Task] = None
+        # neuro 场景订阅任务（live 期间常驻；把 neuro 场景开关同步到 highlight_paused）
+        self._scene_watch_task: Optional[asyncio.Task] = None
         self._stop_event = asyncio.Event()
         self._wakeup = asyncio.Event()
         # game 动作在 stream 内的实际执行串行化（工具请求可能并发到达）
@@ -169,9 +194,12 @@ class StreamLoop:
         # /stream/status 的 provider 必须同步无 I/O：有 I/O 的值由 loop（归属者）
         # 在事情发生时顺手记下，provider 只读这些缓存。
         self.queue_depth = 0
-        self.priority_depth = 0
+        self.highlight_depth = 0
         self.last_message_id = 0
         self.persisted: Optional[dict[str, Any]] = None
+        # 高亮消息队列暂停开关：True = 暂停（不消费高亮轨、游标不推进）
+        self.highlight_paused = False
+        self.highlight_source: Optional[str] = None
         # stream 对 neuro 的最近观测（health / intro / status / 语音闸门都更新它）
         self.neuro_link: dict[str, Any] = {
             "reachable": False,
@@ -397,7 +425,7 @@ class StreamLoop:
             "channel": s.channel,
             "conversation_id": conversation_id,
             "cursor": 0,
-            "priority_cursor": 0,
+            "highlight_cursor": 0,
             "rounds": 0,
             "title": meta_title,
             "category": meta_category,
@@ -409,8 +437,11 @@ class StreamLoop:
         if self.persisted:
             self.session["started_at"] = self.persisted.get("started_at")
         self.queue_depth = 0
-        self.priority_depth = 0
+        self.highlight_depth = 0
         self.last_message_id = 0
+        # 新场次从"未暂停、无来源"开始；第一次 on_scene 会立刻按场景写入
+        self.highlight_paused = False
+        self.highlight_source = None
         self._touch("loop", "chat")
         self.state = STATE_STARTING
         self._stop_event.clear()
@@ -430,7 +461,7 @@ class StreamLoop:
                       "title": meta_title, "category": meta_category, "tags": meta_tags})
         self._publish_state()
         # 合成器切到开场画面：开场视频此刻已经在 neuro iframe 里播放（POST /ui/intro 已触发），
-        # 而 chat/highlight 不该盖在开场动画上（真实开场没有弹幕）。
+        # 而 chat 不该盖在开场动画上（真实开场没有弹幕）。
         self.on_scene(SCENE_ROOM_INTRO)
 
         # 启动 chatbot 循环（本场标题/分区作为其消息模板的变量来源）
@@ -563,6 +594,7 @@ class StreamLoop:
         if self.state != STATE_OFFLINE:
             self._stop_event.set()
             self._wakeup.set()
+        await self._stop_scene_watch()
         if self._task is not None:
             with contextlib.suppress(Exception):
                 await asyncio.wait_for(asyncio.shield(self._task), timeout=5)
@@ -597,6 +629,7 @@ class StreamLoop:
 
         未知 id 只降级为"广播一个裸 id"：游戏场景 id 来自 GameHub、手动端点已自行
         校验，这里抛异常会把直播循环带崩；但一定要留日志，它说明场景数据不一致。
+        切换成功后按该 stream 场景的 `highlight_messages` 更新高亮队列开关。
         """
         try:
             self._scenes.switch(scene_id)
@@ -604,13 +637,88 @@ class StreamLoop:
             logger.warning("场景不在清单里，仅广播: %s (%s)", scene_id, e)
             self.set_scene(scene_id, 0.0)
             self.publish({"type": "scene_set", **self.scene_snapshot()})
+        enabled = highlight_messages_enabled(scene_id)
+        self._set_highlight_paused(not enabled, source="scene:stream")
+
+    # ---------- 高亮队列暂停开关 ----------
+
+    def _set_highlight_paused(self, paused: bool, source: Optional[str]) -> None:
+        """写入开关（最后写入者生效）；状态页/模板现读 loop 的字段。"""
+        paused = bool(paused)
+        if paused == self.highlight_paused and source == self.highlight_source:
+            return
+        self.highlight_paused = paused
+        self.highlight_source = source
+        self._touch("loop")
+
+    def set_highlight_paused(self, paused: bool, source: str = "manual") -> None:
+        """人工/程序写入开关（人工 PUT /stream/highlight 走这里）。"""
+        if self.session is None:
+            raise StreamConflict("没有进行中的直播场次，无法切换高亮队列")
+        self._set_highlight_paused(paused, source=source)
+
+    async def _watch_neuro_scene(self) -> None:
+        """订阅 neuro 状态总线，把 neuro 场景的 `highlight_messages` 同步到开关。
+
+        - 首帧 snapshot 也应用；`current == null` 视为暂停（保守）；
+        - 断线 / 非 200 / 解析失败：记录 `neuro_link`，3 秒后重连，**不终结直播**；
+        - 从开播起运行（starting + live），`_finalize` 会取消它。
+        """
+        try:
+            s = stream_settings.load()
+        except RuntimeError:
+            return
+        url = getattr(s, "neuro_url", "")
+        if not url:
+            return
+        while not self._stop_event.is_set():
+            client = NeuroClient(url)
+            subscribe = getattr(client, "state_events", None)
+            if subscribe is None:  # 旧替身/极旧客户端：没有这条通道就安静退出
+                return
+            events = subscribe(want=("scene",))
+            try:
+                async for ev in events:
+                    if self._stop_event.is_set():
+                        return
+                    current = _scene_current_from_state_event(ev)
+                    if current is _NO_SCENE:
+                        continue
+                    self.note_neuro_link(url, True)
+                    if current is None:
+                        self._set_highlight_paused(True, source="scene:neuro")
+                        continue
+                    flag = current.get("highlight_messages")
+                    enabled = flag if isinstance(flag, bool) else True
+                    self._set_highlight_paused(not enabled, source="scene:neuro")
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:  # 连接中断/非 200/解析失败都走重连
+                self.note_neuro_link(url, False, f"{type(e).__name__}: {e}")
+                logger.warning("neuro 场景订阅失败（%.0fs 后重连）: %s", NEURO_SCENE_RETRY_S, e)
+            finally:
+                aclose = getattr(events, "aclose", None)
+                if aclose is not None:
+                    with contextlib.suppress(Exception):
+                        await aclose()
+            if self._stop_event.is_set():
+                return
+            await self._sleep_ms(NEURO_SCENE_RETRY_S * 1000)
+
+    async def _stop_scene_watch(self) -> None:
+        task = self._scene_watch_task
+        self._scene_watch_task = None
+        if task is not None:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await task
 
     def on_new_message(self) -> None:
         """入列唤醒：静默等待模式下立刻推进下一轮。"""
         if self.state == STATE_LIVE:
             self._wakeup.set()
 
-    # ---------- 入列（普通 / 优先共用广播与唤醒） ----------
+    # ---------- 入列（普通 / 高亮共用广播与唤醒） ----------
 
     def _announce_message(
         self,
@@ -618,18 +726,18 @@ class StreamLoop:
         username: str,
         content: str,
         *,
-        priority_type: Optional[str] = None,
+        highlight_type: Optional[str] = None,
         value: int = 0,
     ) -> None:
-        """把新入列消息镜像给 /ui（聊天层 / 优先弹窗）。"""
+        """把新入列消息镜像给 /ui（聊天层；高亮消息额外带类型与金额）。"""
         ev: dict[str, Any] = {
-            "type": "priority_message" if priority_type else "chat_message",
+            "type": "highlight_message" if highlight_type else "chat_message",
             "id": msg_id,
             "username": username,
             "content": content,
         }
-        if priority_type:
-            ev["priority_type"] = priority_type
+        if highlight_type:
+            ev["highlight_type"] = highlight_type
             ev["value"] = value
         self.publish(ev)
 
@@ -639,10 +747,10 @@ class StreamLoop:
         self._note_appended(None, msg_id)
         self._announce_message(msg_id, username, content)
 
-    def _note_appended(self, priority_type: Optional[str], msg_id: int) -> None:
+    def _note_appended(self, highlight_type: Optional[str], msg_id: int) -> None:
         """入列后的深度缓存（未消费数 + 最近消息 id）。"""
-        if priority_type:
-            self.priority_depth += 1
+        if highlight_type:
+            self.highlight_depth += 1
         else:
             self.queue_depth += 1
         self.last_message_id = max(self.last_message_id, int(msg_id))
@@ -653,7 +761,7 @@ class StreamLoop:
         username: str,
         content: str,
         *,
-        priority_type: Optional[str] = None,
+        highlight_type: Optional[str] = None,
         value: int = 0,
     ) -> int:
         """API 入列：写库 → 广播 → 唤醒（静默等待模式）。"""
@@ -663,13 +771,13 @@ class StreamLoop:
             self.session["queue_row"],
             username,
             content,
-            priority_type=priority_type,
+            highlight_type=highlight_type,
             value=value,
         )
         self._announce_message(
-            msg_id, username, content, priority_type=priority_type, value=value
+            msg_id, username, content, highlight_type=highlight_type, value=value
         )
-        self._note_appended(priority_type, msg_id)
+        self._note_appended(highlight_type, msg_id)
         self.on_new_message()
         return msg_id
 
@@ -846,6 +954,11 @@ class StreamLoop:
     async def _main(self) -> None:
         session = self.session
         try:
+            # 从开播起就订阅 neuro 场景：intro 的 highlight_messages:false 也要生效，
+            # 不能等 live 才开始（首帧 snapshot 会立刻落到 intro）。
+            self._scene_watch_task = asyncio.create_task(
+                self._watch_neuro_scene(), name="stream-neuro-scene"
+            )
             if not await self._await_intro_ready():
                 return  # 人工下播（静默）或开场超时（已记 last_error），都不进循环
             self.state = STATE_LIVE
@@ -881,6 +994,7 @@ class StreamLoop:
     async def _finalize(self, reason: Optional[str] = None) -> None:
         self.chatbot.stop_session()
         await self.games.aclear()
+        await self._stop_scene_watch()
         was = self.state
         self.state = STATE_OFFLINE
         self._intro_gate = None
@@ -900,7 +1014,9 @@ class StreamLoop:
         self.last_scene = None
         self._scene_duration = 0.0
         self.queue_depth = 0
-        self.priority_depth = 0
+        self.highlight_depth = 0
+        self.highlight_paused = False
+        self.highlight_source = None
         if self.persisted is not None:
             # 下播后 dashboard 仍要看到刚刚结束的那一场（state/ended_at 由 loop 自己维护）
             self.persisted.update(
@@ -956,6 +1072,7 @@ class StreamLoop:
             return "wait"
 
         last_id = None
+        highlights: Optional[list[dict]] = None
         client = NeuroClient(s.neuro_url)
         # 同轮模板用最近一次 neuro 投影；缓存超过 5s 才补拉一次（provider 不发 HTTP）
         await self._fetch_neuro_status(client, session["channel"])
@@ -965,16 +1082,28 @@ class StreamLoop:
             messages_block = picked["body"]
         else:
             msgs = picked["messages"]
-            # 优先消息与普通消息对 neuro 完全同格式：不带 type/value，不加标注
+            # 高亮消息与普通消息对 neuro 完全同格式：不带 type/value，不加标注；
+            # 元数据只随 POST /chat 一起发（由 neuro 窗口弹浮层）。
             messages_block = "\n".join(f"- {m['username']}: {m['content']}" for m in msgs)
             last_id = msgs[-1]["id"]
+            if picked["kind"] == "highlight":
+                highlights = [
+                    {
+                        "id": m["id"],
+                        "username": m["username"],
+                        "content": m["content"],
+                        "highlight_type": m["highlight_type"],
+                        "value": m["value"],
+                    }
+                    for m in msgs
+                ]
         # **先渲染、后推进水位线**：模板坏了就不该把弹幕吃掉。事实留在队列里，
         # 下一轮重试同一批；配合 `chatbot.template_error` 与日志，表现是
         # "她停摆且看得见为什么"，而不是"队列被清空、她一直沉默"。
         text = self.templates.render("neuro_user", self.template_context(messages_block))
         if last_id is not None:
-            if picked["kind"] == "priority":
-                session["priority_cursor"] = last_id
+            if picked["kind"] == "highlight":
+                session["highlight_cursor"] = last_id
             else:
                 session["cursor"] = last_id
         round_failed = False
@@ -982,7 +1111,13 @@ class StreamLoop:
         ends_at: Optional[float] = None
         try:
             r = await asyncio.wait_for(
-                client.chat_batch(text, session["channel"], session["conversation_id"], audio=False),
+                client.chat_batch(
+                    text,
+                    session["channel"],
+                    session["conversation_id"],
+                    audio=False,
+                    highlights=highlights,
+                ),
                 timeout=ROUND_DEADLINE_S,
             )
             terminal = str(r.get("terminal") or "")
@@ -1009,29 +1144,29 @@ class StreamLoop:
         if last_id is not None:
             logger.info(
                 "round picked %s message id=%s",
-                "priority" if picked["kind"] == "priority" else "normal",
+                "highlight" if picked["kind"] == "highlight" else "normal",
                 last_id,
             )
         session["rounds"] = session.get("rounds", 0) + 1
         await self.storage.update_session(
             session["session_row"],
             cursor_msg=session["cursor"],
-            priority_cursor=session["priority_cursor"],
+            highlight_cursor=session["highlight_cursor"],
             inc_rounds=True,
         )
         # 游标已推进：未消费深度是"归属者现算后缓存"，/status 只读缓存不查库。
         self.queue_depth = await self.storage.queue_depth_after(
             session["queue_row"], session["cursor"]
         )
-        self.priority_depth = await self.storage.priority_depth_after(
-            session["queue_row"], session["priority_cursor"]
+        self.highlight_depth = await self.storage.highlight_depth_after(
+            session["queue_row"], session["highlight_cursor"]
         )
         if self.persisted is not None:
             self.persisted.update(
                 {
                     "rounds": session["rounds"],
                     "cursor_msg": session["cursor"],
-                    "priority_cursor": session["priority_cursor"],
+                    "highlight_cursor": session["highlight_cursor"],
                 }
             )
         self._touch("loop", "chat")
@@ -1053,13 +1188,15 @@ class StreamLoop:
         return None
 
     async def _pick(self, s, session: dict) -> Optional[dict]:
-        """双轨抽取：优先轨最早一条优先（一次只消费 1 条）；
-        优先轨为空才回落到普通轨随机抽样。返回 None 表示静默等待。"""
-        priority = await self.storage.list_priority_messages(
-            session["queue_row"], session["priority_cursor"], limit=1
-        )
-        if priority:
-            return {"kind": "priority", "messages": priority}
+        """双轨抽取：高亮轨最早一条优先（一次只消费 1 条）；
+        高亮轨为空才回落到普通轨随机抽样。暂停时不查高亮轨（游标不推进）。
+        返回 None 表示静默等待。"""
+        if not self.highlight_paused:
+            highlight = await self.storage.list_highlight_messages(
+                session["queue_row"], session["highlight_cursor"], limit=1
+            )
+            if highlight:
+                return {"kind": "highlight", "messages": highlight}
 
         candidates = await self.storage.list_normal_messages(
             session["queue_row"], session["cursor"], limit=500

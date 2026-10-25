@@ -5,7 +5,7 @@
       "id": "starting_soon",
       "label": "Starting Soon",
       "icon": "mdi-clock-outline",
-      "desc": "The stream has not started yet: a no-source backdrop fills the frame, chat and priority overlays are visible, and the Neuro window is hidden.",
+      "desc": "The stream has not started yet: a no-source backdrop fills the frame, the chat overlay is visible, and the Neuro window is hidden.",
       "hidden": true,
       "elements": [
         {
@@ -38,20 +38,6 @@
             "kind": "component",
             "name": "chat.overlay"
           }
-        },
-        {
-          "id": "highlight",
-          "name": "优先消息",
-          "z": 25,
-          "box": {
-            "x": 0.29,
-            "y": 0,
-            "w": 0.24
-          },
-          "content": {
-            "kind": "component",
-            "name": "highlight"
-          }
         }
       ],
       "neuro": {
@@ -60,13 +46,14 @@
         "w": 1,
         "z": 10,
         "hidden": true
-      }
+      },
+      "highlight_messages": true
     },
     {
       "id": "room_intro",
       "label": "开场",
       "icon": "mdi-movie-open",
-      "desc": "The intro bumper is playing: the Neuro window fills the frame edge to edge, with no chat or priority overlay.",
+      "desc": "The intro bumper is playing: the Neuro window fills the frame edge to edge, with no chat overlay.",
       "hidden": true,
       "elements": [],
       "neuro": {
@@ -75,13 +62,14 @@
         "w": 1,
         "z": 10,
         "hide": []
-      }
+      },
+      "highlight_messages": true
     },
     {
       "id": "room",
       "label": "房间（默认）",
       "icon": "mdi-sofa",
-      "desc": "The default shot: Neuro's room background fills the frame, her avatar is centred with captions near the bottom, and chat plus priority overlays sit on the left.",
+      "desc": "The default shot: Neuro's room background fills the frame, her avatar is centred with captions near the bottom, and the chat overlay sits on the left.",
       "elements": [
         {
           "id": "chat",
@@ -105,28 +93,6 @@
               "duration": 0.6
             }
           }
-        },
-        {
-          "id": "highlight",
-          "name": "优先消息",
-          "z": 25,
-          "box": {
-            "x": 0.29,
-            "y": 0,
-            "w": 0.24
-          },
-          "content": {
-            "kind": "component",
-            "name": "highlight"
-          },
-          "script": {
-            "enter": {
-              "tween": {
-                "opacity": 1
-              },
-              "duration": 0.6
-            }
-          }
         }
       ],
       "neuro": {
@@ -135,13 +101,14 @@
         "w": 1,
         "z": 10,
         "hide": []
-      }
+      },
+      "highlight_messages": true
     },
     {
       "id": "community_art",
       "label": "Community Art",
       "icon": "mdi-palette",
-      "desc": "A community artwork fills the frame as the backdrop, with the Neuro window overlaid on top and chat plus priority overlays on the left.",
+      "desc": "A community artwork fills the frame as the backdrop, with the Neuro window overlaid on top and the chat overlay on the left.",
       "elements": [
         {
           "id": "bg_art",
@@ -173,20 +140,6 @@
             "kind": "component",
             "name": "chat.overlay"
           }
-        },
-        {
-          "id": "highlight",
-          "name": "优先消息",
-          "z": 25,
-          "box": {
-            "x": 0.29,
-            "y": 0,
-            "w": 0.24
-          },
-          "content": {
-            "kind": "component",
-            "name": "highlight"
-          }
         }
       ],
       "neuro": {
@@ -197,13 +150,14 @@
         "hide": [
           "bg_room"
         ]
-      }
+      },
+      "highlight_messages": true
     },
     {
       "id": "gameplay",
       "label": "Game Play",
       "icon": "mdi-gamepad-variant",
-      "desc": "A game-play backdrop fills the frame, with the Neuro window overlaid on top and chat plus priority overlays on the left.",
+      "desc": "A game-play backdrop fills the frame, with the Neuro window overlaid on top and the chat overlay on the left.",
       "elements": [
         {
           "id": "bg_game",
@@ -235,20 +189,6 @@
             "kind": "component",
             "name": "chat.overlay"
           }
-        },
-        {
-          "id": "highlight",
-          "name": "优先消息",
-          "z": 25,
-          "box": {
-            "x": 0.29,
-            "y": 0,
-            "w": 0.24
-          },
-          "content": {
-            "kind": "component",
-            "name": "highlight"
-          }
         }
       ],
       "neuro": {
@@ -259,13 +199,14 @@
         "hide": [
           "bg_room"
         ]
-      }
+      },
+      "highlight_messages": true
     },
     {
       "id": "play_wordle",
       "label": "Wordle",
       "icon": "mdi-format-text",
-      "desc": "A Wordle board occupies the centre of the frame, with the Neuro window on the right and chat plus priority overlays on the left.",
+      "desc": "A Wordle board occupies the centre of the frame, with the Neuro window on the right and the chat overlay on the left.",
       "prompt_context": "You are playing Wordle on stream right now: a hidden word has to be guessed in six tries, one guess per row, and every guess must be a real word of the same length. Colours mean: green = right letter right place, yellow = right letter wrong place, grey = not in the word.",
       "elements": [
         {
@@ -312,20 +253,6 @@
             "kind": "component",
             "name": "chat.overlay"
           }
-        },
-        {
-          "id": "highlight",
-          "name": "优先消息",
-          "z": 25,
-          "box": {
-            "x": 0.29,
-            "y": 0,
-            "w": 0.24
-          },
-          "content": {
-            "kind": "component",
-            "name": "highlight"
-          }
         }
       ],
       "neuro": {
@@ -336,13 +263,14 @@
         "hide": [
           "bg_room"
         ]
-      }
+      },
+      "highlight_messages": true
     },
     {
       "id": "play_chess",
       "label": "Chess",
       "icon": "mdi-chess-knight",
-      "desc": "A Lichess chess board sits on the left of the media area, with the Neuro window on the right and chat plus priority overlays on the left.",
+      "desc": "A Lichess chess board sits on the left of the media area, with the Neuro window on the right and the chat overlay on the left.",
       "prompt_context": "You are playing online Chess on Lichess against the Lichess AI. Call game_chess_move with one move copied verbatim from the 'Your legal moves' list (SAN like Nf3, O-O, exd5). The result says what you played, how the opponent replied, and your new legal moves. One move per call.",
       "elements": [
         {
@@ -399,20 +327,6 @@
           "css": {
             "--chat-font-scale": "0.58"
           }
-        },
-        {
-          "id": "highlight",
-          "name": "优先消息",
-          "z": 25,
-          "box": {
-            "x": 0.575,
-            "y": 0.14,
-            "w": 0.27
-          },
-          "content": {
-            "kind": "component",
-            "name": "highlight"
-          }
         }
       ],
       "neuro": {
@@ -423,7 +337,8 @@
         "hide": [
           "bg_room"
         ]
-      }
+      },
+      "highlight_messages": true
     }
   ]
 }

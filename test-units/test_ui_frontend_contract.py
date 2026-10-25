@@ -102,6 +102,23 @@ class TestSingleFrontend(unittest.TestCase):
             missing = needed - registered
             self.assertFalse(missing, f"{ui_dir.name} 缺组件注册: {sorted(missing)}")
 
+    def test_highlight_overlay_belongs_to_neuro_window(self):
+        """高亮消息浮层只在 neuro 场景：stream 清单/注册表/main.ts 都不再有它。"""
+        stream_components = _components_of(_manifest(STREAM_MANIFEST))
+        self.assertNotIn("highlight", stream_components)
+        self.assertNotIn("highlight", _registered(STREAM_UI))
+
+        neuro_components = _components_of(_manifest(NEURO_MANIFEST))
+        self.assertIn("highlight", neuro_components)
+        self.assertIn("highlight", _registered(NEURO_UI))
+
+        stream_main = (STREAM_UI / "main.ts").read_text(encoding="utf-8")
+        self.assertNotIn("HighlightOverlay", stream_main)
+        self.assertTrue((NEURO_UI / "highlight.ts").is_file())
+
+        feed = (NEURO_UI / "feed.ts").read_text(encoding="utf-8")
+        self.assertIn("'highlight'", feed)
+
     def test_scene_assets_exist(self):
         """场景引用的素材必须真的在：图片在前端 public/，视频在模块的 media 目录。"""
         for manifest_path in (STREAM_MANIFEST, NEURO_MANIFEST):

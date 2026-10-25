@@ -44,6 +44,17 @@
         </v-chip>
 
         <v-chip
+          v-if="streamSections.loop.current?.highlight_paused"
+          size="small"
+          color="warning"
+          variant="tonal"
+          prepend-icon="mdi-pause-circle"
+          :title="`高亮队列暂停（来源：${streamSections.loop.current.highlight_source ?? '—'}）`"
+        >
+          高亮暂停
+        </v-chip>
+
+        <v-chip
           v-if="streamSections.chatbot.current"
           size="small"
           variant="outlined"
@@ -209,7 +220,7 @@ const loopIcon = computed(() =>
 const pendingText = computed(() => {
   const chat = streamSections.value?.chat.current
   if (!chat || chat.normal_pending === null) return '—'
-  return `${chat.normal_pending} / ${chat.priority_pending ?? '—'}`
+  return `${chat.normal_pending} / ${chat.highlight_pending ?? '—'}`
 })
 
 const lastError = computed(() => streamSections.value?.loop.current?.last_error ?? null)

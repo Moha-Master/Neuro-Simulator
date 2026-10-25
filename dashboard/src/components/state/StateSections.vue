@@ -162,7 +162,9 @@ const loopRows = computed<Row[]>(() => {
     { label: 'conversation_id', value: fmt(v.conversation_id) },
     { label: 'round', value: fmt(v.round) },
     { label: 'cursor', value: fmt(v.cursor) },
-    { label: 'priority_cursor', value: fmt(v.priority_cursor) },
+    { label: 'highlight_cursor', value: fmt(v.highlight_cursor) },
+    { label: 'highlight_paused', value: fmt(v.highlight_paused) },
+    { label: 'highlight_source', value: fmt(v.highlight_source) },
     { label: 'started_at', value: fmt(v.started_at) },
     { label: 'persisted', value: fmt(v.persisted) },
     { label: 'intro', value: fmt(v.intro) },
@@ -180,6 +182,7 @@ const sceneRows = computed<Row[]>(() => {
     { label: 'icon', value: fmt(v.icon) },
     { label: 'duration', value: fmt(v.duration) },
     { label: 'elapsed', value: fmt(v.elapsed) },
+    { label: 'highlight_messages', value: fmt(v.highlight_messages) },
   ]
   // auto_returns 只有 neuro 的场景分区有；stream 没有就不显示
   if ('auto_returns' in v) {
@@ -223,7 +226,7 @@ const chatRows = computed<Row[]>(() => {
   if (!v) return []
   return [
     { label: 'normal_pending', value: fmt(v.normal_pending) },
-    { label: 'priority_pending', value: fmt(v.priority_pending) },
+    { label: 'highlight_pending', value: fmt(v.highlight_pending) },
     { label: 'last_message_id', value: fmt(v.last_message_id) },
   ]
 })

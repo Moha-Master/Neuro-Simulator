@@ -94,7 +94,11 @@ export interface LoopStatus {
   conversation_id: string | null
   round: number
   cursor: number | null
-  priority_cursor: number | null
+  highlight_cursor: number | null
+  /** true = 高亮消息队列暂停（不消费高亮轨、游标不推进） */
+  highlight_paused: boolean
+  /** 最后写入开关的来源：scene:stream / scene:neuro / manual */
+  highlight_source: string | null
   intro: IntroGate | null
   last_error: StreamLastError | null
   started_at: string | null
@@ -107,6 +111,8 @@ export interface StreamSceneStatus {
   icon: string | null
   /** 面向机器/LLM 的英文状态自述 */
   desc: string
+  /** 该场景是否允许高亮消息进入队列消费 */
+  highlight_messages: boolean
   duration: number | null
   elapsed: number | null
 }
@@ -129,7 +135,7 @@ export interface AudienceStatus {
 
 export interface ChatStatus {
   normal_pending: number | null
-  priority_pending: number | null
+  highlight_pending: number | null
   last_message_id: number | null
 }
 
@@ -198,6 +204,8 @@ export interface NeuroSceneStatus {
   duration: number | null
   elapsed: number | null
   auto_returns: boolean
+  /** 该场景是否显示高亮消息浮层（intro=false） */
+  highlight_messages: boolean
 }
 
 export interface TurnStatus {

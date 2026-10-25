@@ -12,7 +12,8 @@ neuro 特有的策略：
 
 - 时长可以是秒数，也可以是 `{"media": "<video 元素 id>", "after": <秒>}`——
   按视频轨道探测（换素材自动跟随），所以数据里不必写死 10.475 / 13.475。
-- `refs` 声明代码要认出的元素（立绘、字幕），main.ts 按它取实例。
+- `refs` 声明代码要认出的元素（立绘、字幕、高亮消息），main.ts 按它取实例。
+- `highlight_messages`：该场景是否显示高亮消息浮层（normal=true，intro=false）。
 - `INTRO_SCENE_ID`：`POST /ui/intro` 是"切到这个场景"的语义化别名。
 """
 
@@ -217,6 +218,7 @@ def overview() -> List[Dict[str, Any]]:
                 "desc": str(s.get("desc") or ""),
                 "icon": s.get("icon"),
                 "hidden": bool(s.get("hidden")),
+                "highlight_messages": bool(s.get("highlight_messages", True)),
                 "duration": round(effective_duration(sid), 3),
                 "auto_returns": bool(state_steps(sid)),
                 "elements": [
@@ -262,6 +264,10 @@ def _validate(data: Any) -> None:
         # desc 是面向机器/LLM 的状态自述（英文陈述句）；非必填，保持旧清单可用
         if "desc" in scene and not isinstance(scene.get("desc"), str):
             raise SceneError(f"场景 {sid}: desc 必须是字符串")
+        if "highlight_messages" in scene and not isinstance(
+            scene.get("highlight_messages"), bool
+        ):
+            raise SceneError(f"场景 {sid}: highlight_messages 必须是布尔")
 
         raw_duration = scene.get("duration")
         if isinstance(raw_duration, dict):

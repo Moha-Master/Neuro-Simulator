@@ -133,6 +133,65 @@ class TestReload(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(h.memory.char_limit, 999)
 
 
+class TestHighlightContentEvent(unittest.IsolatedAsyncioTestCase):
+    """/chat 的 highlights：`start` 之后发 `highlight`，普通轮不发。"""
+
+    async def _post(self, h, payload: dict):
+        async with _client(h.app) as client:
+            return await client.post("/chat", json=payload)
+
+    async def test_highlights_are_published_after_start(self):
+        agent = ScriptedAgent(EVENTS)
+        h = Harness(agent)
+        q = h.content_bus.subscribe()
+        payload = {
+            "message": "hi",
+            "channel": "stream",
+            "conversation_id": "conv",
+            "stream": False,
+            "highlights": [
+                {
+                    "id": 7,
+                    "username": "fan",
+                    "content": "hello neuro",
+                    "highlight_type": "bits",
+                    "value": 500,
+                }
+            ],
+        }
+        resp = await self._post(h, payload)
+        self.assertEqual(resp.status_code, 200)
+
+        events = []
+        while not q.empty():
+            events.append(q.get_nowait())
+        types = [ev["type"] for ev in events]
+        self.assertEqual(types[0], "start", "start 必须仍是首个事件")
+        self.assertIn("highlight", types)
+        highlight = next(ev for ev in events if ev["type"] == "highlight")
+        start = events[0]
+        self.assertEqual(highlight["turn_id"], start["turn_id"])
+        self.assertEqual(highlight["channel"], "stream")
+        self.assertEqual(highlight["conversation_id"], "conv")
+        self.assertEqual(highlight["messages"], payload["highlights"])
+        self.assertLess(types.index("highlight"), types.index("done"))
+
+    async def test_without_highlights_no_highlight_event(self):
+        agent = ScriptedAgent(EVENTS)
+        h = Harness(agent)
+        q = h.content_bus.subscribe()
+        resp = await self._post(
+            h,
+            {"message": "hi", "channel": "stream", "conversation_id": "conv", "stream": False},
+        )
+        self.assertEqual(resp.status_code, 200)
+        types = []
+        while not q.empty():
+            types.append(q.get_nowait()["type"])
+        self.assertEqual(types[0], "start")
+        self.assertNotIn("highlight", types)
+
+
 class TestReconnectSnapshot(unittest.IsolatedAsyncioTestCase):
     async def test_snapshot_has_consumed_and_audio_for_the_speaking_sentence(self):
         ui = UiState()

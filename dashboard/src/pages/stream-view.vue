@@ -143,9 +143,9 @@ const snackbarText = ref('')
 
 async function sendMessage(
   content: string,
-  priority?: { type: 'bits' | 'points'; value: number },
+  highlight?: { type: 'bits' | 'points'; value: number },
 ): Promise<boolean> {
-  const ok = await postMessage(chatUsername.value, content, priority)
+  const ok = await postMessage(chatUsername.value, content, highlight)
   if (!ok) {
     snackbarText.value = `发送失败：${streamError.value}`
     snackbar.value = true

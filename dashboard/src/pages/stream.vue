@@ -66,10 +66,10 @@
                 <div class="text-body-2">{{ short(conv) }}</div>
               </v-col>
               <v-col cols="6" md="3">
-                <div class="text-caption text-disabled">轮次 / 待消费（普通 · 优先）</div>
+                <div class="text-caption text-disabled">轮次 / 待消费（普通 · 高亮）</div>
                 <div class="text-body-2">
                   {{ rounds }} / {{ st.status.value?.sections.chat.current?.normal_pending ?? '—' }} ·
-                  {{ st.status.value?.sections.chat.current?.priority_pending ?? '—' }}
+                  {{ st.status.value?.sections.chat.current?.highlight_pending ?? '—' }}
                 </div>
               </v-col>
               <v-col cols="6" md="3">
@@ -93,6 +93,25 @@
           </template>
           <div v-else class="text-body-2 text-disabled">
             未在直播。点击下方「开始直播」新建场次（会话 + 消息队列 + 画面入场）。
+          </div>
+
+          <!-- 高亮消息队列开关：on = 正常消费，off = 暂停（消息留在队列里） -->
+          <div class="d-flex align-center flex-wrap ga-3 mt-3">
+            <v-switch
+              :model-value="!highlightPaused"
+              :label="highlightPaused ? '高亮消息队列：暂停' : '高亮消息队列：正常'"
+              color="primary"
+              density="compact"
+              hide-details
+              :disabled="!highlightControllable"
+              @update:model-value="onHighlightToggle"
+            />
+            <v-chip size="small" variant="tonal" prepend-icon="mdi-source-branch">
+              来源：{{ highlightSourceLabel }}
+            </v-chip>
+            <span class="text-caption text-disabled">
+              暂停时高亮消息不被消费（游标不推进），普通消息照常循环。
+            </span>
           </div>
         </v-card-text>
         <v-divider />
@@ -217,6 +236,15 @@
             >
               游戏：{{ st.status.value.sections.games.current?.active }}
             </v-chip>
+            <v-chip
+              v-if="st.status.value?.sections.scene.current"
+              size="small"
+              variant="tonal"
+              :color="currentHighlightMessages ? 'success' : 'grey'"
+              prepend-icon="mdi-message-alert-outline"
+            >
+              高亮消息{{ currentHighlightMessages ? '启用' : '禁用' }}
+            </v-chip>
             <v-spacer />
             <v-btn
               size="x-small"
@@ -334,6 +362,30 @@ const currentSceneIcon = computed(
 // 开场闸门与"上次为什么没开成"（服务端在下次成功开播时清空 last_error）
 const introGate = computed(() => st.status.value?.sections.loop.current?.intro ?? null)
 const lastError = computed(() => st.status.value?.sections.loop.current?.last_error ?? null)
+
+// 高亮消息队列开关（stream 场景 / neuro 场景 / 人工三方写入，最后写入者生效）
+const highlightPaused = computed(
+  () => Boolean(st.status.value?.sections.loop.current?.highlight_paused),
+)
+const highlightSourceLabel = computed(() => {
+  const source = st.status.value?.sections.loop.current?.highlight_source ?? ''
+  const labels: Record<string, string> = {
+    manual: '手动',
+    'scene:stream': 'stream 场景',
+    'scene:neuro': 'neuro 场景',
+  }
+  return labels[source] ?? '—'
+})
+const highlightControllable = computed(() =>
+  ['starting', 'live', 'paused'].includes(currentState.value),
+)
+const currentHighlightMessages = computed(() =>
+  Boolean(st.status.value?.sections.scene.current?.highlight_messages),
+)
+
+async function onHighlightToggle(value: boolean | null) {
+  await st.setHighlightPaused(!Boolean(value))
+}
 
 // 本场信息编辑区：以服务端值为基线；用户有未保存改动时不被轮询覆盖，
 // 但场次切换（开播/下播）会重新对齐（新场次的标题来自上一场或 config 默认值）。

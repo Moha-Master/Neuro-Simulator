@@ -56,7 +56,9 @@ STREAM_SHAPE = Shape(
             "conversation_id": T("str", "none"),
             "round": T("int"),
             "cursor": T("int", "none"),
-            "priority_cursor": T("int", "none"),
+            "highlight_cursor": T("int", "none"),
+            "highlight_paused": T("bool"),
+            "highlight_source": T("str", "none"),
             "intro": T("dict", "none"),
             "last_error": T("str", "none"),
             "started_at": T("str", "none"),
@@ -68,6 +70,7 @@ STREAM_SHAPE = Shape(
             "icon": T("str", "none"),
             "desc": T("str"),
             "prompt_context": T("str"),
+            "highlight_messages": T("bool"),
             "duration": T("float", "int", "none"),
             "elapsed": T("float", "int", "none"),
         },
@@ -85,7 +88,7 @@ STREAM_SHAPE = Shape(
         },
         "chat": {
             "normal_pending": T("int", "none"),
-            "priority_pending": T("int", "none"),
+            "highlight_pending": T("int", "none"),
             "last_message_id": T("int", "none"),
         },
         "chatbot": {
@@ -125,6 +128,7 @@ NEURO_SHAPE = Shape(
             "duration": T("float", "int", "none"),
             "elapsed": T("float", "int", "none"),
             "auto_returns": T("bool"),
+            "highlight_messages": T("bool"),
         },
         "turn": {
             "turn_id": T("int", "none"),

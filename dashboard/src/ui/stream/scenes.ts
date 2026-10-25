@@ -6,7 +6,7 @@
  * 产物——那是反向耦合，现在归回服务端。
  *
  * 开播的开场动画归 neuro 窗口自己放（`POST /ui/intro`），但合成器也有一个配套的
- * 内部场景 `room_intro`：开场期间只有 neuro 全屏，**不叠 chat/highlight**
+ * 内部场景 `room_intro`：开场期间只有 neuro 全屏，**不叠 chat**
  * （真实开场没有弹幕盖在动画上）。她离开开场场景后循环才切到 `room`。
  * `starting_soon` / `room_intro` 都是 hidden 内部场景，不出现在 dashboard 清单。
  */
@@ -15,7 +15,7 @@ import type { SceneDef, SceneManifest } from '../engine/schema'
 import { apiUrl } from '../engine/base'
 
 export const SCENE_STARTING_SOON = 'starting_soon'
-/** 开场期间的合成画面（hidden；neuro 全屏，chat/highlight 不参与）。 */
+/** 开场期间的合成画面（hidden；neuro 全屏，chat 不参与）。 */
 export const SCENE_ROOM_INTRO = 'room_intro'
 export const SCENE_ROOM = 'room'
 

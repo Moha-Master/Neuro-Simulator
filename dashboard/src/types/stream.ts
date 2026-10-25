@@ -4,7 +4,7 @@ export interface StreamSession {
   channel: string
   conversation_id: string
   cursor: number
-  priority_cursor: number
+  highlight_cursor: number
   /** 本场标题 / 分区 / 标签（开播时可填、直播中可改） */
   title?: string | null
   category?: string | null
@@ -24,7 +24,7 @@ export interface QueueMessage {
   content: string
   created_at: string
   /** bits / points；null = 普通观众消息 */
-  priority_type: string | null
+  highlight_type: string | null
   /** 货币量（bits / points 数）；普通消息为 0 */
   value: number
 }
@@ -62,5 +62,7 @@ export interface SceneSummary {
   /** 面向机器/LLM 的英文状态自述 */
   desc: string
   prompt_context: string
+  /** 该场景是否允许高亮消息进入队列消费 */
+  highlight_messages: boolean
   elements: SceneElement[]
 }

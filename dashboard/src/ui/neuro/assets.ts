@@ -7,10 +7,12 @@ export function asset (path: string): string {
 
 /** Neuro 窗口用字体（经 JS 加载以兼容非根 base）。
  *  - First Coffee：字幕
+ *  - Causten：高亮消息浮层（旧 client 规格）
  *  - Noto Sans SC：中日韩字形回退（拉丁优先 First Coffee 自带字形）
  */
 const FONTS: Array<[family: string, path: string, descriptor?: FontFaceDescriptors]> = [
   ['First Coffee', 'fonts/first-coffee.woff2'],
+  ['Causten', 'fonts/causten.woff2'],
   ['Noto Sans SC', 'fonts/noto-sans-sc.woff2'],
 ]
 

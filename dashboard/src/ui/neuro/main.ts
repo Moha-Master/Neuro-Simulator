@@ -1,8 +1,8 @@
-/** neuro 窗口（dashboard 构建里的独立页面 `/ui/neuro/`）：数据驱动的场景 + 字幕/音频 + 立绘动作。
+/** neuro 窗口（dashboard 构建里的独立页面 `/ui/neuro/`）：数据驱动的场景 + 字幕/音频 + 立绘动作 + 高亮消息浮层。
  *
  * 这一页就是现实中 neuro.exe 的"窗口"：固定 16:9 逻辑画布，只有场景数据里声明的
- * 那些层（背景 / 开场视频 / 立绘 / 字幕），不含 chat / 游戏 / 合成——那些是 stream
- * 合成器的层。它可以单独打开（与直播无关），也可以被合成器用 iframe 捕获。
+ * 那些层（背景 / 开场视频 / 立绘 / 字幕 / 高亮消息），不含 chat / 游戏 / 合成——
+ * 那些是 stream 合成器的层。它可以单独打开（与直播无关），也可以被合成器用 iframe 捕获。
  *
  * 两条控制权，边界很清楚：
  * - **场景**是后端的权威状态：`scene_set` 事件 / snapshot 告诉你现在该演哪个场景，
@@ -18,6 +18,7 @@
 import type { SceneManifest } from '../engine/schema'
 
 import type { CaptionPlayer, SpeechSeg } from './speech'
+import type { HighlightMessage, HighlightOverlay } from './highlight'
 import { ACTIONS } from '../engine/action'
 import { makeAssetUrl } from '../engine/base'
 import { ElementEngine } from '../engine/elements'
@@ -50,6 +51,7 @@ export async function bootstrapNeuro (stage: HTMLElement): Promise<void> {
   const refs = manifest.refs ?? {}
   const avatarId = refs.avatar ?? 'avatar'
   const captionId = refs.caption ?? 'caption'
+  const highlightId = refs.highlight ?? 'highlight'
 
   const engine = new ElementEngine(stage, manifest.scenes, {
     components: COMPONENTS,
@@ -98,6 +100,19 @@ export async function bootstrapNeuro (stage: HTMLElement): Promise<void> {
   }
   ensurePlayer()
 
+  // ---------- 高亮消息浮层（事件驱动；场景开关决定是否显示） ----------
+
+  let highlight: HighlightOverlay | null = null
+
+  function ensureHighlight (): HighlightOverlay | null {
+    const view = engine.view<HighlightOverlay>(highlightId)
+    if (view && view !== highlight) {
+      highlight = view
+    }
+    return highlight
+  }
+  ensureHighlight()
+
   // ---------- 立绘动作（tool_start 驱动；zoom 在语音播完后复位） ----------
 
   let zoomed = false
@@ -131,6 +146,7 @@ export async function bootstrapNeuro (stage: HTMLElement): Promise<void> {
     void engine
       .setScene(info.id, { elapsed: Number(info.elapsed ?? 0), duration: Number(info.duration ?? 0) })
       .then(ensurePlayer)
+      .then(ensureHighlight)
       .catch(error => console.warn(`场景切换失败: ${info.id}`, error))
   }
 
@@ -143,6 +159,8 @@ export async function bootstrapNeuro (stage: HTMLElement): Promise<void> {
       duration: Number(scene.duration ?? 0),
       elapsed: Number(scene.elapsed ?? 0),
     })
+    // 场景声明不显示高亮浮层（intro）时清空队列并忽略后续 highlight 事件
+    ensureHighlight()?.setEnabled(scene.highlight_messages !== false)
   }
 
   // ---------- 层显隐基线（状态平面的 layers；父页面仍可按 id 追加隐藏） ----------
@@ -229,6 +247,14 @@ export async function bootstrapNeuro (stage: HTMLElement): Promise<void> {
     ensurePlayer()?.beginTurn(turnId)
   })
 
+  // 高亮消息：stream 在注入时随 POST /chat 发来，neuro 在 start 之后发内容事件。
+  feed.onContent('highlight', (ev: FeedEvent) => {
+    const messages = Array.isArray(ev.messages) ? ev.messages : []
+    for (const msg of messages) {
+      ensureHighlight()?.show(msg as HighlightMessage)
+    }
+  })
+
   feed.onContent('speech', (ev: FeedEvent) => {
     const seg: SpeechSeg = {
       index: Number(ev.index ?? 0),
@@ -292,6 +318,9 @@ export async function bootstrapNeuro (stage: HTMLElement): Promise<void> {
     manifest,
     get player () {
       return player
+    },
+    get highlight () {
+      return highlight
     },
     setHidden: (ids: string[]) => engine.setHidden(ids),
     resetZoom,

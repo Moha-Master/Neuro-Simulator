@@ -12,7 +12,7 @@ const EVENT_TYPES = [
   'session_end',
   'stream_metadata',
   'chat_message',
-  'priority_message',
+  'highlight_message',
 ] as const
 
 interface Snapshot {
@@ -27,7 +27,7 @@ interface ChatEvent {
   username?: string
   content?: string
   created_at?: string
-  priority_type?: string | null
+  highlight_type?: string | null
   value?: number
 }
 
@@ -41,7 +41,7 @@ function nowStamp(): string {
  * 直播间聊天/状态流：SSE /manage/stream/ui/events（同一条画面事件通道）。
  *
  * - snapshot 带最近 30 条聊天记录，用于首屏/重连恢复
- * - chat_message / priority_message 为实时入列事件
+ * - chat_message / highlight_message 为实时入列事件
  * - 断线重连后按 after_id 走 REST 补齐（避免 EventSource 重连期间漏消息）
  */
 export function useStreamChat() {
@@ -98,7 +98,7 @@ export function useStreamChat() {
         content: String(ev.content ?? ''),
         // SSE 入列事件不带 created_at；直播场景下接收时间与发送时间同一秒内
         created_at: ev.created_at ?? nowStamp(),
-        priority_type: ev.priority_type ?? null,
+        highlight_type: ev.highlight_type ?? null,
         value: Number(ev.value ?? 0),
       },
     ])
@@ -166,7 +166,7 @@ export function useStreamChat() {
       return
     }
 
-    if (type === 'chat_message' || type === 'priority_message') {
+    if (type === 'chat_message' || type === 'highlight_message') {
       appendEvent(data as ChatEvent)
     }
   }

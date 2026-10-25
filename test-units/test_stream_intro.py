@@ -154,11 +154,11 @@ class TestIntroSceneData(unittest.TestCase):
         """离开开场后 chat 的出现由数据声明（淡入），不靠前端猜 neuro 的场景。"""
         room = next(s for s in stream_scenes() if s["id"] == SCENE_ROOM)
         by_id = {e["id"]: e for e in room["elements"]}
-        for eid in ("chat", "highlight"):
-            enter = by_id[eid].get("script", {}).get("enter")
-            self.assertIsNotNone(enter, f"{eid} 需要 enter 脚本才能在切回 room 时淡入")
-            self.assertIn("opacity", enter.get("tween", {}))
-            self.assertGreater(enter.get("duration", 0), 0)
+        self.assertEqual(sorted(by_id), ["chat"], "stream 场景不再有 highlight 元素")
+        enter = by_id["chat"].get("script", {}).get("enter")
+        self.assertIsNotNone(enter, "chat 需要 enter 脚本才能在切回 room 时淡入")
+        self.assertIn("opacity", enter.get("tween", {}))
+        self.assertGreater(enter.get("duration", 0), 0)
 
     def test_neuro_scene_namespace_is_separate(self):
         """两套场景各自命名：stream 用 room_intro，不把 neuro 的 intro id 搬过来。"""
@@ -208,7 +208,7 @@ class TestIntroGate(unittest.IsolatedAsyncioTestCase):
             "channel": "stream",
             "conversation_id": "conv-intro",
             "cursor": 0,
-            "priority_cursor": 0,
+            "highlight_cursor": 0,
         }
         self.loop.state = "starting"
         self.loop._intro_gate = {
@@ -280,7 +280,8 @@ class TestIntroGate(unittest.IsolatedAsyncioTestCase):
         gate = self.loop._intro_gate
         await self.run_main(fake)
         self.assertTrue(self.loop._reached_live)
-        self.assertEqual(fake.subscriptions, 1)
+        # 2 条：开场闸门 1 条 + 从开播起常驻的高亮场景订阅 1 条
+        self.assertEqual(fake.subscriptions, 2)
         self.assertEqual(gate["ready_via"], "sse")
         self.assertIsNone(self.loop.last_error)
 
@@ -298,7 +299,8 @@ class TestIntroGate(unittest.IsolatedAsyncioTestCase):
         gate = self.loop._intro_gate
         await self.run_main(fake, ready_timeout=2.0)
         self.assertTrue(self.loop._reached_live)
-        self.assertEqual(fake.subscriptions, 1)
+        # 2 条：开场闸门 1 条 + 从开播起常驻的高亮场景订阅 1 条
+        self.assertEqual(fake.subscriptions, 2)
         self.assertEqual(gate["ready_via"], "poll")
         self.assertEqual(fake.calls, 2)
 

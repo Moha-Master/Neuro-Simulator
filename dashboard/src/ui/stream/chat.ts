@@ -1,16 +1,14 @@
-/** 直播画面聊天层 + 优先消息弹窗。
+/** 直播画面聊天层。
  *
  * - ChatOverlay：左上角 Twitch 风格弹幕（jChat/ChatIS 风格：Segoe UI、
  *   800 字重、白字黑描边、Twitch 官方用户名色板、自动滚底）。
- * - HighlightOverlay：优先消息（bits / points）额外弹一个 sc_purple / sc_pink
- *   背景的高亮框，时序同旧 client：滑入 1s → 停留 8s → 滑出 1s。
- *   多条排队逐条展示，避免快速到达时互相覆盖。
  *
- * 优先消息同时会出现在聊天层（与旧 client 行为一致：普通行 + 高亮弹窗）。
+ * 高亮消息的浮层归 neuro 窗口（`../neuro/highlight.ts`）：它在消息真正随
+ * `POST /chat` 注入后才出现，属于 neuro 场景，不再是 stream 场景的元素。
+ * 入列时这里只把消息当普通聊天行追加。
  */
 
 import type { ChatMsg } from './feed'
-import { asset } from './assets'
 
 /** Twitch 官方默认用户名色板（jChat/ChatIS 直接使用 IRC color tag；
  *  这里没有真实 color tag，用用户名哈希稳定映射，刷新/重连不换色）。 */
@@ -34,8 +32,6 @@ const USERNAME_COLORS = [
 
 const MAX_LINES = 80
 const MAX_SEEN = 1000
-const SC_HOLD_MS = 8000
-const SC_FADE_MS = 1000
 
 /** 稳定映射用户名 → Twitch 色板（小写后做 FNV-1a，Twitch 用户名不区分大小写）。 */
 function colorFor (username: string): string {
@@ -113,98 +109,5 @@ export class ChatOverlay {
       this.lines.firstElementChild?.remove()
     }
     this.el.scrollTop = this.el.scrollHeight
-  }
-}
-
-export class HighlightOverlay {
-  private el: HTMLElement
-  private queue: ChatMsg[] = []
-  private showing = false
-  private hideTimer: number | null = null
-  private removalTimer: number | null = null
-
-  constructor (el: HTMLElement | null = document.querySelector('#highlight-message-overlay')) {
-    if (!el) {
-      throw new Error('缺少 #highlight-message-overlay')
-    }
-    this.el = el
-    this.el.classList.add('hidden')
-  }
-
-  show (msg: ChatMsg): void {
-    const type = msg.priority_type
-    if (type !== 'bits' && type !== 'points') {
-      return
-    }
-    this.queue.push(msg)
-    this.next()
-  }
-
-  clear (): void {
-    this.queue = []
-    this.clearTimers()
-    this.showing = false
-    this.el.classList.remove('is-visible')
-    this.el.classList.add('hidden')
-    this.el.replaceChildren()
-  }
-
-  private next (): void {
-    if (this.showing) {
-      return
-    }
-    const msg = this.queue.shift()
-    if (!msg) {
-      return
-    }
-    this.showing = true
-
-    const bits = msg.priority_type === 'bits'
-    const value = Number(msg.value ?? 0)
-    const label = `HIGHLIGHTED MESSAGE${
-      value > 0 ? ` (${value} ${bits ? 'BITS' : 'POINTS'})` : ''
-    }`
-
-    this.el.innerHTML = `
-      <img src="${asset(bits ? 'sc_purple.png' : 'sc_pink.png')}" class="sc-background-image" alt="">
-      <div class="sc-content">
-        <div class="sc-user"></div>
-        <div class="sc-label">${label}</div>
-        <div class="sc-message"></div>
-      </div>`;
-
-    // 用户输入一律走 textContent（不拼进 innerHTML）
-    (this.el.querySelector('.sc-user') as HTMLElement).textContent = msg.username || 'viewer'
-    const messageEl = this.el.querySelector('.sc-message') as HTMLElement
-    messageEl.textContent = msg.content
-    messageEl.style.color = bits
-      ? 'var(--sc-purple-bg-color)'
-      : 'var(--sc-pink-bg-color)'
-
-    // 先移除 hidden 让初态（屏幕外）生效，强制 reflow 后再加 is-visible 触发 transition
-    this.el.classList.remove('hidden')
-    void this.el.offsetHeight
-    this.el.classList.add('is-visible')
-
-    this.hideTimer = window.setTimeout(() => {
-      this.el.classList.remove('is-visible') // 滑出
-      this.removalTimer = window.setTimeout(() => {
-        this.el.classList.add('hidden')
-        this.el.replaceChildren()
-        this.showing = false
-        this.next()
-      }, SC_FADE_MS)
-    }, SC_HOLD_MS + SC_FADE_MS)
-  }
-
-  private clearTimers (): void {
-    if (this.hideTimer !== null) {
-      window.clearTimeout(this.hideTimer)
-      this.hideTimer = null
-    }
-    if (this.removalTimer !== null) {
-      window.clearTimeout(this.removalTimer)
-      this.removalTimer = null
-    }
   }
 }

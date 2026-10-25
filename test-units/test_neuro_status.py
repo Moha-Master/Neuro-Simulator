@@ -63,9 +63,13 @@ class TestNeuroStatusShape(unittest.TestCase):
         self.assertAlmostEqual(scene["duration"], 13.0)
         self.assertIn("elapsed", scene)
         self.assertTrue(scene["auto_returns"])
+        self.assertFalse(scene["highlight_messages"], "intro 场景不显示高亮浮层")
 
         layers = body["sections"]["layers"]["current"]
-        self.assertEqual({e["id"] for e in layers}, {"bg_room", "intro_video", "avatar", "caption"})
+        self.assertEqual(
+            {e["id"] for e in layers},
+            {"bg_room", "intro_video", "avatar", "caption", "highlight"},
+        )
         self.assertTrue(all("visible" in e and "name" in e for e in layers))
 
         graph = body["sections"]["scene"]["graph"]

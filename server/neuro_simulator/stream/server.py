@@ -4,8 +4,9 @@
 - GET  /health / GET /stream/status / GET /stream/sessions   状态与场次史
 - POST /stream/start|pause|resume|stop                        直播循环控制
 - GET  /queue/messages、POST /queue/message                   当前场次队列（尾读/入列；
-                                                               可选 type/value 进优先轨）
+                                                               可选 type/value 进高亮轨）
 - GET  /queues/{queue_id}/messages                            历史场次队列（按 queue_id 读）
+- PUT  /stream/highlight                                      暂停/恢复高亮消息队列消费
 - POST /scene                                                 手动切场景（→ 广播 scene_set）
 - GET  /stream/scenes                                         场景清单（读 ui 构建的 scenes.json）
 - POST /game/{game}/action · GET /game/state                   本地小游戏（Wordle…）：动作 + 全量状态
@@ -51,7 +52,7 @@ from .storage import Storage
 class MessagePayload(BaseModel):
     username: str = "viewer"
     content: str
-    # 优先消息（可选）：type ∈ {"bits","points"}；value 为货币量（bits/points 数）。
+    # 高亮消息（可选）：type ∈ {"bits","points"}；value 为货币量（bits/points 数）。
     # 不传 type = 普通观众消息。
     type: str | None = None
     value: int = 0
@@ -104,6 +105,12 @@ class TemplatePreviewPayload(BaseModel):
 class ScenePayload(BaseModel):
     id: str
     params: dict[str, Any] | None = None
+
+
+class HighlightPausePayload(BaseModel):
+    """高亮消息队列暂停开关（True = 暂停消费）。"""
+
+    paused: bool
 
 
 class GameActionPayload(BaseModel):
@@ -369,6 +376,21 @@ def create_app() -> FastAPI:
         )
         return {"status": "ok", **meta}
 
+    @app.put("/stream/highlight")
+    async def stream_highlight(payload: HighlightPausePayload):
+        """暂停/恢复高亮消息队列消费（最后写入者生效，来源记为 manual）。
+
+        无进行中场次 → 409。暂停时高亮轨不被消费（游标不推进），普通消息照常循环。
+        """
+        lp = _loop()
+        if not lp.session:
+            raise HTTPException(status_code=409, detail="当前没有进行中的直播场次")
+        try:
+            lp.set_highlight_paused(payload.paused, source="manual")
+        except StreamConflict as e:
+            raise HTTPException(status_code=409, detail=str(e)) from e
+        return {"status": "ok", "paused": bool(payload.paused), "source": "manual"}
+
     @app.post("/stream/pause")
     async def stream_pause():
         await _guard(_loop().pause())
@@ -406,8 +428,8 @@ def create_app() -> FastAPI:
         content = payload.content.strip()
         if not content:
             raise HTTPException(status_code=400, detail="content must not be empty")
-        priority_type = (payload.type or "").strip().lower() or None
-        if priority_type is not None and priority_type not in ("bits", "points"):
+        highlight_type = (payload.type or "").strip().lower() or None
+        if highlight_type is not None and highlight_type not in ("bits", "points"):
             raise HTTPException(
                 status_code=400, detail='type 只能是 "bits" 或 "points"（留空 = 普通消息）'
             )
@@ -416,15 +438,15 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=400, detail="value must be >= 0")
         try:
             msg_id = await lp.append_message(
-                username, content, priority_type=priority_type, value=value
+                username, content, highlight_type=highlight_type, value=value
             )
         except StreamConflict as e:
             raise HTTPException(status_code=409, detail=str(e)) from e
         return {
             "status": "ok",
             "id": msg_id,
-            "priority": priority_type is not None,
-            "type": priority_type,
+            "highlight": highlight_type is not None,
+            "type": highlight_type,
             "value": value,
         }
 
@@ -696,7 +718,7 @@ def create_app() -> FastAPI:
                 elements = lp.games.element_states()
                 if elements:
                     snapshot["elements"] = elements
-                # 聊天层恢复：最近 N 条（含优先消息，带 type/value 供样式区分）
+                # 聊天层恢复：最近 N 条（含高亮消息，带 type/value 供样式区分）
                 if lp.session:
                     storage: Storage = app.state.storage
                     snapshot["chat"] = await storage.recent_messages(

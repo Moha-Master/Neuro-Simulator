@@ -5,10 +5,10 @@
  *   state / session_begin / session_end / scene_set{id,duration,elapsed} /
  *   settings{neuro_*} /
  *   element_state{id,payload} / stream_metadata{title,category} /
- *   chat_message / priority_message
+ *   chat_message / highlight_message
  *
- * 字幕/音频/立绘动作不再经过 stream：neuro 窗口（合成器里的 iframe）直接订阅
- * neuro 的 /ui/events。工具事件同理，不在这里镜像。
+ * 字幕/音频/立绘动作/高亮消息浮层不再经过 stream：neuro 窗口（合成器里的 iframe）
+ * 直接订阅 neuro 的 /ui/events。工具事件同理，不在这里镜像。
  */
 
 import { apiUrl } from '../engine/base'
@@ -23,7 +23,7 @@ export interface ChatMsg {
   username: string
   content: string
   created_at?: string
-  priority_type?: string | null
+  highlight_type?: string | null
   value?: number
 }
 
@@ -65,7 +65,7 @@ const EVENT_NAMES = [
   'scene_set',
   'element_state',
   'chat_message',
-  'priority_message',
+  'highlight_message',
   'manifest_changed',
 ]
 

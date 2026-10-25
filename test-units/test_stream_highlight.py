@@ -1,4 +1,9 @@
-"""双轨队列（普通 / 优先）行为测试：优先轨先进先出、一次一条、优先不污染普通轨。"""
+"""双轨队列（普通 / 高亮）行为测试：高亮轨先进先出、一次一条、优先不污染普通轨。
+
+高亮消息的**入列**与**注入**是两件事：入列只广播 `highlight_message` 并进聊天层，
+真正的浮层在消息被 `_pick` 选中、随 `POST /chat` 发给 neuro 之后才由 neuro 窗口弹出。
+暂停开关只影响高亮轨消费，不丢消息、不重排。
+"""
 
 import asyncio
 import tempfile
@@ -9,7 +14,8 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from neuro_simulator.broadcaster import EventBroadcaster
-from neuro_simulator.stream.loop import StreamLoop
+from neuro_simulator.stream import scenes as scene_catalog
+from neuro_simulator.stream.loop import StreamConflict, StreamLoop
 from neuro_simulator.templates import TemplateRenderError
 from neuro_simulator.stream.persona import ChatbotPersonaStore, build_template_store
 from neuro_simulator.stream.storage import Storage
@@ -25,14 +31,21 @@ class _FakeNeuroClient:
         self.text = text
         self.chat_calls = 0
         self.audio_flags: list[bool] = []
+        self.highlights: list[list[dict] | None] = []
         self.status_calls = 0
         self.captured: dict[str, str] = {}
 
     async def chat_batch(
-        self, message: str, channel: str, conversation_id: str, audio: bool = False
+        self,
+        message: str,
+        channel: str,
+        conversation_id: str,
+        audio: bool = False,
+        highlights: list[dict] | None = None,
     ) -> dict:
         self.chat_calls += 1
         self.audio_flags.append(audio)
+        self.highlights.append(highlights)
         self.captured["text"] = message
         return {
             "turn_id": 7,
@@ -56,7 +69,7 @@ class _FakeNeuroClient:
         }
 
 
-class TestPriorityQueue(unittest.IsolatedAsyncioTestCase):
+class TestHighlightQueue(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.storage = Storage(Path(self.tmp.name) / "test.db")
@@ -69,16 +82,16 @@ class TestPriorityQueue(unittest.IsolatedAsyncioTestCase):
         self.loop = StreamLoop(self.storage, self.bus, self.persona, self.templates)
         self.queue_row, _ = await self.storage.create_queue("test queue")
         _, session_id = await self.storage.create_session(
-            self.queue_row, "stream", "conv-priority-test"
+            self.queue_row, "stream", "conv-highlight-test"
         )
         row = await self.storage.get_session(session_id)
         self.session = {
             "session_row": row["id"],
             "queue_row": self.queue_row,
             "channel": "stream",
-            "conversation_id": "conv-priority-test",
+            "conversation_id": "conv-highlight-test",
             "cursor": 0,
-            "priority_cursor": 0,
+            "highlight_cursor": 0,
         }
         self.settings = SimpleNamespace(
             messages_per_round=10,
@@ -90,30 +103,31 @@ class TestPriorityQueue(unittest.IsolatedAsyncioTestCase):
         )
 
     async def asyncTearDown(self):
+        await self.loop._scenes.stop()
         await self.storage.close()
         self.tmp.cleanup()
 
-    async def test_priority_first_then_normal(self):
+    async def test_highlight_first_then_normal(self):
         n1 = await self.storage.append_message(self.queue_row, "a", "normal 1")
         p1 = await self.storage.append_message(
-            self.queue_row, "b", "pay 1", priority_type="bits", value=100
+            self.queue_row, "b", "pay 1", highlight_type="bits", value=100
         )
         p2 = await self.storage.append_message(
-            self.queue_row, "c", "pay 2", priority_type="points", value=200
+            self.queue_row, "c", "pay 2", highlight_type="points", value=200
         )
         n2 = await self.storage.append_message(self.queue_row, "d", "normal 2")
 
         picked = await self.loop._pick(self.settings, self.session)
-        self.assertEqual(picked["kind"], "priority")
+        self.assertEqual(picked["kind"], "highlight")
         self.assertEqual([m["id"] for m in picked["messages"]], [p1])
-        self.session["priority_cursor"] = p1
+        self.session["highlight_cursor"] = p1
 
         picked = await self.loop._pick(self.settings, self.session)
-        self.assertEqual(picked["kind"], "priority")
+        self.assertEqual(picked["kind"], "highlight")
         self.assertEqual([m["id"] for m in picked["messages"]], [p2])
-        self.session["priority_cursor"] = p2
+        self.session["highlight_cursor"] = p2
 
-        # 优先轨空后回落普通轨；优先消息不会混入普通候选
+        # 高亮轨空后回落普通轨；高亮消息不会混入普通候选
         picked = await self.loop._pick(self.settings, self.session)
         self.assertEqual(picked["kind"], "normal")
         self.assertEqual([m["id"] for m in picked["messages"]], [n1, n2])
@@ -121,21 +135,21 @@ class TestPriorityQueue(unittest.IsolatedAsyncioTestCase):
     async def test_depths_separate(self):
         await self.storage.append_message(self.queue_row, "a", "normal")
         await self.storage.append_message(
-            self.queue_row, "b", "paid", priority_type="bits", value=10
+            self.queue_row, "b", "paid", highlight_type="bits", value=10
         )
         self.assertEqual(await self.storage.queue_depth_after(self.queue_row, 0), 1)
-        self.assertEqual(await self.storage.priority_depth_after(self.queue_row, 0), 1)
+        self.assertEqual(await self.storage.highlight_depth_after(self.queue_row, 0), 1)
 
-    async def test_append_broadcasts_priority_event(self):
+    async def test_append_broadcasts_highlight_event(self):
         self.loop.session = self.session
         q = self.bus.subscribe()
         msg_id = await self.loop.append_message(
-            "fan", "hello", priority_type="points", value=250
+            "fan", "hello", highlight_type="points", value=250
         )
         ev = q.get_nowait()
-        self.assertEqual(ev["type"], "priority_message")
+        self.assertEqual(ev["type"], "highlight_message")
         self.assertEqual(ev["id"], msg_id)
-        self.assertEqual(ev["priority_type"], "points")
+        self.assertEqual(ev["highlight_type"], "points")
         self.assertEqual(ev["value"], 250)
 
     async def test_append_broadcasts_normal_event(self):
@@ -145,7 +159,163 @@ class TestPriorityQueue(unittest.IsolatedAsyncioTestCase):
         ev = q.get_nowait()
         self.assertEqual(ev["type"], "chat_message")
         self.assertEqual(ev["id"], msg_id)
-        self.assertNotIn("priority_type", ev)
+        self.assertNotIn("highlight_type", ev)
+
+    async def test_pause_skips_highlight_track_without_advancing_cursor(self):
+        n1 = await self.storage.append_message(self.queue_row, "a", "normal 1")
+        p1 = await self.storage.append_message(
+            self.queue_row, "b", "pay 1", highlight_type="bits", value=100
+        )
+        self.loop.highlight_paused = True
+        self.loop.highlight_source = "manual"
+
+        picked = await self.loop._pick(self.settings, self.session)
+        self.assertEqual(picked["kind"], "normal")
+        self.assertEqual([m["id"] for m in picked["messages"]], [n1])
+
+        fake = _FakeNeuroClient("http://fake")
+        with patch("neuro_simulator.stream.loop.NeuroClient", lambda url: fake):
+            await self.loop._run_round(self.settings, self.session)
+
+        self.assertEqual(self.session["cursor"], n1)
+        self.assertEqual(self.session["highlight_cursor"], 0, "暂停时游标不能推进")
+        self.assertEqual(self.loop.highlight_depth, 1, "积压数保留")
+        self.assertEqual(fake.chat_calls, 1)
+        self.assertIsNone(fake.highlights[0], "普通轮不带 highlights")
+        backlog = await self.storage.list_highlight_messages(self.queue_row, 0)
+        self.assertEqual([m["id"] for m in backlog], [p1])
+
+    async def test_resume_consumes_backlog_from_the_oldest(self):
+        p1 = await self.storage.append_message(
+            self.queue_row, "b", "pay 1", highlight_type="bits", value=100
+        )
+        p2 = await self.storage.append_message(
+            self.queue_row, "c", "pay 2", highlight_type="points", value=200
+        )
+        self.loop.highlight_paused = True
+        self.assertIsNone(await self.loop._pick(self.settings, self.session))
+
+        self.loop.highlight_paused = False
+        picked = await self.loop._pick(self.settings, self.session)
+        self.assertEqual(picked["kind"], "highlight")
+        self.assertEqual([m["id"] for m in picked["messages"]], [p1])
+
+        fake = _FakeNeuroClient("http://fake")
+        with patch("neuro_simulator.stream.loop.NeuroClient", lambda url: fake):
+            await self.loop._run_round(self.settings, self.session)
+        self.assertEqual(self.session["highlight_cursor"], p1)
+        self.assertEqual(self.session["cursor"], 0)
+        self.assertEqual(self.loop.highlight_depth, 1)
+
+        picked = await self.loop._pick(self.settings, self.session)
+        self.assertEqual([m["id"] for m in picked["messages"]], [p2])
+
+    async def test_selected_highlight_sends_metadata_to_neuro(self):
+        msg_id = await self.storage.append_message(
+            self.queue_row, "fan", "hi there", highlight_type="bits", value=420
+        )
+        fake = _FakeNeuroClient("http://fake")
+        with patch("neuro_simulator.stream.loop.NeuroClient", lambda url: fake):
+            await self.loop._run_round(self.settings, self.session)
+
+        self.assertEqual(
+            fake.highlights,
+            [
+                [
+                    {
+                        "id": msg_id,
+                        "username": "fan",
+                        "content": "hi there",
+                        "highlight_type": "bits",
+                        "value": 420,
+                    }
+                ]
+            ],
+        )
+        self.assertEqual(self.session["highlight_cursor"], msg_id)
+        # prompt 里仍然与普通消息完全同格式（元数据不发进模板）
+        self.assertIn("- fan: hi there", fake.captured["text"])
+        self.assertNotIn("bits", fake.captured["text"])
+
+    async def test_stream_scene_flag_pauses_on_scene_change(self):
+        scenes = [
+            {
+                "id": "room",
+                "label": "房间",
+                "highlight_messages": False,
+                "elements": [
+                    {
+                        "id": "chat",
+                        "z": 20,
+                        "box": {"x": 0, "y": 0, "w": 0.25, "h": 0.5},
+                        "content": {"kind": "component", "name": "chat.overlay"},
+                    }
+                ],
+                "neuro": {"x": 0, "y": 0, "w": 1, "hide": []},
+            }
+        ]
+        with patch.object(scene_catalog, "load_scenes", return_value=scenes):
+            self.loop.on_scene("room")
+        self.assertTrue(self.loop.highlight_paused)
+        self.assertEqual(self.loop.highlight_source, "scene:stream")
+
+    async def test_manual_set_requires_a_session(self):
+        with self.assertRaises(StreamConflict):
+            self.loop.set_highlight_paused(True, source="manual")
+        self.loop.session = self.session
+        self.loop.set_highlight_paused(True, source="manual")
+        self.assertTrue(self.loop.highlight_paused)
+        self.assertEqual(self.loop.highlight_source, "manual")
+
+    async def test_neuro_scene_sse_drives_pause_switch(self):
+        """neuro 场景 SSE：normal=true/unpause、intro=false/pause、null=pause。"""
+
+        class _SceneNeuro(_FakeNeuroClient):
+            async def state_events(self, want=None, drop=None):
+                yield {"sections": {"scene": {"current": None}}}
+                yield {"sections": {"scene": {"current": {
+                    "id": "normal", "highlight_messages": True}}}}
+                yield {"sections": {"scene": {"current": {
+                    "id": "intro", "highlight_messages": False}}}}
+                yield {"sections": {"scene": {"current": {
+                    "id": "normal", "highlight_messages": True}}}}
+                await asyncio.sleep(10)
+
+        calls = []
+        original = self.loop._set_highlight_paused
+
+        def record(paused, source):
+            calls.append((paused, source))
+            original(paused, source)
+
+        self.loop._set_highlight_paused = record  # type: ignore[method-assign]
+        fake = _SceneNeuro("http://fake")
+        with patch("neuro_simulator.stream.loop.NeuroClient", lambda url: fake), patch(
+            "neuro_simulator.stream.loop.stream_settings.load",
+            return_value=SimpleNamespace(neuro_url="http://fake"),
+        ):
+            task = asyncio.create_task(self.loop._watch_neuro_scene())
+            try:
+                for _ in range(200):
+                    if len(calls) >= 4:
+                        break
+                    await asyncio.sleep(0.005)
+            finally:
+                task.cancel()
+                with self.assertRaises(asyncio.CancelledError):
+                    await task
+
+        self.assertEqual(
+            calls,
+            [
+                (True, "scene:neuro"),
+                (False, "scene:neuro"),
+                (True, "scene:neuro"),
+                (False, "scene:neuro"),
+            ],
+        )
+        self.assertFalse(self.loop.highlight_paused)
+        self.assertTrue(self.loop.neuro_link["reachable"])
 
     async def test_empty_queue_behavior(self):
         self.assertIsNone(await self.loop._pick(self.settings, self.session))
@@ -162,8 +332,12 @@ class TestPriorityQueue(unittest.IsolatedAsyncioTestCase):
         captured: dict[str, str] = {}
 
         class _CapturingClient(_FakeNeuroClient):
-            async def chat_batch(self, message, channel, conversation_id, audio=False):
-                result = await super().chat_batch(message, channel, conversation_id, audio)
+            async def chat_batch(
+                self, message, channel, conversation_id, audio=False, highlights=None
+            ):
+                result = await super().chat_batch(
+                    message, channel, conversation_id, audio, highlights
+                )
                 captured["text"] = message
                 return result
 
@@ -190,9 +364,13 @@ class TestPriorityQueue(unittest.IsolatedAsyncioTestCase):
         sent: list[str] = []
 
         class _CapturingClient(_FakeNeuroClient):
-            async def chat_batch(self, message, channel, conversation_id, audio=False):
+            async def chat_batch(
+                self, message, channel, conversation_id, audio=False, highlights=None
+            ):
                 sent.append(message)
-                return await super().chat_batch(message, channel, conversation_id, audio)
+                return await super().chat_batch(
+                    message, channel, conversation_id, audio, highlights
+                )
 
         with patch("neuro_simulator.stream.loop.NeuroClient", _CapturingClient):
             with self.assertRaises(TemplateRenderError):

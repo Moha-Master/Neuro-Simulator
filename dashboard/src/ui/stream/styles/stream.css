@@ -1,13 +1,11 @@
 /* Neuro-Sama 直播合成器样式。
    舞台（16:9 letterbox + 容器查询单位）与旧 client 规格一致；
-   场景层（背景/游戏/chat/highlight）由元素引擎按 scenes.json 建的 `.ns-el`，
+   场景层（背景/游戏/chat）由元素引擎按 scenes.json 建的 `.ns-el`，
    **位置/大小/层级来自场景数据（inline style）**，这里只写各层内部的样子。
-   neuro 窗口是单独的 iframe（core/neuro.ts），#no-source 是掉线覆盖层。 */
+   neuro 窗口是单独的 iframe（core/neuro.ts），#no-source 是掉线覆盖层。
+   高亮消息浮层属于 neuro 窗口（neuro.css），这里没有 highlight 层。 */
 
 :root {
-  /* 优先消息弹窗配色（旧 client 规格：bits=紫 / points=粉） */
-  --sc-pink-bg-color: #f68795;
-  --sc-purple-bg-color: #b97ad5;
   color-scheme: dark;
 }
 
@@ -110,7 +108,7 @@ body {
   color: #fff;
 }
 
-/* ===== no source：neuro 中途掉线时整屏覆盖（chat/highlight 在它上面） ===== */
+/* ===== no source：neuro 中途掉线时整屏覆盖（chat 在它上面） ===== */
 #no-source {
   position: absolute;
   inset: 0;
@@ -119,63 +117,6 @@ body {
   object-fit: cover;
   z-index: 18;
   pointer-events: none;
-}
-
-/* ===== 优先消息弹窗（Super Chat 风格） =====
-   旧 client 时序：从上方滑入 1s → 停留 8s → 滑出 1s。
-   背景图自带圆角（sc_purple=bits / sc_pink=points）。水平居中由场景的 box 决定。 */
-.ns-el[data-component="highlight"] {
-  transform: translateY(-220%);
-  transition: transform 1s;
-}
-.ns-el[data-component="highlight"].is-visible {
-  transform: translateY(0);
-  transition-timing-function: cubic-bezier(0.25, 1, 0.5, 1);
-}
-.sc-background-image {
-  width: 100%;
-  height: auto;
-  display: block;
-}
-.sc-content {
-  position: absolute;
-  inset: 0;
-  color: #fff;
-  font-family: "Causten", "Noto Sans SC", sans-serif;
-}
-.sc-user {
-  position: absolute;
-  top: 20%;
-  left: 40%;
-  transform: translateX(-50%);
-  max-width: 75%;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-size: 8.333cqi;
-  text-align: left;
-  text-shadow: 0 0 3px rgba(0, 0, 0, 0.25);
-}
-/* 动态头部文本：当前两张背景图仍烘焙着 HIGHLIGHTED MESSAGE (500 BITS)，
-   先隐藏避免重叠；等图片去掉静态文字后把 visibility 改为 visible 即可。 */
-.sc-label {
-  position: absolute;
-  top: 32%;
-  left: 20%;
-  font-size: 6.667cqi;
-  letter-spacing: 0.04em;
-  white-space: nowrap;
-  visibility: hidden;
-}
-.sc-message {
-  position: absolute;
-  top: 60%;
-  left: 50%;
-  transform: translate(-50%, -50%);
-  width: 90%;
-  font-size: 8.333cqi;
-  text-align: center;
-  overflow-wrap: break-word;
 }
 
 /* ===== Wordle 元素（棋盘 + 屏幕键盘） =====

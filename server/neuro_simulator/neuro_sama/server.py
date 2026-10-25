@@ -1,7 +1,7 @@
 """FastAPI 服务：POST /chat（SSE/批量）+ 内容/状态两条总线 + 窗口端点 + /manage。
 
 两条总线的分工（详见 AGENTS）：
-- `GET /chat/events`：**内容平面**（start/reasoning/content/speech/tool_*/usage/
+- `GET /chat/events`：**内容平面**（start/reasoning/content/highlight/speech/tool_*/usage/
   done/cancelled/error）。生成在后台任务里（`turns.TurnRunner`），连接只是观察者，
   断开不终止生成；首帧 snapshot 供中途连接续播。
 - `GET /state/events`：**状态平面**（`state_kit.StateBoard` 的离散变化 + 首帧完整
@@ -26,12 +26,12 @@ import json
 import time
 import uuid
 from contextlib import asynccontextmanager
-from typing import AsyncIterator
+from typing import AsyncIterator, Literal
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from openai import AsyncOpenAI
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from .. import log_kit, scene_kit, state_kit
 from ..broadcaster import EventBroadcaster
@@ -63,6 +63,7 @@ CONTENT_EVENT_TYPES = (
     "start",
     "reasoning",
     "content",
+    "highlight",
     "speech",
     "tool_start",
     "tool_result",
@@ -426,9 +427,12 @@ def _scene_current(ui_state: UiState) -> dict | None:
         # 只读清单里的脚本声明，不解析时长（后者可能触发视频轨道探测 = I/O）
         script = (scene or {}).get("state_script") or {}
         auto_returns = bool(script.get("steps"))
+        flag = (scene or {}).get("highlight_messages")
+        highlight_messages = flag if isinstance(flag, bool) else True
     except ui_scenes.SceneError:
         # 场景数据坏了不拖垮状态投影：用 id 兜底，其余字段留空
         label, desc, icon, auto_returns = sid, "", None, False
+        highlight_messages = True
     return {
         "id": sid,
         "label": label,
@@ -437,6 +441,7 @@ def _scene_current(ui_state: UiState) -> dict | None:
         "duration": snap.get("duration"),
         "elapsed": snap.get("elapsed"),
         "auto_returns": auto_returns,
+        "highlight_messages": highlight_messages,
     }
 
 
@@ -516,6 +521,16 @@ def build_status_board(ui_state: UiState, ctx: dict) -> state_kit.StateBoard:
     return board
 
 
+class HighlightPayload(BaseModel):
+    """随 `POST /chat` 一起发来的高亮消息元数据（仅用于窗口浮层，不进 prompt）。"""
+
+    id: int | None = None
+    username: str = "viewer"
+    content: str = Field(min_length=1)
+    highlight_type: Literal["bits", "points"]
+    value: int = Field(default=0, ge=0)
+
+
 class ChatRequest(BaseModel):
     message: str
     channel: str = "web"
@@ -524,6 +539,8 @@ class ChatRequest(BaseModel):
     audio: bool = True
     # true=SSE（默认，dashboard/test_chat 的现有行为）；false=生成结束后返回批量 JSON
     stream: bool = True
+    # 高亮消息（stream 注入时带上）：空 = 普通轮，不产生 highlight 内容事件
+    highlights: list[HighlightPayload] = Field(default_factory=list)
 
 
 class MessagePayload(BaseModel):
@@ -850,7 +867,11 @@ def create_app() -> FastAPI:
                 detail="this conversation already has a generation in progress",
             )
         try:
-            turn = runner.register(channel, conversation_id)
+            turn = runner.register(
+                channel,
+                conversation_id,
+                highlights=[h.model_dump() for h in req.highlights],
+            )
         except TurnConflict as e:
             raise HTTPException(status_code=409, detail=str(e)) from e
         # 新轮开始：这个 channel 旧的 play_head 定时器作废，状态平面推一次 turn
@@ -877,6 +898,11 @@ def create_app() -> FastAPI:
     @app.get("/chat/events")
     async def chat_events(request: Request):
         """内容总线：某个 channel / 某一轮的生成事件（**含音频**）。
+
+        事件类型：start / reasoning / content / highlight / speech / tool_start /
+        tool_result / usage / done / cancelled / error。`highlight` 只在高亮消息随
+        `POST /chat` 注入时出现（`start` 之后、正文之前），带 `messages`；浮层是瞬时
+        动画，snapshot 不存它（重连不续播）。
 
         默认全集；`want`/`drop` 只在序列化层过滤（例如窗口页 drop 掉
         reasoning/content，只要字幕与动作）。`audio=0` 只剥这一条连接的

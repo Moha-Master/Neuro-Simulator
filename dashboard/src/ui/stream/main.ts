@@ -1,14 +1,15 @@
-/** 直播合成器（dashboard 构建里的独立页面 `/ui/stream/`）：实际背景 + game/media + neuro 窗口 iframe + chat/highlight。
+/** 直播合成器（dashboard 构建里的独立页面 `/ui/stream/`）：实际背景 + game/media + neuro 窗口 iframe + chat。
  *
  * 现实对应关系：
  * - stream 只提供"其它背景 / 靠后的内容 / 靠前的前景"；
- * - neuro 窗口（背景/开场/立绘/字幕）是独立进程的整窗捕获，这里用 iframe 承载，
- *   只做整体 translate+scale，并通过 postMessage 控制内部层显隐；
+ * - neuro 窗口（背景/开场/立绘/字幕/高亮消息浮层）是独立进程的整窗捕获，这里用
+ *   iframe 承载，只做整体 translate+scale，并通过 postMessage 控制内部层显隐；
  * - 字幕/音频/工具动作不再经过 stream 的 SSE——neuro iframe 自己订阅 neuro 的
  *   /ui/events。
  *
  * 事件（stream /ui/events）只负责：场景、session/state、游戏元素状态、聊天、
- * 优先消息、settings（neuro channel）。
+ * 高亮消息入列通知、settings（neuro channel）。**高亮消息浮层归 neuro 窗口**：
+ * 入列时这里只追加一条普通聊天行，等消息真正注入后才由 neuro 弹层。
  *
  * 这个页面是**独立文档**（不是 dashboard 的 Vue 路由）：OBS 浏览器源要的是一个
  * 干净的画布（不受 Vuetify 主题/reset 影响），neuro 窗口的 iframe 也要透明背景。
@@ -17,7 +18,7 @@
 
 import type { SceneDef } from '../engine/schema'
 
-import type { ChatOverlay, HighlightOverlay } from './chat'
+import type { ChatOverlay } from './chat'
 import { ACTIONS } from '../engine/action'
 import { foreignModuleBase, makeAssetUrl } from '../engine/base'
 import { ElementEngine } from '../engine/elements'
@@ -75,13 +76,10 @@ export async function bootstrapStream (stage: HTMLElement): Promise<void> {
   })
   await engine.setScene(SCENE_STARTING_SOON, { instant: true })
 
-  // 实时管线组件从元素引擎取（starting_soon 也声明了 chat/highlight，保证实例先建好）
+  // 实时管线组件从元素引擎取（starting_soon 也声明了 chat，保证实例先建好）
   const chat = engine.view<ChatOverlay>('chat')
-  const highlight = engine.view<HighlightOverlay>('highlight')
-  for (const [id, view] of [['chat', chat], ['highlight', highlight]] as const) {
-    if (!view) {
-      console.warn(`场景缺少 ${id} 元素，相关事件将被忽略`)
-    }
+  if (!chat) {
+    console.warn('场景缺少 chat 元素，聊天事件将被忽略')
   }
 
   const noSource = document.querySelector('#no-source')
@@ -194,7 +192,6 @@ export async function bootstrapStream (stage: HTMLElement): Promise<void> {
     applyElements(snap.elements)
 
     if (snap.state === 'offline') {
-      highlight?.clear()
       void setScene(SCENE_STARTING_SOON, { instant: true })
       return
     }
@@ -212,10 +209,9 @@ export async function bootstrapStream (stage: HTMLElement): Promise<void> {
     }
   })
 
-  // 新场次开始：清掉上一场残留聊天/优先弹窗（场景由 start 广播的 scene_set 驱动）
+  // 新场次开始：清掉上一场残留聊天（场景由 start 广播的 scene_set 驱动）
   feed.on('session_begin', () => {
     chat?.clear()
-    highlight?.clear()
   })
 
   feed.on('state', (ev: FeedEvent) => {
@@ -232,7 +228,6 @@ export async function bootstrapStream (stage: HTMLElement): Promise<void> {
       }
     } else if (s === 'offline') {
       chat?.clear()
-      highlight?.clear()
       void setScene(SCENE_STARTING_SOON)
     }
   })
@@ -262,7 +257,6 @@ export async function bootstrapStream (stage: HTMLElement): Promise<void> {
 
   feed.on('session_end', () => {
     chat?.clear()
-    highlight?.clear()
     void setScene(SCENE_STARTING_SOON)
   })
 
@@ -270,10 +264,9 @@ export async function bootstrapStream (stage: HTMLElement): Promise<void> {
     chat?.append(ev as unknown as ChatMsg)
   })
 
-  feed.on('priority_message', (ev: FeedEvent) => {
-    const msg = ev as unknown as ChatMsg
-    chat?.append(msg) // 与旧 client 一致：优先消息也占一条普通聊天行
-    highlight?.show(msg)
+  // 高亮消息入列：聊天层照样占一条普通行；浮层由 neuro 窗口在真正注入后弹。
+  feed.on('highlight_message', (ev: FeedEvent) => {
+    chat?.append(ev as unknown as ChatMsg)
   });
 
   // 调试/E2E 句柄：控制台或自动化可直接驱动渲染管线（不影响运行逻辑）
@@ -284,7 +277,6 @@ export async function bootstrapStream (stage: HTMLElement): Promise<void> {
     },
     feed,
     chat,
-    highlight,
     noSource,
     setScene,
     ensureNeuro,

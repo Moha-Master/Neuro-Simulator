@@ -97,7 +97,7 @@ class TestSceneDataContract(unittest.TestCase):
         intro = scene_of(self.data, "intro")
         self.assertEqual(element_ids(normal), element_ids(intro))
         self.assertEqual(
-            element_ids(normal), ["bg_room", "intro_video", "avatar", "caption"]
+            element_ids(normal), ["bg_room", "intro_video", "avatar", "caption", "highlight"]
         )
 
     def test_scenes_differ_only_by_visibility(self):
@@ -105,12 +105,34 @@ class TestSceneDataContract(unittest.TestCase):
         intro = scene_of(self.data, "intro")
         self.assertEqual(
             {e["id"]: e.get("visible", True) for e in normal["elements"]},
-            {"bg_room": True, "intro_video": False, "avatar": True, "caption": True},
+            {
+                "bg_room": True,
+                "intro_video": False,
+                "avatar": True,
+                "caption": True,
+                "highlight": True,
+            },
         )
         self.assertEqual(
             {e["id"]: e.get("visible", True) for e in intro["elements"]},
-            {"bg_room": False, "intro_video": True, "avatar": False, "caption": True},
+            {
+                "bg_room": False,
+                "intro_video": True,
+                "avatar": False,
+                "caption": True,
+                "highlight": False,
+            },
         )
+
+    def test_highlight_element_and_scene_flag(self):
+        normal = scene_of(self.data, "normal")
+        intro = scene_of(self.data, "intro")
+        highlight = next(e for e in normal["elements"] if e["id"] == "highlight")
+        self.assertEqual(highlight["content"], {"kind": "component", "name": "highlight"})
+        self.assertEqual(highlight["z"], 25)
+        self.assertEqual(highlight["box"], {"x": 0.29, "y": 0, "w": 0.24})
+        self.assertTrue(normal["highlight_messages"])
+        self.assertFalse(intro["highlight_messages"])
 
     def test_room_geometry_matches_old_hardcoded_layers(self):
         """几何从 neuro.css 搬进数据，数值必须与原来一致（合成器的整窗换算依赖它）。"""
@@ -122,7 +144,10 @@ class TestSceneDataContract(unittest.TestCase):
         )
 
     def test_refs_name_the_elements_the_code_needs(self):
-        self.assertEqual(self.data["refs"], {"avatar": "avatar", "caption": "caption"})
+        self.assertEqual(
+            self.data["refs"],
+            {"avatar": "avatar", "caption": "caption", "highlight": "highlight"},
+        )
 
     def test_shipped_data_passes_validation(self):
         ui_scenes._validate(self.data)
@@ -215,6 +240,9 @@ class TestSceneValidation(unittest.TestCase):
             )
 
         self.bad(mutate)
+
+    def test_rejects_non_bool_highlight_messages(self):
+        self.bad(lambda data: scene_of(data, "normal").update(highlight_messages="yes"))
 
     def test_rejects_missing_at_and_at_end(self):
         def mutate(data):

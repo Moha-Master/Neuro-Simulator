@@ -79,26 +79,30 @@ class NeuroClient:
         channel: str,
         conversation_id: str,
         audio: bool = False,
+        highlights: Optional[list[dict]] = None,
     ) -> dict:
         """非流式一轮生成：返回 `POST /chat {stream:false}` 的批量 JSON。
 
         轮次节奏不再自己算——`text` 取自 neuro 的整轮全量文本，`ends_at` 由调用方
         另查 `/status`。超时用"连接快、读不限"：生成可能几十秒到几分钟，真正的
         上限由调用方的 round deadline 兜底（否则上游丢响应会永久挂起）。
+
+        `highlights` 非空时随请求体一起发给 neuro（高亮消息的元数据；neuro 在
+        `start` 之后发 `highlight` 内容事件，由 neuro 窗口弹浮层）。普通轮不带该字段。
         """
         timeout = httpx.Timeout(30.0, read=None)
         async with httpx.AsyncClient(timeout=timeout) as client:
             try:
-                r = await client.post(
-                    f"{self.base_url}/chat",
-                    json={
-                        "message": message,
-                        "channel": channel,
-                        "conversation_id": conversation_id,
-                        "audio": audio,
-                        "stream": False,
-                    },
-                )
+                body: dict = {
+                    "message": message,
+                    "channel": channel,
+                    "conversation_id": conversation_id,
+                    "audio": audio,
+                    "stream": False,
+                }
+                if highlights:
+                    body["highlights"] = highlights
+                r = await client.post(f"{self.base_url}/chat", json=body)
                 if r.status_code != 200:
                     body = r.text[:300]
                     raise NeuroError(f"neuro /chat HTTP {r.status_code}: {body}")

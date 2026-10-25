@@ -1,5 +1,5 @@
 /* Neuro 窗口样式：固定 16:9 舞台，**层本身不在这写**——每一层（背景 / 开场视频 /
-   立绘 / 字幕）都是 neuro_scenes.json 里的数据，几何由元素引擎写成 inline style，
+   立绘 / 字幕 / 高亮消息）都是 neuro_scenes.json 里的数据，几何由元素引擎写成 inline style，
    这里只留舞台基座与各组件内部的样子（样式按 [data-component="…"] 挂，
    元素 id 属于场景数据、可改，组件名属于代码）。
 
@@ -9,6 +9,9 @@
 :root {
   color-scheme: dark;
   --neuro-shadow-color: #32003c;
+  /* 高亮消息浮层配色（旧 client 规格：bits=紫 / points=粉） */
+  --sc-pink-bg-color: #f68795;
+  --sc-purple-bg-color: #b97ad5;
 }
 
 * {
@@ -80,4 +83,64 @@ body {
 
 .ns-el[data-component="caption"].show {
   opacity: 1;
+}
+
+/* ===== 高亮消息弹窗（Super Chat 风格） =====
+   旧 client 时序：从上方滑入 1s → 停留 8s → 滑出 1s。
+   背景图自带圆角（sc_purple=bits / sc_pink=points）。水平居中由场景的 box 决定。 */
+.ns-el[data-component="highlight"] {
+  transform: translateY(-220%);
+  transition: transform 1s;
+}
+.ns-el[data-component="highlight"].is-visible {
+  transform: translateY(0);
+  transition-timing-function: cubic-bezier(0.25, 1, 0.5, 1);
+}
+.ns-el[data-component="highlight"].hidden {
+  display: none;
+}
+.sc-background-image {
+  width: 100%;
+  height: auto;
+  display: block;
+}
+.sc-content {
+  position: absolute;
+  inset: 0;
+  color: #fff;
+  font-family: "Causten", "Noto Sans SC", sans-serif;
+}
+.sc-user {
+  position: absolute;
+  top: 20%;
+  left: 40%;
+  transform: translateX(-50%);
+  max-width: 75%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 8.333cqi;
+  text-align: left;
+  text-shadow: 0 0 3px rgba(0, 0, 0, 0.25);
+}
+/* 动态头部文本：当前两张背景图仍烘焙着 HIGHLIGHTED MESSAGE (500 BITS)，
+   先隐藏避免重叠；等图片去掉静态文字后把 visibility 改为 visible 即可。 */
+.sc-label {
+  position: absolute;
+  top: 32%;
+  left: 20%;
+  font-size: 6.667cqi;
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+  visibility: hidden;
+}
+.sc-message {
+  position: absolute;
+  top: 60%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  width: 90%;
+  font-size: 8.333cqi;
+  text-align: center;
+  overflow-wrap: break-word;
 }

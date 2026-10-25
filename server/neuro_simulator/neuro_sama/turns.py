@@ -19,7 +19,7 @@ Chat 页一刷新，她的话说到一半就停了）。现在任务独立于任
 
 import asyncio
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Callable, Dict, List, Optional, Tuple
 
 from ..broadcaster import EventBroadcaster
@@ -49,6 +49,8 @@ class ActiveTurn:
     # 批量契约（terminal/text/segments/...）；结束时才非 None
     result: Optional[dict] = None
     finished_at: Optional[float] = None
+    # 高亮消息元数据（stream 注入时带上）；`start` 之后发 `highlight` 内容事件
+    highlights: List[dict] = field(default_factory=list)
 
 
 class TurnConflict(RuntimeError):
@@ -94,11 +96,18 @@ class TurnRunner:
     def all_active(self) -> List[ActiveTurn]:
         return [t for t in self._turns.values() if not t.done_event.is_set()]
 
-    def register(self, channel: str, conversation_id: str) -> ActiveTurn:
+    def register(
+        self,
+        channel: str,
+        conversation_id: str,
+        highlights: Optional[List[dict]] = None,
+    ) -> ActiveTurn:
         """登记一轮并分配 turn_id；同会话已有在途轮次时抛 TurnConflict。
 
-        **调用方必须在没有 await 的同步段里完成"检查 + 登记"**（单事件循环内的
-        原子性）：中间让出控制权就可能两个请求同时通过检查。
+        `highlights` 非空时，这一轮会在 `start` 之后发 `highlight` 内容事件
+        （高亮消息的窗口浮层）。**调用方必须在没有 await 的同步段里完成
+        "检查 + 登记"**（单事件循环内的原子性）：中间让出控制权就可能两个请求
+        同时通过检查。
         """
         key = (channel, conversation_id)
         if self.find(channel, conversation_id) is not None:
@@ -109,6 +118,7 @@ class TurnRunner:
             conversation_id=conversation_id,
             cancel_event=asyncio.Event(),
             done_event=asyncio.Event(),
+            highlights=list(highlights or []),
         )
         self._turns[key] = turn
         return turn
@@ -150,6 +160,9 @@ class TurnRunner:
         error_message: Optional[str] = None
         try:
             self._publish(turn, {"type": "start", "model": _model_name()})
+            # start 必须是首个事件；高亮元数据紧接其后（瞬时浮层，不落 snapshot）
+            if turn.highlights:
+                self._publish(turn, {"type": "highlight", "messages": turn.highlights})
             async for ev in self._agent.run(
                 turn.channel,
                 turn.conversation_id,

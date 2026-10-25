@@ -100,7 +100,9 @@ def _loop_current(loop: Any) -> dict:
         "conversation_id": session.get("conversation_id"),
         "round": int(session.get("rounds") or 0),
         "cursor": session.get("cursor"),
-        "priority_cursor": session.get("priority_cursor"),
+        "highlight_cursor": session.get("highlight_cursor"),
+        "highlight_paused": bool(getattr(loop, "highlight_paused", False)),
+        "highlight_source": getattr(loop, "highlight_source", None),
         "intro": loop.intro_status(),
         "last_error": loop.last_error,
         "started_at": session.get("started_at"),
@@ -123,6 +125,7 @@ def _scene_current(loop: Any) -> Optional[dict]:
         "icon": scene_catalog.icon(sid),
         "desc": scene_catalog.desc(sid),
         "prompt_context": prompt_context,
+        "highlight_messages": scene_catalog.highlight_messages_enabled(sid),
         "duration": snap.get("duration"),
         "elapsed": snap.get("elapsed"),
     }
@@ -148,10 +151,10 @@ def _metadata_current(loop: Any) -> dict:
 def _chat_current(loop: Any) -> dict:
     # 无场次时队列不存在（旧契约也是 null），不能报 0 假装有空队列
     if loop.session is None:
-        return {"normal_pending": None, "priority_pending": None, "last_message_id": None}
+        return {"normal_pending": None, "highlight_pending": None, "last_message_id": None}
     return {
         "normal_pending": loop.queue_depth,
-        "priority_pending": loop.priority_depth,
+        "highlight_pending": loop.highlight_depth,
         "last_message_id": loop.last_message_id,
     }
 

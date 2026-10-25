@@ -3,43 +3,72 @@
   "default_scene": "normal",
   "refs": {
     "avatar": "avatar",
-    "caption": "caption"
+    "caption": "caption",
+    "highlight": "highlight"
   },
   "scenes": [
     {
       "id": "normal",
       "label": "常态（房间）",
       "icon": "mdi-sofa",
-      "desc": "The default shot: the room background fills the frame, Neuro's avatar stands centred, and captions appear near the bottom.",
+      "desc": "The default shot: the room background fills the frame, Neuro's avatar stands centred, captions appear near the bottom, and highlight messages pop up near the top.",
       "elements": [
         {
           "id": "bg_room",
           "name": "房间背景",
           "z": 0,
-          "box": { "x": 0, "y": 0, "w": 1, "h": 1 },
-          "content": { "kind": "image", "src": "room_v2_bg.webp", "fit": "cover" }
+          "box": {
+            "x": 0,
+            "y": 0,
+            "w": 1,
+            "h": 1
+          },
+          "content": {
+            "kind": "image",
+            "src": "room_v2_bg.webp",
+            "fit": "cover"
+          }
         },
         {
           "id": "intro_video",
           "name": "开场视频",
           "z": 10,
           "visible": false,
-          "css": { "background": "#000000" },
-          "box": { "x": 0, "y": 0, "w": 1, "h": 1 },
-          "content": { "kind": "video", "src": "neuro_start.mp4", "muted": true }
+          "css": {
+            "background": "#000000"
+          },
+          "box": {
+            "x": 0,
+            "y": 0,
+            "w": 1,
+            "h": 1
+          },
+          "content": {
+            "kind": "video",
+            "src": "neuro_start.mp4",
+            "muted": true
+          }
         },
         {
           "id": "avatar",
           "name": "立绘",
           "z": 15,
-          "css": { "transform-origin": "50% 50%", "will-change": "bottom, transform" },
+          "css": {
+            "transform-origin": "50% 50%",
+            "will-change": "bottom, transform"
+          },
           "box": {
             "x": 0.45,
             "y": -1.25,
             "w": 0.5,
-            "edge": { "y": "bottom" }
+            "edge": {
+              "y": "bottom"
+            }
           },
-          "content": { "kind": "image", "src": "neurosama.png" }
+          "content": {
+            "kind": "image",
+            "src": "neurosama.png"
+          }
         },
         {
           "id": "caption",
@@ -49,28 +78,74 @@
             "x": 0.05,
             "y": 0.05,
             "w": 0.9,
-            "edge": { "y": "bottom" }
+            "edge": {
+              "y": "bottom"
+            }
           },
-          "content": { "kind": "component", "name": "caption" }
+          "content": {
+            "kind": "component",
+            "name": "caption"
+          }
+        },
+        {
+          "id": "highlight",
+          "name": "高亮消息",
+          "z": 25,
+          "box": {
+            "x": 0.29,
+            "y": 0,
+            "w": 0.24
+          },
+          "content": {
+            "kind": "component",
+            "name": "highlight"
+          }
         }
-      ]
+      ],
+      "highlight_messages": true
     },
     {
       "id": "intro",
       "label": "开场",
       "icon": "mdi-play",
       "desc": "The intro video plays full frame; the room background and Neuro's avatar fade in near the end, with captions near the bottom.",
-      "duration": { "media": "intro_video", "after": 3.0 },
+      "duration": {
+        "media": "intro_video",
+        "after": 3.0
+      },
       "timeline": {
         "steps": [
-          { "at": 0, "element": "intro_video", "action": "media.play" },
-          { "at_end": 3, "element": "bg_room", "action": "element.show" },
-          { "at_end": 3, "element": "avatar", "action": "avatar.rise_in", "duration": 3 },
-          { "at_end": 0, "element": "intro_video", "action": "element.hide" }
+          {
+            "at": 0,
+            "element": "intro_video",
+            "action": "media.play"
+          },
+          {
+            "at_end": 3,
+            "element": "bg_room",
+            "action": "element.show"
+          },
+          {
+            "at_end": 3,
+            "element": "avatar",
+            "action": "avatar.rise_in",
+            "duration": 3
+          },
+          {
+            "at_end": 0,
+            "element": "intro_video",
+            "action": "element.hide"
+          }
         ]
       },
       "state_script": {
-        "steps": [{ "at_end": 0, "action": "scene.set", "scene": "normal" }]
+        "steps": [
+          {
+            "at_end": 0,
+            "action": "scene.set",
+            "scene": "normal"
+          }
+        ]
       },
       "elements": [
         {
@@ -78,30 +153,58 @@
           "name": "房间背景",
           "z": 0,
           "visible": false,
-          "box": { "x": 0, "y": 0, "w": 1, "h": 1 },
-          "content": { "kind": "image", "src": "room_v2_bg.webp", "fit": "cover" }
+          "box": {
+            "x": 0,
+            "y": 0,
+            "w": 1,
+            "h": 1
+          },
+          "content": {
+            "kind": "image",
+            "src": "room_v2_bg.webp",
+            "fit": "cover"
+          }
         },
         {
           "id": "intro_video",
           "name": "开场视频",
           "z": 10,
-          "css": { "background": "#000000" },
-          "box": { "x": 0, "y": 0, "w": 1, "h": 1 },
-          "content": { "kind": "video", "src": "neuro_start.mp4", "muted": true }
+          "css": {
+            "background": "#000000"
+          },
+          "box": {
+            "x": 0,
+            "y": 0,
+            "w": 1,
+            "h": 1
+          },
+          "content": {
+            "kind": "video",
+            "src": "neuro_start.mp4",
+            "muted": true
+          }
         },
         {
           "id": "avatar",
           "name": "立绘",
           "z": 15,
           "visible": false,
-          "css": { "transform-origin": "50% 50%", "will-change": "bottom, transform" },
+          "css": {
+            "transform-origin": "50% 50%",
+            "will-change": "bottom, transform"
+          },
           "box": {
             "x": 0.45,
             "y": -1.25,
             "w": 0.5,
-            "edge": { "y": "bottom" }
+            "edge": {
+              "y": "bottom"
+            }
           },
-          "content": { "kind": "image", "src": "neurosama.png" }
+          "content": {
+            "kind": "image",
+            "src": "neurosama.png"
+          }
         },
         {
           "id": "caption",
@@ -111,11 +214,32 @@
             "x": 0.05,
             "y": 0.05,
             "w": 0.9,
-            "edge": { "y": "bottom" }
+            "edge": {
+              "y": "bottom"
+            }
           },
-          "content": { "kind": "component", "name": "caption" }
+          "content": {
+            "kind": "component",
+            "name": "caption"
+          }
+        },
+        {
+          "id": "highlight",
+          "name": "高亮消息",
+          "z": 25,
+          "box": {
+            "x": 0.29,
+            "y": 0,
+            "w": 0.24
+          },
+          "content": {
+            "kind": "component",
+            "name": "highlight"
+          },
+          "visible": false
         }
-      ]
+      ],
+      "highlight_messages": false
     }
   ]
 }

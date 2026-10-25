@@ -174,6 +174,7 @@ class TestStreamStatus(unittest.IsolatedAsyncioTestCase):
     def _app(self):
         app = create_app()
         app.state.status_board = self.board
+        app.state.loop = self.loop
         return app
 
     def _status(self) -> dict:
@@ -186,12 +187,12 @@ class TestStreamStatus(unittest.IsolatedAsyncioTestCase):
             "channel": "stream",
             "conversation_id": "c1",
             "cursor": 0,
-            "priority_cursor": 0,
+            "highlight_cursor": 0,
             "rounds": 0,
         }
         self.loop.last_scene = "room"
         self.loop.queue_depth = 3
-        self.loop.priority_depth = 1
+        self.loop.highlight_depth = 1
         self.loop.last_message_id = 42
         body = self._status()
         self.assertEqual(set(body), {"module", "rev", "ts", "sections"})
@@ -225,8 +226,40 @@ class TestStreamStatus(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(
             body["sections"]["chat"]["current"],
-            {"normal_pending": 3, "priority_pending": 1, "last_message_id": 42},
+            {"normal_pending": 3, "highlight_pending": 1, "last_message_id": 42},
         )
+        loop = body["sections"]["loop"]["current"]
+        self.assertEqual(loop["highlight_cursor"], 0)
+        self.assertFalse(loop["highlight_paused"])
+        self.assertIsNone(loop["highlight_source"])
+        self.assertTrue(body["sections"]["scene"]["current"]["highlight_messages"])
+
+    async def test_highlight_pause_projection(self):
+        self.loop.highlight_paused = True
+        self.loop.highlight_source = "manual"
+        loop = self._status()["sections"]["loop"]["current"]
+        self.assertTrue(loop["highlight_paused"])
+        self.assertEqual(loop["highlight_source"], "manual")
+
+    async def test_put_highlight_toggles_and_returns_manual_source(self):
+        self.loop.session = {"session_id": "s1", "session_row": 1}
+        client = TestClient(self._app())
+        resp = client.put("/stream/highlight", json={"paused": True})
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(
+            resp.json(), {"status": "ok", "paused": True, "source": "manual"}
+        )
+        self.assertTrue(self.loop.highlight_paused)
+        self.assertEqual(self.loop.highlight_source, "manual")
+
+        resp = client.put("/stream/highlight", json={"paused": False})
+        self.assertFalse(resp.json()["paused"])
+        self.assertFalse(self.loop.highlight_paused)
+
+    async def test_put_highlight_without_session_is_409(self):
+        self.loop.session = None
+        resp = TestClient(self._app()).put("/stream/highlight", json={"paused": True})
+        self.assertEqual(resp.status_code, 409)
 
     async def test_audience_three_states(self):
         self.assertIsNone(self._status()["sections"]["audience"]["current"]["viewers"])
