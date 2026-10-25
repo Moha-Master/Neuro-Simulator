@@ -446,6 +446,11 @@ export class ElementEngine {
       return
     }
     const params: Record<string, unknown> = { ...step.params }
+    // 场景脚本的 duration 是秒；命名动作（如 avatar.rise_in）读的是毫秒。
+    const stepDuration = Math.max(0, Number(step.duration) || 0)
+    if (stepDuration > 0 && params.duration === undefined) {
+      params.duration = stepDuration * 1000
+    }
     if (mode === 'partial') {
       const remaining = Math.max(0, (Number(step.duration) || 0) - offset)
       if (remaining <= 0.05) {

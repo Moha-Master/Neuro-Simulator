@@ -67,6 +67,23 @@
           </template>
         </div>
 
+        <div v-else-if="entry.name === 'games' && games" class="kv">
+          <div class="kv-key">active</div>
+          <div class="kv-val">{{ fmt(games.active) }}</div>
+          <template v-if="activeGame">
+            <div class="kv-key">phase</div>
+            <div class="kv-val">{{ fmt(activeGame.phase) }}</div>
+            <div class="kv-key">summary</div>
+            <div class="kv-val">{{ fmt(activeGame.summary) }}</div>
+            <div class="kv-key">viewer</div>
+            <div class="kv-val">{{ fmt(activeGame.viewer) }}</div>
+            <div class="kv-key">material</div>
+            <div class="kv-val">{{ materialText }}</div>
+            <div class="kv-key">element</div>
+            <div class="kv-val"><pre class="json">{{ pretty(activeGame.element) }}</pre></div>
+          </template>
+        </div>
+
         <div v-else-if="entry.name === 'neuro_link' && neuroLink" class="kv">
           <template v-for="row in neuroLinkRows" :key="row.label">
             <div class="kv-key">{{ row.label }}</div>
@@ -87,6 +104,8 @@ import type {
   AudienceStatus,
   ChatStatus,
   ChatbotRuntime,
+  GameEntry,
+  GamesStatus,
   LoopStatus,
   NeuroLinkStatus,
   NeuroSceneStatus,
@@ -125,6 +144,25 @@ const chatbot = computed(
 const neuroLink = computed(
   () => (allSections.value.neuro_link?.current ?? null) as NeuroLinkStatus | null,
 )
+const games = computed(
+  () => (allSections.value.games?.current ?? null) as GamesStatus | null,
+)
+const activeGame = computed<GameEntry | null>(() => {
+  const g = games.value
+  const id = g?.active
+  if (!g || !id) return null
+  const entry = g[id]
+  return entry && typeof entry === 'object' ? entry : null
+})
+const materialText = computed(() => {
+  const el = activeGame.value?.element as
+    | { material?: { white?: number, black?: number }, my_color?: string }
+    | undefined
+  const m = el?.material
+  if (!m || typeof m.white !== 'number' || typeof m.black !== 'number') return '—'
+  const diff = el?.my_color === 'black' ? m.black - m.white : m.white - m.black
+  return `${m.white}–${m.black} (${diff === 0 ? 'even' : diff > 0 ? `+${diff}` : diff})`
+})
 
 interface Row {
   label: string

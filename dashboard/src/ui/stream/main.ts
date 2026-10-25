@@ -101,6 +101,7 @@ export async function bootstrapStream (stage: HTMLElement): Promise<void> {
   const parent = window.parent !== window ? window.parent : null
   let lastSnapshot: Snapshot | null = null
   let neuroNeedsSnapshot = true
+  let snapshotTask: Promise<void> | null = null
 
   /** neuro 的实时基线。`lastSnapshot` 只在 `/ui/events` 建连时更新，
    *  iframe 重载必须按**现在**恢复，所以 `neuro` 增量帧也要合并进来。 */
@@ -189,23 +190,104 @@ export async function bootstrapStream (stage: HTMLElement): Promise<void> {
     neuro?.setScene(current ? sceneMap.get(current.id)?.neuro : undefined)
   }
 
+  /** neuro 场景的当前快照（scene + layers）。
+   *
+   *  `/stream-view` 在开播后才挂载合成器时，neuro iframe 会在 intro 中途才握手；
+   *  `NeuroMirror` 缓存里的 `scene.elapsed` 是场景切换那一刻的 0（状态总线按设计
+   *  不推时间流逝），直接补发会让 iframe 从 0 重播，`rise_in` 被后端切回 normal
+   *  的时机截断，看起来就是"直接跳到常态"。握手时拉一次权威 `/status` 拿现在
+   *  的 elapsed；拿不到才退回缓存（维持旧行为）。
+   */
+  function neuroSceneStatusUrl (): string {
+    if (!healthUrl) {
+      return ''
+    }
+    return healthUrl.replace(/\/health(?:\?.*)?$/, '/status?want=scene,layers')
+  }
+
+  async function freshSections (): Promise<{
+    scene?: Record<string, unknown>
+    layers?: unknown
+  }> {
+    const url = neuroSceneStatusUrl()
+    if (!url) {
+      return {}
+    }
+    const ctrl = new AbortController()
+    const timer = window.setTimeout(() => ctrl.abort(), 1500)
+    try {
+      const resp = await fetch(url, { cache: 'no-store', signal: ctrl.signal })
+      if (!resp.ok) {
+        return {}
+      }
+      const data = await resp.json() as {
+        sections?: {
+          scene?: { current?: Record<string, unknown> | null }
+          layers?: { current?: unknown }
+        }
+      }
+      const out: { scene?: Record<string, unknown>, layers?: unknown } = {}
+      const scene = data.sections?.scene?.current
+      if (scene && typeof scene === 'object') {
+        out.scene = scene
+      }
+      if (data.sections?.layers && 'current' in data.sections.layers) {
+        out.layers = data.sections.layers.current
+      }
+      return out
+    } catch {
+      return {}
+    } finally {
+      window.clearTimeout(timer)
+    }
+  }
+
+  async function sendNeuroSnapshot (): Promise<void> {
+    if (!neuro) {
+      return
+    }
+    neuro.forward({
+      plane: 'content',
+      event: 'snapshot',
+      data: { turn: neuroBaseline.turn },
+    })
+    const state = { ...neuroBaseline.state }
+    const fresh = await freshSections()
+    if (fresh.scene) {
+      state.scene = fresh.scene
+    }
+    if (fresh.layers !== undefined) {
+      state.layers = fresh.layers
+    }
+    neuro.forward({
+      plane: 'state',
+      event: 'snapshot',
+      data: { sections: state },
+    })
+  }
+
   /** 把**当前**的 neuro 基线补发给刚进入远程模式的 iframe。
    *  形状与 neuro 直连时的首帧一致：内容 `{turn}`、状态 `{sections}`。 */
   function pushNeuroSnapshot (): void {
     if (!neuroNeedsSnapshot || !neuro) {
       return
     }
+    if (snapshotTask) {
+      // 保持 neuroNeedsSnapshot=true，等当前任务结束再补发
+      return
+    }
     neuroNeedsSnapshot = false
-    neuro.forward({
-      plane: 'content',
-      event: 'snapshot',
-      data: { turn: neuroBaseline.turn },
-    })
-    neuro.forward({
-      plane: 'state',
-      event: 'snapshot',
-      data: { sections: neuroBaseline.state },
-    })
+    snapshotTask = sendNeuroSnapshot()
+      .catch(error => {
+        console.warn('neuro snapshot 补发失败', error)
+      })
+      .finally(() => {
+        snapshotTask = null
+        // 拉状态期间 iframe 又重载了一次：补发新一轮
+        if (neuroNeedsSnapshot) {
+          pushNeuroSnapshot()
+        }
+      })
   }
 
   function ensureNeuro (settings?: NeuroSettings): void {

@@ -284,9 +284,20 @@ class ChessGame(Game):
         name = _PIECE_NAMES.get(str(info.get("piece") or "").lower(), "piece")
         return f"{mover} moved {pronoun} {name} to {target}."
 
+    def _material_snapshot(self) -> Optional[Dict[str, int]]:
+        """facts.material.value 的 1:1 投影；只读缓存，不碰 esca。"""
+        values = ((self._facts or {}).get("material") or {}).get("value") or {}
+        if not values:
+            return None
+        return {
+            "white": int(values.get("white") or 0),
+            "black": int(values.get("black") or 0),
+        }
+
     def _material_sentence(self, state: Dict[str, Any]) -> str:
-        facts = self._facts or {}
-        values = ((facts.get("material") or {}).get("value") or {})
+        values = state.get("material") or {}
+        if not values:
+            return ""
         white = int(values.get("white") or 0)
         black = int(values.get("black") or 0)
         diff = (white - black) if self.my_color == "white" else (black - white)
@@ -466,6 +477,7 @@ class ChessGame(Game):
                 "white": _format_clock(self.clock.get("white_ms")),
                 "black": _format_clock(self.clock.get("black_ms")),
             },
+            "material": self._material_snapshot(),
             "board": self._board_array(),
             "legal_moves": legal,
             "legal_moves_san": self._legal_san(),

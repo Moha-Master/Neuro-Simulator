@@ -55,6 +55,9 @@ interface FeedSource {
 /** 嵌入父页面时等待它确认 `feed_ready` 的时长；超时回退到本地自连（不白屏）。 */
 const FEED_READY_TIMEOUT_MS = 500
 
+/** 父页面（/neuro-view 调试卡）可直接驱动的立绘动作；只动 DOM，不改直播状态。 */
+const DEBUG_ACTIONS = new Set(['avatar.spin', 'avatar.zoom_in', 'avatar.zoom_out'])
+
 export async function bootstrapNeuro (stage: HTMLElement): Promise<void> {
   await loadFonts()
 
@@ -192,7 +195,17 @@ export async function bootstrapNeuro (stage: HTMLElement): Promise<void> {
   }
 
   function applyLayers (layers: SectionOf<'layers'> | null | undefined): void {
-    layerHidden = (layers ?? []).filter(layer => !layer.visible).map(layer => layer.id)
+    // `layers` 是清单声明，不是父页面 override：`visible:false` 的层可能由
+    // timeline / 元素脚本负责显示（intro 的 avatar、bg_room）。只有"声明隐藏且没有
+    // 脚本接管"的层才在这里真隐藏；被脚本接管的层交给引擎的时间线决定。
+    const scene = engine.current
+    const scripted = new Set<string>([
+      ...(scene?.timeline?.steps ?? []).map(step => step.element),
+      ...(scene?.elements ?? []).filter(element => element.script).map(element => element.id),
+    ])
+    layerHidden = (layers ?? [])
+      .filter(layer => layer.visible === false && !scripted.has(layer.id))
+      .map(layer => layer.id)
     applyHidden()
   }
 
@@ -226,13 +239,33 @@ export async function bootstrapNeuro (stage: HTMLElement): Promise<void> {
   // ---------- 父页面（合成器 / dashboard 预览）控制层的显隐 ----------
 
   window.addEventListener('message', (event: MessageEvent) => {
-    const data = event.data as { ns?: string, type?: string, hidden?: string[] } | undefined
+    const data = event.data as
+      | {
+        ns?: string
+        type?: string
+        hidden?: string[]
+        id?: string
+        action?: string
+        params?: Record<string, unknown>
+      }
+      | undefined
     if (!data || data.ns !== 'neuro-window') {
       return
     }
     if (data.type === 'visibility') {
       parentHidden = Array.isArray(data.hidden) ? data.hidden : []
       applyHidden()
+    } else if (data.type === 'action') {
+      const id = typeof data.id === 'string' && data.id ? data.id : avatarId
+      const action = typeof data.action === 'string' ? data.action : ''
+      if (DEBUG_ACTIONS.has(action)) {
+        if (action === 'avatar.zoom_in') {
+          zoomed = true
+        } else if (action === 'avatar.zoom_out') {
+          zoomed = false
+        }
+        void engine.run(id, action, data.params)
+      }
     }
   })
   // ---------- 事件通道：内容（字幕/音频）+ 状态（场景/设置/层/清单） ----------

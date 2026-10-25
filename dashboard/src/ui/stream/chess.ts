@@ -27,6 +27,7 @@ interface ChessUiState {
   winner?: string | null
   error?: string | null
   clock?: { white?: string, black?: string }
+  material?: { white: number, black: number } | null
   players?: { white?: string, black?: string }
 }
 
@@ -103,7 +104,7 @@ export class ChessBoardView implements ElementView {
       this.ground.set(config)
     }
 
-    this.statusText.textContent = this.statusLine(s)
+    this.statusText.textContent = this.statusLine(s, orientation)
     this.prev = s
   }
 
@@ -127,7 +128,7 @@ export class ChessBoardView implements ElementView {
     }
   }
 
-  private statusLine (s: ChessUiState): string {
+  private statusLine (s: ChessUiState, orientation: 'white' | 'black'): string {
     if (s.error) {
       return s.error
     }
@@ -138,6 +139,13 @@ export class ChessBoardView implements ElementView {
     const white = s.players?.white || 'White'
     const black = s.players?.black || 'Black'
     const clock = s.clock || {}
-    return `${white} ${clock.white || '--:--'} · ${black} ${clock.black || '--:--'}`
+    const material = s.material
+    const diff = material
+      ? (orientation === 'white' ? material.white - material.black : material.black - material.white)
+      : null
+    const mat = diff === null
+      ? ''
+      : ` · Material ${diff === 0 ? 'even' : diff > 0 ? `+${diff}` : String(diff)}`
+    return `${white} ${clock.white || '--:--'} · ${black} ${clock.black || '--:--'}${mat}`
   }
 }

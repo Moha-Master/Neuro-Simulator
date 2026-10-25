@@ -438,6 +438,25 @@ class TestChessMirror(unittest.TestCase):
         text = game.viewer(game.state())
         self.assertIn("Lichess AI's back rank is weak.", text)
 
+    def test_state_material_is_white_black_counts(self):
+        self.assertEqual(self.make_game().state()["material"], {"white": 39, "black": 39})
+        self.assertEqual(
+            self.make_game("e2e4 d7d5 e4d5").state()["material"],
+            {"white": 39, "black": 38},
+        )
+
+    def test_state_material_zero_is_not_none(self):
+        game = self.make_game()
+        game.initial_fen = "8/8/8/4k3/8/8/8/4K3 w - - 0 1"
+        game._set_moves("")
+        self.assertEqual(game.state()["material"], {"white": 0, "black": 0})
+
+    def test_viewer_material_matches_state(self):
+        game = self.make_game("e2e4 d7d5 e4d5")
+        self.assertIn("up a pawn", game.viewer(game.state()))
+        # 解说与状态快照必须同口径（同一个 facts.material.value 投影）
+        self.assertEqual(game.state()["material"], {"white": 39, "black": 38})
+
     def test_legal_moves_are_listed_as_san(self):
         game = self.make_game()
         sans = game._legal_san()

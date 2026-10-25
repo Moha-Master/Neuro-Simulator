@@ -40,7 +40,7 @@
             src="/ui/neuro/"
             title="Neuro window"
             allow="autoplay; fullscreen"
-            @load="sendVisibility"
+            @load="onFrameLoad"
           />
         </div>
 
@@ -122,6 +122,41 @@
             </v-card-text>
           </v-card>
 
+          <v-card variant="outlined" density="compact">
+            <v-card-title class="text-body-2 font-weight-medium">调试动作</v-card-title>
+            <v-card-text class="pt-0">
+              <div class="d-flex flex-wrap ga-2">
+                <v-btn
+                  size="small"
+                  variant="tonal"
+                  :disabled="!frameReady"
+                  @click="sendAction('avatar.spin')"
+                >
+                  Spin
+                </v-btn>
+                <v-btn
+                  size="small"
+                  variant="tonal"
+                  :disabled="!frameReady"
+                  @click="sendAction('avatar.zoom_in')"
+                >
+                  Zoom in
+                </v-btn>
+                <v-btn
+                  size="small"
+                  variant="text"
+                  :disabled="!frameReady"
+                  @click="sendAction('avatar.zoom_out')"
+                >
+                  Zoom out
+                </v-btn>
+              </div>
+              <div class="text-caption text-grey-darken-1 mt-2">
+                直接驱动窗口内的 avatar，用于排查 LLM 画面工具与场景时间线；不影响直播状态。
+              </div>
+            </v-card-text>
+          </v-card>
+
           <v-card v-if="current" variant="outlined" density="compact">
             <v-card-title class="text-body-2 font-weight-medium">当前状态</v-card-title>
             <v-card-text class="text-caption">
@@ -195,6 +230,8 @@ interface ScenesResponse {
 
 const status = useModuleStatus('neuro_sama')
 const frame = ref<HTMLIFrameElement | null>(null)
+/** iframe 里的窗口页完成 boot 并回了 ready 后才能接收动作（字体加载前引擎未就绪）。 */
+const frameReady = ref(false)
 
 const data = ref<ScenesResponse | null>(null)
 const visible = ref<Record<string, boolean>>({})
@@ -255,6 +292,19 @@ function toggleLayer(id: string, on: boolean): void {
   sendVisibility()
 }
 
+function sendAction(action: 'avatar.spin' | 'avatar.zoom_in' | 'avatar.zoom_out'): void {
+  if (!frameReady.value) return
+  frame.value?.contentWindow?.postMessage(
+    { ns: 'neuro-window', type: 'action', id: 'avatar', action },
+    '*',
+  )
+}
+
+function onFrameLoad(): void {
+  frameReady.value = false
+  sendVisibility()
+}
+
 function restoreLayers(): void {
   visible.value = {}
   sendVisibility()
@@ -293,7 +343,10 @@ async function switchScene(sc: NeuroScene): Promise<void> {
 function onIframeMessage(event: MessageEvent): void {
   if (event.source !== frame.value?.contentWindow) return
   const d = event.data as { ns?: string; type?: string } | undefined
-  if (d?.ns === 'neuro-window' && d.type === 'ready') sendVisibility()
+  if (d?.ns === 'neuro-window' && d.type === 'ready') {
+    frameReady.value = true
+    sendVisibility()
+  }
 }
 
 function openStandalone(): void {
