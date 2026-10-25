@@ -100,7 +100,10 @@ const uiUrl = '/ui/stream/'
 const isDark = computed(() => theme.global.current.value.dark)
 
 const state = computed(
-  () => chatState.value || streamStatus.value?.sections.loop.current?.state || 'offline',
+  // 轮询拿到的是**进程级**生命周期，比 iframe 转发的 chatState 更可靠：
+  // 下播会卸载播放器 iframe，而重新开播的 session_begin 又只能由 iframe 转发，
+  // 若这里让 chatState 优先就会永久停在 offline（iframe 永远不再挂载）。
+  () => streamStatus.value?.sections.loop.current?.state || chatState.value || 'offline',
 )
 const isOffline = computed(() => state.value === 'offline')
 

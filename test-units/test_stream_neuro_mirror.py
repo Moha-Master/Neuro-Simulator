@@ -327,6 +327,22 @@ class TestSnapshotShape(_Harness):
         self.assertEqual(seg["audio"], "AAA")
         self.assertEqual(event["turn"]["speech"][0]["consumed"], 0.75, "不能改到转发用的原始帧")
 
+    async def test_reset_turn_drops_replay_baseline_but_keeps_state(self):
+        """新场次开始：清 turn（不重放上一场），但保留场景/字幕设置。"""
+        mirror = NeuroMirror(self.loop)
+        mirror._turn = {
+            "id": 9,
+            "active": False,
+            "speech": [{"step": 0, "index": 0, "text": "old line", "duration": 1.0,
+                        "consumed": 0}],
+        }
+        mirror._state = {"scene": {"id": "normal"}, "caption": {"hide_ms": 1000}}
+        mirror.reset_turn()
+        snap = mirror.snapshot()
+        self.assertIsNone(snap["turn"])
+        self.assertEqual(snap["state"]["scene"]["id"], "normal")
+        self.assertEqual(snap["state"]["caption"]["hide_ms"], 1000)
+
 
 if __name__ == "__main__":
     unittest.main()

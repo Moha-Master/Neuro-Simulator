@@ -192,6 +192,8 @@ class StreamLoop:
         self._neuro_status_at: float = 0.0
         # 启动时由 server 绑定：状态变化时 bump rev（未绑定时 no-op，便于单测）
         self.state_board: Optional[Any] = None
+        # 由 server 绑定：开播时清空上一场的 turn 基线（避免窗口重连重放旧字幕）
+        self.neuro_mirror: Optional[Any] = None
 
     def _touch(self, *names: str) -> None:
         """状态分区变了：通知 board 递增 rev（粗粒度，见 state_kit）。"""
@@ -376,6 +378,10 @@ class StreamLoop:
         except NeuroError as e:
             self.note_neuro_link(s.neuro_url, False, f"{type(e).__name__}: {e}")
             raise StreamConflict(f"neuro 开场启动失败，无法开播：{e}") from e
+        # 新场次：丢弃上一场的 turn 基线。否则窗口在开播时重连/重建，
+        # 会把上一场已经说完的句子当成"当前轮"重新播一遍（intro 上出现旧字幕）。
+        if self.neuro_mirror is not None:
+            self.neuro_mirror.reset_turn()
 
         queue_row, queue_id = await self.storage.create_queue(f"stream {time.strftime('%Y-%m-%d %H:%M')}")
         conversation_id = uuid.uuid4().hex
@@ -557,8 +563,12 @@ class StreamLoop:
             return {"status": "not_running"}
         self._stop_event.set()
         self._wakeup.set()
+        # 只请求**停止生成**，不掐断已经生成的内容：neuro 的 `/stop` 会置位
+        # cancel_event（LLM 不再产新句），但 `UiState` 保留已合成的 speech，
+        # 窗口的 CaptionPlayer 会把队列里剩下的句子播完才 idle。
+        # 这样 `_main` 的 chat_batch 会立刻以 cancelled 返回，_finalize（含游戏
+        # 清理）不必等一轮完整生成。
         if self.session and self.state in (STATE_LIVE, STATE_PAUSED):
-            # 中断 neuro 侧在途生成（若正在一轮中）
             s = self.session
             with contextlib.suppress(Exception):
                 await NeuroClient(stream_settings.load().neuro_url).stop(s["channel"], s["conversation_id"])
@@ -910,7 +920,11 @@ class StreamLoop:
 
     async def _finalize(self, reason: Optional[str] = None) -> None:
         self.chatbot.stop_session()
-        await self.games.aclear()
+        # 与 run_game_action 串行：下播时可能正好有一个 game 动作在等 Lichess
+        # 回棋，直接 exit() 会与它并发（resign/关流 vs move）。锁最多等该动作
+        # 自己的超时（_move 的 _wait_for 10s / client 30s），不会永久阻塞。
+        async with self._game_action_lock:
+            await self.games.aclear()
         was = self.state
         self.state = STATE_OFFLINE
         self._intro_gate = None

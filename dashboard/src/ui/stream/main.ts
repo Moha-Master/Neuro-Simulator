@@ -167,6 +167,12 @@ export async function bootstrapStream (stage: HTMLElement): Promise<void> {
     parent?.postMessage({ ns: 'stream-feed', type, data }, '*')
   }
 
+  /** 事件转发：`event` 与 `data` 必须放在**顶层**——父页面的 `useStreamChat`
+   *  读的是 `data.event` / `data.data`，不能包进 `data` 里（会静默丢消息）。 */
+  function toParentEvent (type: string, data: unknown): void {
+    parent?.postMessage({ ns: 'stream-feed', type: 'event', event: type, data }, '*')
+  }
+
   window.addEventListener('message', (event: MessageEvent) => {
     const data = event.data as { ns?: string, type?: string } | undefined
     if (data?.ns !== 'stream-feed' || data.type !== 'ready') {
@@ -288,7 +294,7 @@ export async function bootstrapStream (stage: HTMLElement): Promise<void> {
 
   const feed = new StreamFeed()
   // 所有事件同时旁路给父页面（含 snapshot；父页面自己按 type 分发）
-  feed.onAny = (type, ev) => toParent('event', { event: type, data: ev })
+  feed.onAny = (type, ev) => toParentEvent(type, ev)
 
   feed.on('snapshot', (ev: FeedEvent) => {
     const snap = ev as unknown as Snapshot

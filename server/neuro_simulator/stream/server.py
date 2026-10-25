@@ -220,6 +220,7 @@ def create_app() -> FastAPI:
         # 在 board 绑定之后启动，首帧场景就能正确地写入 highlight_paused。
         mirror = NeuroMirror(loop)
         app.state.neuro_mirror = mirror
+        loop.neuro_mirror = mirror
         mirror.start()
         app.state.audience.start()
         print("[stream] ready", flush=True)

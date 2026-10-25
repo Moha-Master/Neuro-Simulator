@@ -79,6 +79,15 @@ class NeuroMirror:
         """最近一轮 turn + 状态基线（只读缓存，绝不发请求）。"""
         return {"turn": self._turn, "state": dict(self._state)}
 
+    def reset_turn(self) -> None:
+        """丢弃 turn 基线（新场次开始时由 stream 调用）。
+
+        只清 turn，不清 `_state`：场景/字幕设置是 neuro 的现状，跨场次仍然有效。
+        正在播放的窗口不受影响（它已经从内容事件里拿到句子并排进队列）；这里
+        只影响**新订阅者**的重放基线，避免把上一场说完的句子重新播一遍。
+        """
+        self._turn = None
+
     # ---------- 订阅循环 ----------
 
     async def _content_loop(self) -> None:
