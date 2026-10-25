@@ -8,6 +8,10 @@
  *
  * 关键点：iframe **跨场景复用**，只改 wrapper 的几何/显隐，所以字幕、音频、
  * zoom、开场视频都不会因为切场景重新加载。
+ *
+ * 画面事件由 stream 后端聚合后经本页转发：iframe 发 `feed_ready` 表示愿意接收，
+ * 本页回一条 `feed_ready` 确认进入远程模式，之后用 `forward()` 把它需要的
+ * `{plane, event, data}` 帧发进去（iframe 不再自建 EventSource）。
  */
 
 import type { NeuroLayerConfig } from '../engine/schema'
@@ -26,7 +30,10 @@ export class NeuroLayer {
   private settings: NeuroSettings
   private ready = false
   private available = true
+  private feedReady = false
   private observer: ResizeObserver | null = null
+  /** iframe 表示愿意接收 feed 后触发（main.ts 用它补发 snapshot）。 */
+  onFeedReady?: () => void
 
   constructor (stage: HTMLElement, settings: NeuroSettings) {
     this.settings = settings
@@ -90,6 +97,14 @@ export class NeuroLayer {
     this.applyVisible()
   }
 
+  /** 把一帧画面事件转发给 iframe（远程模式；未握手前静默丢弃）。 */
+  forward (event: unknown): void {
+    if (!this.feedReady) {
+      return
+    }
+    this.frame.contentWindow?.postMessage({ ns: 'neuro-window', type: 'feed', event }, '*')
+  }
+
   destroy (): void {
     window.removeEventListener('message', this.onMessage)
     this.observer?.disconnect()
@@ -101,6 +116,7 @@ export class NeuroLayer {
 
   private load (): void {
     this.ready = false
+    this.feedReady = false
     if (!this.settings.uiUrl) {
       this.frame.removeAttribute('src')
       return
@@ -117,11 +133,23 @@ export class NeuroLayer {
       return
     }
     const data = event.data as { ns?: string, type?: string } | undefined
-    if (data?.ns !== 'neuro-window' || data.type !== 'ready') {
+    if (data?.ns !== 'neuro-window') {
       return
     }
-    this.ready = true
-    this.applyVisibility()
+    if (data.type === 'ready') {
+      this.ready = true
+      this.applyVisibility()
+      return
+    }
+    if (data.type === 'feed_ready') {
+      // 双向确认：iframe 愿意接收 → 回一条同样的 feed_ready 表示父页面已就绪
+      this.feedReady = true
+      this.frame.contentWindow?.postMessage(
+        { ns: 'neuro-window', type: 'feed_ready' },
+        '*',
+      )
+      this.onFeedReady?.()
+    }
   }
 
   private applyBox (): void {

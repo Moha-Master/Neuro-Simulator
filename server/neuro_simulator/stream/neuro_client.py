@@ -159,6 +159,45 @@ class NeuroClient:
         except (httpx.HTTPError, ValueError, AttributeError) as e:
             raise NeuroError(f"neuro 开场启动失败: {type(e).__name__}: {e}") from e
 
+    async def chat_events(
+        self,
+        channel: Optional[str] = None,
+        want: Optional[list[str]] = None,
+        drop: Optional[list[str]] = None,
+        audio: bool = True,
+    ) -> AsyncIterator[dict]:
+        """订阅 neuro 的内容总线（`GET /chat/events`）。
+
+        与 `state_events` 相同：只是一层 SSE 解析，断线/非 200 抛 `NeuroError`，
+        由调用方决定是否重连。`audio=0` 只在**这一条连接**的序列化层剥离音频。
+        """
+        params: dict[str, str] = {}
+        if channel:
+            params["channel"] = channel
+        if want:
+            params["want"] = ",".join(want)
+        if drop:
+            params["drop"] = ",".join(drop)
+        if not audio:
+            params["audio"] = "0"
+        timeout = httpx.Timeout(5.0, read=None)
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            try:
+                async with client.stream(
+                    "GET", f"{self.base_url}/chat/events", params=params
+                ) as resp:
+                    if resp.status_code != 200:
+                        body = (await resp.aread()).decode("utf-8", errors="replace")
+                        raise NeuroError(
+                            f"neuro /chat/events HTTP {resp.status_code}: {body[:300]}"
+                        )
+                    async for ev in _parse_sse(resp.aiter_lines()):
+                        yield ev
+            except httpx.HTTPError as e:
+                raise NeuroError(
+                    f"neuro /chat/events 失败: {type(e).__name__}: {e}"
+                ) from e
+
     async def state_events(
         self, want: Optional[list[str]] = None, drop: Optional[list[str]] = None
     ) -> AsyncIterator[dict]:

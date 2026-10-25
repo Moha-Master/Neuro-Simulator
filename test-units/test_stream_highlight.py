@@ -16,6 +16,7 @@ from unittest.mock import patch
 from neuro_simulator.broadcaster import EventBroadcaster
 from neuro_simulator.stream import scenes as scene_catalog
 from neuro_simulator.stream.loop import StreamConflict, StreamLoop
+from neuro_simulator.stream.neuro_mirror import NeuroMirror
 from neuro_simulator.templates import TemplateRenderError
 from neuro_simulator.stream.persona import ChatbotPersonaStore, build_template_store
 from neuro_simulator.stream.storage import Storage
@@ -268,9 +269,13 @@ class TestHighlightQueue(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.loop.highlight_source, "manual")
 
     async def test_neuro_scene_sse_drives_pause_switch(self):
-        """neuro 场景 SSE：normal=true/unpause、intro=false/pause、null=pause。"""
+        """NeuroMirror 的状态订阅：normal=true/unpause、intro=false/pause、null=pause。"""
 
         class _SceneNeuro(_FakeNeuroClient):
+            async def chat_events(self, channel=None, want=None, drop=None, audio=True):
+                await asyncio.sleep(10)
+                yield {}  # pragma: no cover - 内容平面与本用例无关
+
             async def state_events(self, want=None, drop=None):
                 yield {"sections": {"scene": {"current": None}}}
                 yield {"sections": {"scene": {"current": {
@@ -290,20 +295,19 @@ class TestHighlightQueue(unittest.IsolatedAsyncioTestCase):
 
         self.loop._set_highlight_paused = record  # type: ignore[method-assign]
         fake = _SceneNeuro("http://fake")
-        with patch("neuro_simulator.stream.loop.NeuroClient", lambda url: fake), patch(
-            "neuro_simulator.stream.loop.stream_settings.load",
-            return_value=SimpleNamespace(neuro_url="http://fake"),
+        mirror = NeuroMirror(self.loop)
+        with patch("neuro_simulator.stream.neuro_mirror.NeuroClient", lambda url: fake), patch(
+            "neuro_simulator.stream.neuro_mirror.stream_settings.load",
+            return_value=SimpleNamespace(neuro_url="http://fake", channel="stream"),
         ):
-            task = asyncio.create_task(self.loop._watch_neuro_scene())
+            mirror.start()
             try:
-                for _ in range(200):
+                for _ in range(400):
                     if len(calls) >= 4:
                         break
                     await asyncio.sleep(0.005)
             finally:
-                task.cancel()
-                with self.assertRaises(asyncio.CancelledError):
-                    await task
+                await mirror.stop()
 
         self.assertEqual(
             calls,

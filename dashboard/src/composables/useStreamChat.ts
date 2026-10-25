@@ -5,16 +5,6 @@ import type { QueueMessage } from '@/types/stream'
 /** 聊天只保留最近 N 条（Twitch 同样只保留有限历史，避免 DOM 无限增长）。 */
 const MAX_MESSAGES = 500
 
-const EVENT_TYPES = [
-  'snapshot',
-  'state',
-  'session_begin',
-  'session_end',
-  'stream_metadata',
-  'chat_message',
-  'highlight_message',
-] as const
-
 interface Snapshot {
   state?: string
   session?: { session_id?: string } | null
@@ -38,11 +28,15 @@ function nowStamp(): string {
 }
 
 /**
- * 直播间聊天/状态流：SSE /manage/stream/ui/events（同一条画面事件通道）。
+ * 直播间聊天/状态流：**不自己连 SSE**。
+ *
+ * 合成器 iframe（`/ui/stream/`）是这条画面流的唯一订阅者；它把收到的 snapshot
+ * 与所有事件用 `{ns:'stream-feed', type:'snapshot'|'event', ...}` postMessage
+ * 转发给本页。这样同一页面里不会再多占一条浏览器 SSE 连接。
  *
  * - snapshot 带最近 30 条聊天记录，用于首屏/重连恢复
  * - chat_message / highlight_message 为实时入列事件
- * - 断线重连后按 after_id 走 REST 补齐（避免 EventSource 重连期间漏消息）
+ * - 断线重连后按 after_id 走 REST 补齐（避免转发中断期间漏消息）
  */
 export function useStreamChat() {
   const messages = ref<QueueMessage[]>([])
@@ -56,7 +50,6 @@ export function useStreamChat() {
   const sessionId = ref<string | null>(null)
 
   let lastId = 0
-  let source: EventSource | null = null
   let disposed = false
 
   const active = computed(() => Boolean(sessionId.value) && state.value !== 'offline')
@@ -171,35 +164,51 @@ export function useStreamChat() {
     }
   }
 
-  function open(): void {
+  /** 合成器 iframe（本页唯一的画面流订阅者）。 */
+  function streamWindow(): Window | null {
+    const frame
+      = document.querySelector<HTMLIFrameElement>('iframe[src*="/ui/stream/"]')
+        ?? document.querySelector<HTMLIFrameElement>('iframe')
+    return frame?.contentWindow ?? null
+  }
+
+  /** 请合成器补发最近一次 snapshot（它空闲时只保留最后一份）。 */
+  function requestSnapshot(): void {
     if (disposed) return
-    source?.close()
-    const es = new EventSource('/manage/stream/ui/events')
-    source = es
-    es.onopen = () => {
+    streamWindow()?.postMessage({ ns: 'stream-feed', type: 'ready' }, '*')
+  }
+
+  function onMessage(event: MessageEvent): void {
+    if (disposed) return
+    const data = event.data as
+      | { ns?: string, type?: string, event?: string, data?: unknown }
+      | undefined
+    if (data?.ns !== 'stream-feed') return
+    if (data.type === 'hello') {
+      // 合成器（唯一订阅者）刚拿到首帧基线：直接回到它的 window 请求 snapshot。
+      // 父页面 onMounted 时 iframe 可能还没就绪，早发 ready 会丢。
+      const source = event.source as Window | null
+      source?.postMessage({ ns: 'stream-feed', type: 'ready' }, '*')
+      return
+    }
+    if (data.type === 'snapshot') {
+      if (!data.data || typeof data.data !== 'object') return
+      handle('snapshot', data.data)
       connected.value = true
-      void gapFill()
+      return
     }
-    es.onerror = () => {
-      // EventSource 会自动重连；这里只更新 UI 状态
-      connected.value = false
-    }
-    for (const type of EVENT_TYPES) {
-      es.addEventListener(type, (ev) => {
-        try {
-          handle(type, JSON.parse((ev as MessageEvent).data))
-        } catch {
-          // 单条坏帧不影响后续事件
-        }
-      })
+    if (data.type === 'event' && typeof data.event === 'string') {
+      handle(data.event, data.data)
     }
   }
 
-  onMounted(open)
+  onMounted(() => {
+    window.addEventListener('message', onMessage)
+    requestSnapshot()
+  })
   onUnmounted(() => {
     disposed = true
-    source?.close()
-    source = null
+    window.removeEventListener('message', onMessage)
   })
 
   return {
@@ -209,6 +218,6 @@ export function useStreamChat() {
     connected,
     sessionId,
     active,
-    reconnect: open,
+    reconnect: requestSnapshot,
   }
 }

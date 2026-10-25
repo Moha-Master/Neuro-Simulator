@@ -280,8 +280,8 @@ class TestIntroGate(unittest.IsolatedAsyncioTestCase):
         gate = self.loop._intro_gate
         await self.run_main(fake)
         self.assertTrue(self.loop._reached_live)
-        # 2 条：开场闸门 1 条 + 从开播起常驻的高亮场景订阅 1 条
-        self.assertEqual(fake.subscriptions, 2)
+        # 只剩开场闸门这 1 条：高亮场景订阅已移交给常驻的 NeuroMirror
+        self.assertEqual(fake.subscriptions, 1)
         self.assertEqual(gate["ready_via"], "sse")
         self.assertIsNone(self.loop.last_error)
 
@@ -299,8 +299,8 @@ class TestIntroGate(unittest.IsolatedAsyncioTestCase):
         gate = self.loop._intro_gate
         await self.run_main(fake, ready_timeout=2.0)
         self.assertTrue(self.loop._reached_live)
-        # 2 条：开场闸门 1 条 + 从开播起常驻的高亮场景订阅 1 条
-        self.assertEqual(fake.subscriptions, 2)
+        # 只剩开场闸门这 1 条（高亮场景订阅已移到 NeuroMirror）
+        self.assertEqual(fake.subscriptions, 1)
         self.assertEqual(gate["ready_via"], "poll")
         self.assertEqual(fake.calls, 2)
 

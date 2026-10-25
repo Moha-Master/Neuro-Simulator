@@ -1,14 +1,16 @@
 /** stream 模块 /ui/events 合成器事件通道（SSE，只读）。
  *
  * 合成器只关心"场景/背景/游戏/聊天"这些 stream 自己的层：
- *   snapshot{state,scene{id,duration,elapsed},session,settings,chat?,metadata?,elements?}
+ *   snapshot{state,scene{id,duration,elapsed},session,settings,chat?,metadata?,elements?,neuro?}
  *   state / session_begin / session_end / scene_set{id,duration,elapsed} /
  *   settings{neuro_*} /
  *   element_state{id,payload} / stream_metadata{title,category} /
- *   chat_message / highlight_message
+ *   chat_message / highlight_message /
+ *   neuro{plane:"content"|"state", event, data}（后端 NeuroMirror 转发的原始帧）
  *
- * 字幕/音频/立绘动作/高亮消息浮层不再经过 stream：neuro 窗口（合成器里的 iframe）
- * 直接订阅 neuro 的 /ui/events。工具事件同理，不在这里镜像。
+ * 字幕/音频/立绘动作/高亮消息浮层**仍然只由 neuro 窗口消费**，但事件不再由 iframe
+ * 直连：stream 后端订阅 neuro 的两条总线，经 `neuro` 事件原样转发；合成器再把
+ * `neuro` 帧喂给 iframe（见 neuro.ts / main.ts）。这样浏览器只占一条 SSE。
  */
 
 import { apiUrl } from '../engine/base'
@@ -40,6 +42,13 @@ export interface NeuroSettings {
   neuro_channel?: string
 }
 
+/** 后端 NeuroMirror 转发的一帧（`data` 与 neuro 直连时逐字段一致）。 */
+export interface NeuroMirrorEvent extends FeedEvent {
+  plane: 'content' | 'state'
+  event: string
+  data: Record<string, unknown>
+}
+
 export interface Snapshot {
   state: string // offline | starting | live | paused
   scene: SceneInfo | null
@@ -53,6 +62,12 @@ export interface Snapshot {
   chat?: ChatMsg[] // 最近聊天记录（重连时恢复聊天层）
   metadata?: { title?: string, category?: string } // 本场标题/分区（dashboard 观看页消费；画面本身不使用）
   elements?: Record<string, unknown> // 各元素层的全量状态（key = 元素 id，如 game_wordle）
+  neuro?: {
+    // 最近一轮 turn（与 neuro /chat/events 首帧同形；无在途轮次时 null）
+    turn?: { id: number, active: boolean, speech: Array<Record<string, unknown>> } | null
+    // 状态分区：key → /state/events snapshot 里 sections.<name>.current 的原样值
+    state?: Record<string, unknown>
+  }
 }
 
 const EVENT_NAMES = [
@@ -67,6 +82,7 @@ const EVENT_NAMES = [
   'chat_message',
   'highlight_message',
   'manifest_changed',
+  'neuro',
 ]
 
 /** 相对当前页面解析 API 端点（见 base.ts）。 */
@@ -81,6 +97,8 @@ export class StreamFeed {
   private es: EventSource
   private handlers = new Map<string, Set<Handler>>()
   onStatus?: (connected: boolean) => void
+  /** 所有事件的旁路回调（含 snapshot）：合成器用它把帧转发给父页面。 */
+  onAny?: (type: string, ev: FeedEvent) => void
 
   constructor (url?: string) {
     this.es = new EventSource(url ?? resolveEndpoint('events'))
@@ -108,6 +126,11 @@ export class StreamFeed {
 
   private dispatch (type: string, ev: FeedEvent): void {
     ev.type = ev.type || type
+    try {
+      this.onAny?.(type, ev)
+    } catch (error) {
+      console.warn(`事件 ${type} 旁路转发异常`, error)
+    }
     for (const fn of this.handlers.get(type) ?? []) {
       try {
         fn(ev)

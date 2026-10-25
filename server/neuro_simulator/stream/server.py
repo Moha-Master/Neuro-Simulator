@@ -13,7 +13,8 @@
 - PUT  /stream/metadata                                       改本场标题/分区/标签（→ 广播 stream_metadata）
 - /manage/chatbot/persona*：chatbot 的 prompt 模板 + core memory（人工编辑，存 stream DB）
 - /manage/templates*：stream 拼给 neuro / chatbot 的 user message 模板（人工编辑 + 预览）
-- GET  /ui/events（SSE）：snapshot（含最近聊天 + 元素状态） + 循环/控制/聊天事件只读镜像
+- GET  /ui/events（SSE）：snapshot（含最近聊天 + 元素状态 + neuro 基线） +
+  循环/控制/聊天事件 + 转发自 neuro 的 `neuro` 事件（内容/状态两条总线的聚合）
 - /ui：直播画面静态托管（Vite 构建产物）
 
 直播循环语义见 loop.py；跨模块访问（neuro URL）约定见 settings.py。
@@ -41,6 +42,7 @@ from .audience import AudienceTracker
 from .games import GameError
 from .loop import StreamConflict, StreamLoop
 from .neuro_client import NeuroClient
+from .neuro_mirror import NeuroMirror
 from .persona import (
     CHATBOT_PLACEHOLDERS,
     ChatbotPersonaStore,
@@ -214,9 +216,15 @@ def create_app() -> FastAPI:
         app.state.status_board = board
         recent = await storage.list_sessions(limit=1)
         loop.persisted = recent[0] if recent else None
+        # 画面事件聚合者：后端直连 neuro 的两条总线，/ui/events 只暴露一条 SSE。
+        # 在 board 绑定之后启动，首帧场景就能正确地写入 highlight_paused。
+        mirror = NeuroMirror(loop)
+        app.state.neuro_mirror = mirror
+        mirror.start()
         app.state.audience.start()
         print("[stream] ready", flush=True)
         yield
+        await mirror.stop()
         await app.state.audience.shutdown()
         await loop.shutdown()
         await storage.close()
@@ -686,9 +694,10 @@ def create_app() -> FastAPI:
 
     @app.get("/ui/events")
     async def ui_events():
-        """画面只读事件流：连接即推 snapshot（state/scene/session），随后实时广播。"""
+        """画面只读事件流：连接即推 snapshot（state/scene/session/neuro），随后实时广播。"""
         bus: EventBroadcaster = app.state.bus
         lp = _loop()
+        mirror: NeuroMirror = app.state.neuro_mirror
         q = bus.subscribe()
 
         async def gen():
@@ -713,6 +722,9 @@ def create_app() -> FastAPI:
                         "category": category,
                         "tags": lp.session_tags(),
                     },
+                    # neuro 的画面基线（最近一轮 turn + 状态分区 current），
+                    # 与 direct 订阅 neuro 时的首帧同形；中途连接的 iframe 用它续播
+                    "neuro": mirror.snapshot(),
                 }
                 # 元素层状态（游戏棋盘等）：中途连接的画面直接按全量快照渲染当前局面
                 elements = lp.games.element_states()

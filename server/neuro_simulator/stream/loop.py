@@ -17,9 +17,9 @@ chat_message / highlight_message 给画面。真正的浮层属于 neuro 场景�
 
 对外广播（EventBroadcaster → /ui/events）：session_begin / session_end / state /
 scene_set / element_state（游戏等元素的全量状态）/ chat_message / highlight_message /
-stream_metadata / settings。**speech/tool/turn 事件不再走 stream 画面**——neuro
-窗口（合成器里的 iframe）直接订阅 neuro 自己的 `/chat/events`（内容平面）与
-`/state/events`（场景/字幕设置）。
+stream_metadata / settings / **neuro**。neuro 的两条总线由 `NeuroMirror` 在
+后端直连（不占浏览器连接池），经 `neuro {plane, event, data}` 原样转发；合成器里
+的 neuro iframe 与 `/stream-view` 都只消费这一条 stream SSE。
 
 开播：先探测 neuro 健康，再 POST neuro /ui/intro 触发开场（拿她切到的**场景 id**，
 不拿时长）；合成器落到 room_intro（只有 neuro 全屏，不叠 chat），随后
@@ -98,9 +98,6 @@ NEURO_STATUS_STALE_S = 5.0
 SCENE_ROOM_INTRO = "room_intro"
 SCENE_ROOM = "room"
 
-# neuro 场景订阅断线后的重连间隔（不终结直播，只更新 neuro_link）
-NEURO_SCENE_RETRY_S = 3.0
-
 
 class StreamConflict(Exception):
     """状态不允许该操作（→ 409）。"""
@@ -145,23 +142,6 @@ def _scene_from_state_event(event: Any) -> Any:
     return str((current or {}).get("id") or "")
 
 
-def _scene_current_from_state_event(event: Any) -> Any:
-    """从 `/state/events` 的一帧里取 `sections.scene.current` 对象。
-
-    返回 `_NO_SCENE` 表示这帧没带 scene 分区（调用方应忽略）；返回 `None` 表示
-    scene 分区存在但 current 为 null（neuro 刚重启/场景数据缺失）。
-    """
-    if not isinstance(event, dict):
-        return _NO_SCENE
-    sections = event.get("sections")
-    if not isinstance(sections, dict) or "scene" not in sections:
-        return _NO_SCENE
-    section = sections.get("scene")
-    current = section.get("current") if isinstance(section, dict) else None
-    return current if isinstance(current, dict) else None
-
-
-
 class StreamLoop:
     def __init__(self, storage: Storage, bus: EventBroadcaster, persona, templates) -> None:
         self.storage = storage
@@ -180,8 +160,6 @@ class StreamLoop:
         # 直播里可被 Neuro 工具驱动的本地小游戏（同时至多一个活跃游戏）
         self.games = GameHub(publish=self.publish, set_scene=self.on_scene)
         self._task: Optional[asyncio.Task] = None
-        # neuro 场景订阅任务（live 期间常驻；把 neuro 场景开关同步到 highlight_paused）
-        self._scene_watch_task: Optional[asyncio.Task] = None
         self._stop_event = asyncio.Event()
         self._wakeup = asyncio.Event()
         # game 动作在 stream 内的实际执行串行化（工具请求可能并发到达）
@@ -594,7 +572,6 @@ class StreamLoop:
         if self.state != STATE_OFFLINE:
             self._stop_event.set()
             self._wakeup.set()
-        await self._stop_scene_watch()
         if self._task is not None:
             with contextlib.suppress(Exception):
                 await asyncio.wait_for(asyncio.shield(self._task), timeout=5)
@@ -656,62 +633,6 @@ class StreamLoop:
         if self.session is None:
             raise StreamConflict("没有进行中的直播场次，无法切换高亮队列")
         self._set_highlight_paused(paused, source=source)
-
-    async def _watch_neuro_scene(self) -> None:
-        """订阅 neuro 状态总线，把 neuro 场景的 `highlight_messages` 同步到开关。
-
-        - 首帧 snapshot 也应用；`current == null` 视为暂停（保守）；
-        - 断线 / 非 200 / 解析失败：记录 `neuro_link`，3 秒后重连，**不终结直播**；
-        - 从开播起运行（starting + live），`_finalize` 会取消它。
-        """
-        try:
-            s = stream_settings.load()
-        except RuntimeError:
-            return
-        url = getattr(s, "neuro_url", "")
-        if not url:
-            return
-        while not self._stop_event.is_set():
-            client = NeuroClient(url)
-            subscribe = getattr(client, "state_events", None)
-            if subscribe is None:  # 旧替身/极旧客户端：没有这条通道就安静退出
-                return
-            events = subscribe(want=("scene",))
-            try:
-                async for ev in events:
-                    if self._stop_event.is_set():
-                        return
-                    current = _scene_current_from_state_event(ev)
-                    if current is _NO_SCENE:
-                        continue
-                    self.note_neuro_link(url, True)
-                    if current is None:
-                        self._set_highlight_paused(True, source="scene:neuro")
-                        continue
-                    flag = current.get("highlight_messages")
-                    enabled = flag if isinstance(flag, bool) else True
-                    self._set_highlight_paused(not enabled, source="scene:neuro")
-            except asyncio.CancelledError:
-                raise
-            except Exception as e:  # 连接中断/非 200/解析失败都走重连
-                self.note_neuro_link(url, False, f"{type(e).__name__}: {e}")
-                logger.warning("neuro 场景订阅失败（%.0fs 后重连）: %s", NEURO_SCENE_RETRY_S, e)
-            finally:
-                aclose = getattr(events, "aclose", None)
-                if aclose is not None:
-                    with contextlib.suppress(Exception):
-                        await aclose()
-            if self._stop_event.is_set():
-                return
-            await self._sleep_ms(NEURO_SCENE_RETRY_S * 1000)
-
-    async def _stop_scene_watch(self) -> None:
-        task = self._scene_watch_task
-        self._scene_watch_task = None
-        if task is not None:
-            task.cancel()
-            with contextlib.suppress(asyncio.CancelledError, Exception):
-                await task
 
     def on_new_message(self) -> None:
         """入列唤醒：静默等待模式下立刻推进下一轮。"""
@@ -954,11 +875,7 @@ class StreamLoop:
     async def _main(self) -> None:
         session = self.session
         try:
-            # 从开播起就订阅 neuro 场景：intro 的 highlight_messages:false 也要生效，
-            # 不能等 live 才开始（首帧 snapshot 会立刻落到 intro）。
-            self._scene_watch_task = asyncio.create_task(
-                self._watch_neuro_scene(), name="stream-neuro-scene"
-            )
+            # neuro 场景订阅常驻在 NeuroMirror 里（进程启动即建立），这里只等开场闸门。
             if not await self._await_intro_ready():
                 return  # 人工下播（静默）或开场超时（已记 last_error），都不进循环
             self.state = STATE_LIVE
@@ -994,7 +911,6 @@ class StreamLoop:
     async def _finalize(self, reason: Optional[str] = None) -> None:
         self.chatbot.stop_session()
         await self.games.aclear()
-        await self._stop_scene_watch()
         was = self.state
         self.state = STATE_OFFLINE
         self._intro_gate = None

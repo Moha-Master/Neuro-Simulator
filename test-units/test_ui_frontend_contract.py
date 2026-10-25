@@ -61,6 +61,50 @@ def _registered(ui_dir: Path) -> set[str]:
     return set(re.findall(r'"?([A-Za-z][A-Za-z.]*)"?\s*:', block.group(1)))
 
 
+class TestStreamNeuroMirrorContract(unittest.TestCase):
+    """画面事件聚合（方案 A）：stream 是唯一 SSE，neuro iframe 吃转发帧。
+
+    守的是协议形状而不是实现细节：新增事件名、转发入口、握手与回退都必须在，
+    而 `/stream-view` 自己**不能**再建 EventSource。
+    """
+
+    def test_stream_feed_has_neuro_event(self):
+        src = (STREAM_UI / "feed.ts").read_text(encoding="utf-8").replace("'", '"')
+        block = re.search(r"const EVENT_NAMES\s*=\s*\[(.*?)\]", src, re.S)
+        self.assertIsNotNone(block, "feed.ts 缺少 EVENT_NAMES")
+        self.assertIn('"neuro"', block.group(1))
+        self.assertIn("interface NeuroMirrorEvent", src)
+        self.assertIn("onAny", src)
+
+    def test_stream_main_forwards_neuro_to_iframe(self):
+        src = (STREAM_UI / "main.ts").read_text(encoding="utf-8")
+        self.assertIn("neuro?.forward", src)
+        self.assertIn("NeuroMirrorEvent", src)
+        self.assertIn("if (!neuroNeedsSnapshot", src)
+        self.assertIn("ns: 'stream-feed'", src)
+
+    def test_stream_neuro_layer_has_forward_and_feed_ready(self):
+        src = (STREAM_UI / "neuro.ts").read_text(encoding="utf-8")
+        self.assertIn("forward (event: unknown)", src)
+        self.assertIn("feed_ready", src)
+        self.assertIn("this.feedReady", src)
+        self.assertIn("onFeedReady", src)
+
+    def test_neuro_main_has_remote_handshake_and_fallback(self):
+        src = (NEURO_UI / "main.ts").read_text(encoding="utf-8")
+        self.assertIn("RemoteFeed", src)
+        self.assertIn("feed_ready", src)
+        self.assertIn("FEED_READY_TIMEOUT_MS = 500", src)
+        self.assertIn("new NeuroFeed()", src, "超时后必须能回退到本地自连")
+        self.assertIn("interface FeedSource", src)
+
+    def test_stream_view_chat_has_no_event_source(self):
+        src = (DASH / "src/composables/useStreamChat.ts").read_text(encoding="utf-8")
+        self.assertNotIn("new EventSource", src)
+        self.assertIn("'stream-feed'", src)
+        self.assertIn("requestSnapshot", src)
+
+
 class TestSingleFrontend(unittest.TestCase):
     def test_old_frontend_projects_are_gone(self):
         """旧的独立前端工程必须已经删除（前端不再散落在 Python 包里）。"""

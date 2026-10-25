@@ -13,6 +13,13 @@
  * **独立文档**（不是 dashboard 的 Vue 路由）：背景必须透明（合成器隐藏 bg_room 时
  * 要透出下面的背景），而且 color-scheme 要恒为 dark——iframe 内外色系不一致时
  * Chromium 会强制给 iframe 一个不透明底色。
+ *
+ * 事件来源有两种模式：
+ * - **远程模式**：被 stream 合成器 iframe 捕获时，先发 `ready` + `feed_ready`，
+ *   父页面在 500ms 内回 `feed_ready` 即进入远程模式——事件由父页面用 `feed` 帧
+ *   提供，本页**不建 EventSource**（整条画面只占合成器那 1 条 SSE）；
+ * - **本地模式**：顶层打开（`/ui/neuro/`）或父页面没有确认（`/neuro-view` 预览）
+ *   时，500ms 后回退到 `NeuroFeed` 自连两条流。
  */
 
 import type { SceneManifest } from '../engine/schema'
@@ -34,8 +41,19 @@ import {
   type StateSnapshot,
   type TurnSeg,
 } from './feed'
+import { RemoteFeed } from './remote-feed'
 import { fetchScenes } from './scenes'
 import './styles/neuro.css'
+
+/** 事件源抽象：本地自连（NeuroFeed）与父页面供帧（RemoteFeed）共用 handler。 */
+interface FeedSource {
+  onContent (type: string, fn: (ev: FeedEvent) => void): void
+  onState (type: string, fn: (ev: FeedEvent) => void): void
+  close (): void
+}
+
+/** 嵌入父页面时等待它确认 `feed_ready` 的时长；超时回退到本地自连（不白屏）。 */
+const FEED_READY_TIMEOUT_MS = 500
 
 export async function bootstrapNeuro (stage: HTMLElement): Promise<void> {
   await loadFonts()
@@ -217,13 +235,41 @@ export async function bootstrapNeuro (stage: HTMLElement): Promise<void> {
       applyHidden()
     }
   })
-  if (window.parent && window.parent !== window) {
-    window.parent.postMessage({ ns: 'neuro-window', type: 'ready' }, '*')
-  }
-
   // ---------- 事件通道：内容（字幕/音频）+ 状态（场景/设置/层/清单） ----------
 
-  const feed = new NeuroFeed()
+  /** 顶层 = 本地；被嵌入时先问父页面能不能供帧，500ms 没有回应就自连。 */
+  function connectFeed (): Promise<FeedSource> {
+    if (window.parent === window) {
+      return Promise.resolve(new NeuroFeed())
+    }
+    return new Promise(resolve => {
+      let settled = false
+      let timer = 0
+      const finish = (source: FeedSource): void => {
+        if (settled) {
+          return
+        }
+        settled = true
+        window.removeEventListener('message', handshake)
+        window.clearTimeout(timer)
+        resolve(source)
+      }
+      const handshake = (event: MessageEvent): void => {
+        const data = event.data as { ns?: string, type?: string } | undefined
+        if (data?.ns !== 'neuro-window' || data.type !== 'feed_ready') {
+          return
+        }
+        finish(new RemoteFeed())
+      }
+      window.addEventListener('message', handshake)
+      // ready 供父页面做显隐；feed_ready 表示愿意接收远程画面帧
+      window.parent.postMessage({ ns: 'neuro-window', type: 'ready' }, '*')
+      window.parent.postMessage({ ns: 'neuro-window', type: 'feed_ready' }, '*')
+      timer = window.setTimeout(() => finish(new NeuroFeed()), FEED_READY_TIMEOUT_MS)
+    })
+  }
+
+  const feed: FeedSource = await connectFeed()
 
   // 内容连接
   feed.onContent('snapshot', (ev: FeedEvent) => {
