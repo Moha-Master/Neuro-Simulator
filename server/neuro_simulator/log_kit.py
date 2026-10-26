@@ -38,6 +38,7 @@ vedal 的 tty，uvicorn 是否上色取决于 vedal 自己有没有 tty。
 import asyncio
 import atexit
 import json
+import logging
 import os
 import sys
 import threading
@@ -64,6 +65,67 @@ TAIL_MAX_BYTES = 256 * 1024
 # 运行分隔行前缀（磁盘里每个进程启动写一行）。读端靠它认出"本次运行的开始",
 # vedal 的启动失败 detail 靠它判断"这个 pid 到底有没有写下过日志"。
 RUN_MARKER = "[log_kit] run start"
+
+# 可调的日志等级。`trace` 刻意不在取值域内：uvicorn 认它会挂 MessageLoggerMiddleware，
+# 比 access 行更吵；本项目也没有任何代码用 trace。
+LEVELS = ("debug", "info", "warning", "error")
+DEFAULT_LEVEL = "info"
+
+# 噪音 logger：uvicorn 的 access 行恒以 INFO 记录（uvicorn 0.46 的 h11_impl 里写死），
+# 没有"降成 DEBUG"的原生参数，只能抬门槛。只有用户主动选 debug 时才放开。
+_NOISY_LOGGERS = ("uvicorn.access", "httpx", "httpcore")
+# uvicorn 自己的非 access logger 跟项目等级走。
+_UVICORN_LOGGERS = ("uvicorn.error", "uvicorn", "uvicorn.asgi")
+
+_root_handler_installed = False
+
+
+def resolve_level(module_cfg: dict) -> str:
+    """从模块原始 dict 读 `log_level`；非法/缺失回落 `DEFAULT_LEVEL`，不抛。
+
+    配置保存路径（`config.validate_config`）已经把非法值挡在 400 上；这里兜的是
+    绕过保存直写文件的老配置——运行期不能因为一个字符串把进程打死。
+    """
+    if not isinstance(module_cfg, dict):
+        return DEFAULT_LEVEL
+    value = module_cfg.get("log_level")
+    if isinstance(value, str):
+        value = value.strip().lower()
+        if value in LEVELS:
+            return value
+    return DEFAULT_LEVEL
+
+
+def apply_levels(level: str) -> None:
+    """把等级应用到本进程的 logging；幂等，且必须在 `attach()` 之后调用。
+
+    之前项目的 logger 全部没有 handler：INFO 直接丢，WARNING 走 lastResort 裸行，
+    dashboard 的 `classifyLine` 因此认不出级别。所以这里不只调 `setLevel`，还要在
+    首次调用时给 root 挂一个绑到**当前** `sys.stdout`（即 tee）的 handler；handler
+    带 `%(levelname)s:` 前缀，级别过滤才有得判。
+
+    uvicorn 侧必须传 `log_config=None`：它会 dictConfig `uvicorn.access` 并把等级
+    覆盖回 INFO，在 `uvicorn.run()` 之前 setLevel 是无效的。
+    """
+    if level not in LEVELS:
+        level = DEFAULT_LEVEL
+    numeric = getattr(logging, level.upper())
+
+    global _root_handler_installed
+    root = logging.getLogger()
+    if not _root_handler_installed:
+        handler = logging.StreamHandler(sys.stdout)
+        handler.setFormatter(logging.Formatter("%(levelname)s: %(message)s"))
+        root.addHandler(handler)
+        _root_handler_installed = True
+    # 项目自己的 logger 全部 NOTSET，继承 root；不逐一列名单。
+    root.setLevel(numeric)
+
+    noisy = logging.DEBUG if level == "debug" else logging.WARNING
+    for name in _NOISY_LOGGERS:
+        logging.getLogger(name).setLevel(noisy)
+    for name in _UVICORN_LOGGERS:
+        logging.getLogger(name).setLevel(numeric)
 
 
 def log_dir(workdir: Union[str, Path]) -> Path:

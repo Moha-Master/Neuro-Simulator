@@ -21,11 +21,17 @@
           </template>
           <v-list-item-title>Configuration</v-list-item-title>
         </v-list-item>
+        <v-list-item to="/logs" :active="$route.path === '/logs'">
+          <template #prepend>
+            <v-icon>mdi-file-document-outline</v-icon>
+          </template>
+          <v-list-item-title>Logs</v-list-item-title>
+        </v-list-item>
         <v-list-group v-model="neuroOpen" value="neuro-sama">
           <template #activator="{ props }">
             <v-list-item
               v-bind="props"
-              :active="$route.path.startsWith('/neuro-sama') || $route.path.startsWith('/neuro-view')"
+              :active="$route.path.startsWith('/neuro-sama') || $route.path.startsWith('/neuro-view') || $route.path.startsWith('/logs-neuro')"
             >
               <template #prepend>
                 <v-icon>mdi-brain</v-icon>
@@ -51,12 +57,18 @@
             </template>
             <v-list-item-title>View</v-list-item-title>
           </v-list-item>
+          <v-list-item to="/logs-neuro" :active="$route.path === '/logs-neuro'">
+            <template #prepend>
+              <v-icon>mdi-text-box-search-outline</v-icon>
+            </template>
+            <v-list-item-title>Logs</v-list-item-title>
+          </v-list-item>
         </v-list-group>
         <v-list-group v-model="streamOpen" value="stream">
           <template #activator="{ props }">
             <v-list-item
               v-bind="props"
-              :active="$route.path.startsWith('/stream')"
+              :active="$route.path.startsWith('/stream') || $route.path.startsWith('/logs-stream')"
             >
               <template #prepend>
                 <v-icon>mdi-broadcast</v-icon>
@@ -88,36 +100,11 @@
             </template>
             <v-list-item-title>Message Templates</v-list-item-title>
           </v-list-item>
-        </v-list-group>
-        <v-list-group v-model="logsOpen" value="logs">
-          <template #activator="{ props }">
-            <v-list-item
-              v-bind="props"
-              :active="$route.path.startsWith('/logs')"
-            >
-              <template #prepend>
-                <v-icon>mdi-file-document-outline</v-icon>
-              </template>
-              <v-list-item-title>Logs</v-list-item-title>
-            </v-list-item>
-          </template>
-          <v-list-item to="/logs" :active="$route.path === '/logs'">
-            <template #prepend>
-              <v-icon>mdi-file-document-outline</v-icon>
-            </template>
-            <v-list-item-title>Logs (vedal)</v-list-item-title>
-          </v-list-item>
-          <v-list-item to="/logs-neuro" :active="$route.path === '/logs-neuro'">
-            <template #prepend>
-              <v-icon>mdi-brain</v-icon>
-            </template>
-            <v-list-item-title>Neuro Logs</v-list-item-title>
-          </v-list-item>
           <v-list-item to="/logs-stream" :active="$route.path === '/logs-stream'">
             <template #prepend>
-              <v-icon>mdi-cast</v-icon>
+              <v-icon>mdi-text-box-search-outline</v-icon>
             </template>
-            <v-list-item-title>Stream Logs</v-list-item-title>
+            <v-list-item-title>Logs</v-list-item-title>
           </v-list-item>
         </v-list-group>
       </v-list>
@@ -167,30 +154,31 @@ onMounted(() => {
 
 // Neuro Sama 侧边栏分组：进入其路由时自动展开（仍可手动收起）
 const neuroOpen = ref(
-  route.path.startsWith('/neuro-sama') || route.path.startsWith('/neuro-view'),
+  route.path.startsWith('/neuro-sama') ||
+    route.path.startsWith('/neuro-view') ||
+    route.path.startsWith('/logs-neuro'),
 )
 watch(
   () => route.path,
   (p) => {
-    if (p.startsWith('/neuro-sama') || p.startsWith('/neuro-view')) neuroOpen.value = true
+    if (
+      p.startsWith('/neuro-sama') ||
+      p.startsWith('/neuro-view') ||
+      p.startsWith('/logs-neuro')
+    ) {
+      neuroOpen.value = true
+    }
   },
 )
 
 // Stream 侧边栏分组：同上（注意 /stream-view 也以 /stream 开头）
-const streamOpen = ref(route.path.startsWith('/stream'))
-watch(
-  () => route.path,
-  (p) => {
-    if (p.startsWith('/stream')) streamOpen.value = true
-  },
+const streamOpen = ref(
+  route.path.startsWith('/stream') || route.path.startsWith('/logs-stream'),
 )
-
-// Logs 侧边栏分组：三项都在 /logs 前缀下（/logs-neuro、/logs-stream 也一样）
-const logsOpen = ref(route.path.startsWith('/logs'))
 watch(
   () => route.path,
   (p) => {
-    if (p.startsWith('/logs')) logsOpen.value = true
+    if (p.startsWith('/stream') || p.startsWith('/logs-stream')) streamOpen.value = true
   },
 )
 </script>

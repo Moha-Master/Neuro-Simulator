@@ -597,6 +597,7 @@ async def _hot_reload(app: FastAPI) -> None:
             )
     cfg = get_config()
     cfg.reload()
+    log_kit.apply_levels(log_kit.resolve_level(cfg.module("neuro_sama")))
     agent: NeuroAgent = app.state.agent
     memory: MemoryStore = app.state.memory
 

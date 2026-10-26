@@ -7,6 +7,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import httpx
 from fastapi.testclient import TestClient
 
 from neuro_simulator.broadcaster import EventBroadcaster
@@ -263,6 +264,45 @@ class TestStreamStatus(unittest.IsolatedAsyncioTestCase):
         self.loop.session = None
         resp = TestClient(self._app()).put("/stream/highlight", json={"paused": True})
         self.assertEqual(resp.status_code, 409)
+
+    async def test_put_metadata_without_session_is_409(self):
+        self.loop.session = None
+        transport = httpx.ASGITransport(app=self._app())
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            resp = await client.put("/stream/metadata", json={"title": "new"})
+        self.assertEqual(resp.status_code, 409)
+
+    async def test_put_metadata_updates_session_and_broadcasts(self):
+        # 用 ASGITransport 而不是 TestClient：aiosqlite 的 Future 要在同一个事件循环里，
+        # 否则跨线程 set_result 只是「大多数时候能跑」。
+        queue_row, queue_id = await self.storage.create_queue("stream test")
+        session_row, session_id = await self.storage.create_session(
+            queue_row, "stream", "conv-meta", title="old", category="cat", tags=["tag"]
+        )
+        self.loop.session = {
+            "session_id": session_id,
+            "session_row": session_row,
+            "queue_id": queue_id,
+            "title": "old",
+            "category": "cat",
+            "tags": ["tag"],
+        }
+        q = self.loop.bus.subscribe()
+
+        transport = httpx.ASGITransport(app=self._app())
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            resp = await client.put("/stream/metadata", json={"title": "new title"})
+
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json()["title"], "new title")
+        self.assertEqual(self.loop.session["title"], "new title")
+        self.assertEqual(self.loop.session["category"], "cat")
+        self.assertEqual(self.loop.session["tags"], ["tag"])
+        event = q.get_nowait()
+        self.assertEqual(event["type"], "stream_metadata")
+        self.assertEqual(event["title"], "new title")
+        persisted = await self.storage.get_session(session_id)
+        self.assertEqual(persisted["title"], "new title")
 
     async def test_audience_three_states(self):
         self.assertIsNone(self._status()["sections"]["audience"]["current"]["viewers"])

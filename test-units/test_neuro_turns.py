@@ -121,9 +121,13 @@ class TestReload(unittest.IsolatedAsyncioTestCase):
             HOST="127.0.0.1",
             PORT=8000,
             reload=lambda: None,
+            module=lambda _name: {},
             neuro_llm=lambda: None,
         )
+        applied: list[str] = []
         with patch.object(ns_server, "get_config", return_value=cfg), patch.object(
+            ns_server.log_kit, "apply_levels", applied.append
+        ), patch.object(
             ns_server.tts, "reset_latch", lambda: None
         ):
             await asyncio.wait_for(ns_server._hot_reload(h.app), 2.0)
@@ -131,6 +135,7 @@ class TestReload(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(turn.done_event.is_set(), "reload 返回时在途任务已经结束")
         self.assertEqual(h.turns.all_active(), [], "不留下未结束的任务")
         self.assertEqual(h.memory.char_limit, 999)
+        self.assertEqual(applied, ["info"], "reload 后按新配置热更日志等级")
 
 
 class TestHighlightContentEvent(unittest.IsolatedAsyncioTestCase):

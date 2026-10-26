@@ -134,6 +134,10 @@
                         <v-col cols="12" sm="4"><v-text-field v-model="cfg.neuro_sama.host" label="Host（改后需重启）" variant="outlined" density="compact" /></v-col>
                         <v-col cols="6" sm="4"><v-text-field v-model.number="cfg.neuro_sama.port" label="Port（改后需重启）" type="number" variant="outlined" density="compact" /></v-col>
                         <v-col cols="6" sm="4"><v-text-field v-model="cfg.neuro_sama.external_url" label="External URL（可选）" variant="outlined" density="compact" /></v-col>
+                        <v-col cols="12" sm="4">
+                          <v-select v-model="cfg.neuro_sama.log_level" :items="logLevels" label="Log level" variant="outlined" density="compact" />
+                          <div class="text-caption text-medium-emphasis">debug 时才显示 uvicorn 的 HTTP 请求日志</div>
+                        </v-col>
                       </v-row>
 
                       <v-card variant="tonal" class="mt-2">
@@ -168,6 +172,10 @@
                         <v-col cols="6" sm="4"><v-text-field v-model="cfg.stream.external_url" label="External URL（可选）" variant="outlined" density="compact" /></v-col>
                         <v-col cols="12" sm="6"><v-text-field v-model="cfg.stream.neuro_url" label="Neuro URL（留空 = 按 neuro_sama schema 自动）" variant="outlined" density="compact" /></v-col>
                         <v-col cols="12" sm="6"><v-text-field v-model="cfg.stream.channel" label="Channel 标识" variant="outlined" density="compact" /></v-col>
+                        <v-col cols="12" sm="4">
+                          <v-select v-model="cfg.stream.log_level" :items="logLevels" label="Log level" variant="outlined" density="compact" />
+                          <div class="text-caption text-medium-emphasis">debug 时才显示 uvicorn 的 HTTP 请求日志</div>
+                        </v-col>
                         <v-col cols="12">
                           <v-textarea v-model="cfg.stream.scene_context" label="Scene context（每轮注入的场景描述）" variant="outlined" density="compact" rows="2" auto-grow />
                         </v-col>
@@ -289,6 +297,10 @@
                         <v-col cols="12" sm="5"><v-text-field v-model="cfg.vedal.host" label="Host（改后需重启 vedal）" variant="outlined" density="compact" /></v-col>
                         <v-col cols="6" sm="3"><v-text-field v-model.number="cfg.vedal.port" label="Port（改后需重启 vedal）" type="number" variant="outlined" density="compact" /></v-col>
                         <v-col cols="6" sm="4"><v-text-field v-model="cfg.vedal.external_url" label="External URL（可选）" variant="outlined" density="compact" /></v-col>
+                        <v-col cols="12" sm="4">
+                          <v-select v-model="cfg.vedal.log_level" :items="logLevels" label="Log level" variant="outlined" density="compact" />
+                          <div class="text-caption text-medium-emphasis">debug 时才显示 uvicorn 的 HTTP 请求日志</div>
+                        </v-col>
                       </v-row>
                       <div class="text-caption text-medium-emphasis mt-2">
                         vedal 是 dashboard 与 OBS 的唯一入口（模块代理 / 静态托管均经此转发）。
@@ -491,6 +503,14 @@ interface SaveResult {
 
 const KNOWN_SCHEMAS = ['server', 'neuro_sama', 'stream', 'vedal']
 
+// 与后端 log_kit.LEVELS 一致；`trace` 刻意不提供（会挂 MessageLoggerMiddleware，更吵）。
+const logLevels = [
+  { title: 'Debug', value: 'debug' },
+  { title: 'Info', value: 'info' },
+  { title: 'Warning', value: 'warning' },
+  { title: 'Error', value: 'error' },
+]
+
 // ---------- 状态 ----------
 const cfg = ref<Record<string, any> | null>(null)
 const baseline = ref('')
@@ -537,6 +557,7 @@ const normalize = (doc: Record<string, any>) => {
   n.host = n.host ?? '127.0.0.1'
   n.port = n.port ?? 8000
   n.external_url = n.external_url ?? ''
+  n.log_level = n.log_level ?? 'info'
   doc.stream = doc.stream || {}
   const s = doc.stream
   s.host = s.host ?? '127.0.0.1'
@@ -544,6 +565,7 @@ const normalize = (doc: Record<string, any>) => {
   s.external_url = s.external_url ?? ''
   s.neuro_url = s.neuro_url ?? ''
   s.channel = s.channel ?? 'stream'
+  s.log_level = s.log_level ?? 'info'
   s.scene_context = s.scene_context ?? 'You are streaming on Twitch now.'
   s.messages_per_round = s.messages_per_round ?? 10
   s.speech_cooldown_ms = s.speech_cooldown_ms ?? 1000
@@ -567,7 +589,7 @@ const normalize = (doc: Record<string, any>) => {
   delete c.system_prompt // 已迁移到数据库（Stream → Chatbot 页），旧配置键不再保留
   c.enabled = c.enabled ?? true
   c.model = c.model ?? ''
-  c.max_concurrent = c.max_concurrent ?? 3
+  c.max_concurrent = c.max_concurrent ?? 10
   c.interval_jitter = c.interval_jitter ?? 0.2
   c.interval_s = c.interval_s ?? 10
   c.count = c.count ?? 3
@@ -575,6 +597,7 @@ const normalize = (doc: Record<string, any>) => {
   doc.vedal.host = doc.vedal.host ?? '127.0.0.1'
   doc.vedal.port = doc.vedal.port ?? 8100
   doc.vedal.external_url = doc.vedal.external_url ?? ''
+  doc.vedal.log_level = doc.vedal.log_level ?? 'info'
 }
 
 const loadConfig = async () => {

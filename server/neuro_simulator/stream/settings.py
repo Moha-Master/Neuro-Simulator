@@ -105,7 +105,7 @@ def load() -> StreamSettings:
     # 老配置里的 neuro_sleep_timeout_s 是未知键，这里不读也不报错：沉默阈值
     # 现在是模板文本的一部分（`{% if … silent_s > 45 %}`），不是配置。
     # 并发上限：固定节拍调度器允许同时在途的生成任务数（1~10）
-    cb_max_concurrent = int(cb.get("max_concurrent") if cb.get("max_concurrent") is not None else 3)
+    cb_max_concurrent = int(cb.get("max_concurrent") if cb.get("max_concurrent") is not None else 10)
     cb_max_concurrent = max(1, min(cb_max_concurrent, 10))
     cb_jitter = float(cb.get("interval_jitter") if cb.get("interval_jitter") is not None else 0.2)
     cb_jitter = max(0.0, min(cb_jitter, 1.0))

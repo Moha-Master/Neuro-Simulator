@@ -110,6 +110,89 @@ class TestTee(unittest.TestCase, _AttachedMixin):
         self.assertIn("WARNING", self.terminal)
 
 
+class TestApplyLevels(unittest.TestCase):
+    """`apply_levels` 动的是进程级 logging——本类**受控地**碰全局状态。
+
+    隔离方式：setUp 快照 root 的 level/handlers、五个 uvicorn/httpx logger 的 level
+    与 `log_kit._root_handler_installed`；addCleanup 原样恢复。这样既验证了真实机制
+    （root handler/等级），又不会把 handler 或等级泄漏给后面的测试。
+    """
+
+    _LOGGERS = (
+        "uvicorn.access",
+        "uvicorn.error",
+        "uvicorn",
+        "uvicorn.asgi",
+        "httpx",
+        "httpcore",
+    )
+
+    def setUp(self) -> None:
+        import logging
+
+        root = logging.getLogger()
+        self._saved_stdout = sys.stdout
+        self._saved_root_level = root.level
+        self._saved_root_handlers = list(root.handlers)
+        self._saved_installed = log_kit._root_handler_installed
+        self._saved_logger_levels = {
+            name: logging.getLogger(name).level for name in self._LOGGERS
+        }
+        self.out = io.StringIO()
+        sys.stdout = self.out
+        self.addCleanup(self._restore_logging)
+
+    def _restore_logging(self) -> None:
+        import logging
+
+        sys.stdout = self._saved_stdout
+        root = logging.getLogger()
+        root.handlers[:] = self._saved_root_handlers
+        root.setLevel(self._saved_root_level)
+        for name, level in self._saved_logger_levels.items():
+            logging.getLogger(name).setLevel(level)
+        log_kit._root_handler_installed = self._saved_installed
+
+    def test_level_matrix(self) -> None:
+        import logging
+
+        for level in ("debug", "info", "warning", "error"):
+            log_kit.apply_levels(level)
+            numeric = getattr(logging, level.upper())
+            self.assertEqual(logging.getLogger().level, numeric)
+            for name in ("uvicorn.error", "uvicorn", "uvicorn.asgi"):
+                self.assertEqual(logging.getLogger(name).level, numeric, level)
+            noisy = logging.DEBUG if level == "debug" else logging.WARNING
+            for name in ("uvicorn.access", "httpx", "httpcore"):
+                self.assertEqual(logging.getLogger(name).level, noisy, level)
+
+    def test_handler_is_installed_once_even_across_reloads(self) -> None:
+        import logging
+
+        before = len(logging.getLogger().handlers)
+        log_kit.apply_levels("info")
+        after_first = len(logging.getLogger().handlers)
+        log_kit.apply_levels("debug")
+        log_kit.apply_levels("warning")
+        self.assertEqual(after_first, before + 1)
+        self.assertEqual(len(logging.getLogger().handlers), after_first)
+
+    def test_root_handler_writes_levelname_prefix_to_current_stdout(self) -> None:
+        import logging
+
+        log_kit.apply_levels("info")
+        logging.getLogger("ns-log-kit-level-probe").warning("probe-message")
+        self.assertIn("WARNING: probe-message", self.out.getvalue())
+
+    def test_resolve_level_falls_back_for_missing_and_invalid_values(self) -> None:
+        self.assertEqual(log_kit.resolve_level({"log_level": "debug"}), "debug")
+        self.assertEqual(log_kit.resolve_level({}), "info")
+        self.assertEqual(log_kit.resolve_level({"log_level": "trace"}), "info")
+        self.assertEqual(log_kit.resolve_level({"log_level": ""}), "info")
+        self.assertEqual(log_kit.resolve_level({"log_level": 3}), "info")
+        self.assertEqual(log_kit.resolve_level(None), "info")  # type: ignore[arg-type]
+
+
 class TestLoggingOrdering(unittest.TestCase, _AttachedMixin):
     """**attach 必须先于 logging 配置**：uvicorn 的 handler 在 dictConfig 时绑定
     `ext://sys.stdout`，取的是"当时"的 sys.stdout。若 main() 里把 attach 放到
@@ -122,8 +205,9 @@ class TestLoggingOrdering(unittest.TestCase, _AttachedMixin):
         self.addCleanup(self._stop_tmp)
 
     def test_handlers_created_after_attach_still_reach_all_three_places(self) -> None:
-        """不碰全局 logging 配置（那会 disable_existing_loggers，毒掉别的应用的
-        `assertLogs`）：只建一个本地 logger，handler 绑的是"此刻的 sys.stdout"。
+        """本测试只建本地 logger，不 dictConfig（那会 disable_existing_loggers，毒掉
+        别的应用的 `assertLogs`）。全局 logging 的唯一受控触碰在 `TestApplyLevels`，
+        那里用 setUp 快照 + addCleanup 原样恢复。
         """
         import logging
 

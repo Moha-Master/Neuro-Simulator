@@ -313,7 +313,9 @@ def _dashboard_dir() -> Optional[Path]:
 async def _reload_module(name: str) -> dict[str, Any]:
     """向单个模块发送 reload（vedal 自身 = 重读配置）。"""
     if name == "vedal":
-        get_config().reload()
+        cfg = get_config()
+        cfg.reload()
+        log_kit.apply_levels(log_kit.resolve_level(cfg.module("vedal")))
         return {"status": "ok"}
     url = module_url(name)
     if not url:

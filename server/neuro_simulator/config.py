@@ -32,6 +32,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+from .log_kit import LEVELS as LOG_LEVELS
+
 DEFAULT_WORKDIR = os.path.expanduser("~/.config/neuro-simulator")
 CONFIG_FILENAME = "config.json"
 EXAMPLE_FILENAME = "config.json.example"
@@ -250,6 +252,19 @@ def validate_config(data: Dict[str, Any]) -> None:
     for name, schema in data.items():
         if name != SERVER_SCHEMA and not isinstance(schema, dict):
             raise ValueError(f"顶层 schema {name} 必须是对象")
+
+    # 日志等级是每模块自己的开关（放 server 会广播 reload 到所有模块并掐断在途生成）。
+    # 缺省合法（运行期回落 info）；显式给了就必须是取值域内的非空字符串。
+    for name, schema in data.items():
+        if name == SERVER_SCHEMA or not isinstance(schema, dict):
+            continue
+        if "log_level" not in schema:
+            continue
+        value = schema["log_level"]
+        if not isinstance(value, str) or not value or value not in LOG_LEVELS:
+            raise ValueError(
+                f"{name}.log_level 必须是 {' / '.join(LOG_LEVELS)} 之一（当前: {value!r}）"
+            )
 
 
 def _validate_service(kind: str, sid: str, entry: Any) -> None:

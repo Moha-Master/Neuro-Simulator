@@ -311,7 +311,9 @@ def create_app() -> FastAPI:
         本模块业务参数经 settings.load() 现取现算，刷新内存 Config 后
         下一轮循环即用新值；host/port 变更仍需重启进程。
         """
-        get_config().reload()
+        cfg = get_config()
+        cfg.reload()
+        log_kit.apply_levels(log_kit.resolve_level(cfg.module("stream")))
         # 通知已连接画面：字幕停留/轮间冷却参数可能变了（无需刷新页面）
         lp = _loop()
         lp.publish({"type": "settings", **lp.ui_settings()})

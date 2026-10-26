@@ -32,6 +32,9 @@ def main() -> None:
     # 尽早装 tee：本进程之后的所有输出（含 uvicorn 与 logging）都进
     # <workdir>/logs/<模块名>.log，与启动入口无关（手动跑也有日志）。
     log_kit.attach(cfg.WORKDIR, MODULE)
+    # handler 必须绑在 attach 之后（要拿到 tee）。uvicorn 侧传 log_config=None，
+    # 否则它会 dictConfig 把 uvicorn.access 的等级覆盖回 INFO。
+    log_kit.apply_levels(log_kit.resolve_level(cfg.module(MODULE)))
     print(f"[neuro-sama] workdir: {cfg.WORKDIR}")
     svc = cfg.neuro_llm()
     if cfg.NEURO_MODEL_REF and (svc is None or not svc.api_key or not svc.model):
@@ -54,7 +57,7 @@ def main() -> None:
     pidfile.install_cleanup_on_shutdown(app, cfg.WORKDIR, MODULE)
 
     try:
-        uvicorn.run(app, host=cfg.HOST, port=cfg.PORT)
+        uvicorn.run(app, host=cfg.HOST, port=cfg.PORT, log_config=None)
     finally:
         pidfile.remove_pid_file(cfg.WORKDIR, MODULE)
 

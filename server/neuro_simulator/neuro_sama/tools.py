@@ -84,6 +84,7 @@ class ToolRegistry:
 
 def build_builtin_tools(memory: MemoryStore) -> list[Tool]:
     from .games import build_game_tools  # 延迟导入：games 需要本模块的 Tool
+    from .stream_tools import build_stream_tools  # 同上：只转发，不持状态
 
     async def memory_add(content: str) -> str:
         return await memory.add(content)
@@ -130,4 +131,6 @@ def build_builtin_tools(memory: MemoryStore) -> list[Tool]:
         ),
         # 游戏工具：状态与判定在 stream 侧，这里只转发（见 games.py）
         *build_game_tools(),
+        # 直播信息工具：标题权威在 stream 场次记录里，这里只转发（见 stream_tools.py）
+        *build_stream_tools(),
     ]

@@ -2,6 +2,7 @@
 画面动作工具 model_spin / model_zoom 必须存在，游戏工具以 game_<游戏>_<动作> 命名。"""
 
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from neuro_simulator.neuro_sama.games import StreamGameProvider
@@ -29,7 +30,7 @@ class TestBuiltinTools(unittest.TestCase):
         # memory 只被 memory_add 的闭包引用，这里不会触发
         tools = build_builtin_tools(None)  # type: ignore[arg-type]
         names = {t.name for t in tools}
-        self.assertEqual(names, {"memory_add", "model_spin", "model_zoom"} | GAME_TOOLS)
+        self.assertEqual(names, {"memory_add", "model_spin", "model_zoom", "stream_title_set"} | GAME_TOOLS)
         self.assertNotIn("time_get_current", names)
 
     def test_avatar_tools_take_no_arguments(self):
@@ -121,6 +122,117 @@ class TestStreamGameProvider(unittest.IsolatedAsyncioTestCase):
             provider.invalidate()
             self.assertEqual(await provider.active_game(), "chess")
             self.assertEqual(_FakeHttpClient.calls, 2)
+
+
+class TestStreamTitleTool(unittest.IsolatedAsyncioTestCase):
+    """stream_title_set：只转发到 stream 的 PUT /stream/metadata，失败也返回人话。"""
+
+    def setUp(self) -> None:
+        _FakePutClient.response = _FakeResponse({"status": "ok", "title": "new title"})
+        _FakePutClient.error = None
+        _FakePutClient.calls = []
+
+    async def _call(self, title: str, *, base="http://stream.test:8200", error=None):
+        _FakePutClient.error = error
+        with patch(
+            "neuro_simulator.neuro_sama.stream_tools.get_config", return_value={}
+        ), patch(
+            "neuro_simulator.neuro_sama.stream_tools.module_url", return_value=base
+        ), patch(
+            "neuro_simulator.neuro_sama.stream_tools.httpx.AsyncClient", _FakePutClient
+        ):
+            from neuro_simulator.neuro_sama.stream_tools import _set_title
+
+            return await _set_title(title)
+
+    async def test_success_puts_only_title_and_returns_new_one(self):
+        text = await self._call("  A new topic  ")
+        self.assertEqual(text, 'Stream title updated to: "new title".')
+        self.assertEqual(len(_FakePutClient.calls), 1)
+        url, body = _FakePutClient.calls[0]
+        self.assertEqual(url, "http://stream.test:8200/stream/metadata")
+        self.assertEqual(body, {"title": "A new topic"})
+
+    async def test_conflict_is_english_and_does_not_leak_chinese_detail(self):
+        _FakePutClient.response = _FakeResponse(
+            {"detail": "当前没有进行中的直播，无法修改本场信息"}, status_code=409
+        )
+        text = await self._call("title")
+        self.assertIn("not live", text)
+        self.assertNotIn("当前", text)
+        self.assertNotIn("Error:", text)
+
+    async def test_unreachable_is_a_normal_tool_result(self):
+        import httpx
+
+        from neuro_simulator.neuro_sama.tools import ToolRegistry, build_builtin_tools
+
+        _FakePutClient.error = httpx.ConnectError("boom")
+        with patch(
+            "neuro_simulator.neuro_sama.stream_tools.get_config", return_value={}
+        ), patch(
+            "neuro_simulator.neuro_sama.stream_tools.module_url",
+            return_value="http://stream.test:8200",
+        ), patch(
+            "neuro_simulator.neuro_sama.stream_tools.httpx.AsyncClient", _FakePutClient
+        ), patch(
+            "neuro_simulator.neuro_sama.tools.get_config",
+            return_value=SimpleNamespace(TOOL_TIMEOUT=5),
+        ):
+            registry = ToolRegistry()
+            for tool in build_builtin_tools(None):  # type: ignore[arg-type]
+                registry.add(tool)
+            ok, text = await registry.dispatch("stream_title_set", {"title": "title"})
+
+        self.assertTrue(ok)
+        self.assertIn("unreachable", text)
+        self.assertIn("ConnectError", text)
+
+    async def test_unconfigured_stream_never_builds_a_client(self):
+        text = await self._call("title", base=None)
+        self.assertIn("not configured", text)
+        self.assertEqual(_FakePutClient.calls, [])
+
+    async def test_empty_and_overlong_titles_are_rejected_before_request(self):
+        self.assertEqual(await self._call("   "), "The stream title cannot be empty.")
+        text = await self._call("x" * 141)
+        self.assertIn("too long", text)
+        self.assertEqual(_FakePutClient.calls, [])
+
+    async def test_tool_is_visible_with_and_without_active_game(self):
+        from neuro_simulator.neuro_sama.tools import ToolRegistry
+
+        registry = ToolRegistry()
+        for tool in build_builtin_tools(None):  # type: ignore[arg-type]
+            registry.add(tool)
+
+        idle = {t["function"]["name"] for t in registry.openai_schema(None)}
+        chess = {t["function"]["name"] for t in registry.openai_schema("chess")}
+        self.assertIn("stream_title_set", idle)
+        self.assertIn("stream_title_set", chess)
+
+
+class _FakePutClient:
+    """stream_tools 用到的 put()；与只实现 get() 的 _FakeHttpClient 分开。"""
+
+    response: "_FakeResponse" = None  # type: ignore[assignment]
+    error: Exception | None = None
+    calls: list = []
+
+    def __init__(self, *args, **kwargs) -> None:
+        pass
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *args) -> bool:
+        return False
+
+    async def put(self, url, json=None):
+        type(self).calls.append((url, json))
+        if type(self).error is not None:
+            raise type(self).error
+        return type(self).response
 
 
 if __name__ == "__main__":
