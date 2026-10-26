@@ -2,7 +2,7 @@
 
 import asyncio
 from dataclasses import dataclass
-from typing import Awaitable, Callable
+from typing import Awaitable, Callable, Iterable
 
 from ..config import get_config
 from .memory import MemoryStore
@@ -22,6 +22,9 @@ class Tool:
 class ToolRegistry:
     def __init__(self) -> None:
         self._tools: dict[str, Tool] = {}
+        # 暴露给 LLM 的禁用集合：只影响 names/openai_schema，不影响 dispatch。
+        # 手动运行（/manage/tools/{name}/run）是调试通道，刻意不受开关限制。
+        self._disabled: set[str] = set()
 
     def add(self, tool: Tool) -> None:
         if tool.name in self._tools:
@@ -34,14 +37,27 @@ class ToolRegistry:
     def all_names(self) -> list[str]:
         return sorted(self._tools)
 
+    def set_disabled(self, names: Iterable[str]) -> None:
+        """整体替换禁用集（按暴露名；未知名字允许存在，便于先落库后重建）。"""
+        self._disabled = set(names)
+
+    @property
+    def disabled(self) -> set[str]:
+        return set(self._disabled)
+
     def names(self, active_game: str | None = None) -> list[str]:
-        return sorted(t.name for t in self._tools.values() if self._visible(t, active_game))
+        return sorted(
+            t.name
+            for t in self._tools.values()
+            if t.name not in self._disabled and self._visible(t, active_game)
+        )
 
     def openai_schema(self, active_game: str | None = None) -> list[dict]:
         """转成 OpenAI chat.completions 的 tools 参数（按名排序以利用 prompt cache）。
 
         游戏工具按当前活跃游戏过滤：无活跃游戏时只暴露各游戏的 start；
         有活跃游戏时只暴露该游戏的工具，避免 Wordle + Chess 同时撑爆上下文。
+        被禁用的工具同样不出现（每个 LLM step 现取 schema，开关即时生效）。
         """
         return [
             {
@@ -53,7 +69,7 @@ class ToolRegistry:
                 },
             }
             for t in sorted(self._tools.values(), key=lambda x: x.name)
-            if self._visible(t, active_game)
+            if t.name not in self._disabled and self._visible(t, active_game)
         ]
 
     @staticmethod
@@ -65,7 +81,12 @@ class ToolRegistry:
         return tool.game == active_game
 
     async def dispatch(self, name: str, args: dict) -> tuple[bool, str]:
-        """执行工具。返回 (ok, 结果文本)；任何异常都转成错误文本回填，不打断 agent loop。"""
+        """执行工具。返回 (ok, 结果文本)；任何异常都转成错误文本回填，不打断 agent loop。
+
+        **不受 `_disabled` 限制**：/health 看全量名，手动运行是调试通道。LLM 步内
+        "取 schema 之后、dispatch 之前"被禁用属于可接受的小竞态——这一轮照常执行，
+        下一轮现取 schema 时才会消失。
+        """
         tool = self._tools.get(name)
         if tool is None:
             return False, f"Error: unknown tool {name!r}."

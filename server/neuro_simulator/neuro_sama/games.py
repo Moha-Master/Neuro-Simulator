@@ -94,7 +94,9 @@ def build_game_tools() -> list[Tool]:
         async def handler(**args: Any) -> str:
             return await _act(game, action, args)
 
-        return Tool(name, description, parameters, handler, game=game, phase=phase)
+        return Tool(
+            name, description, parameters, handler, origin="game", game=game, phase=phase
+        )
 
     no_args = {"type": "object", "properties": {}, "required": []}
 

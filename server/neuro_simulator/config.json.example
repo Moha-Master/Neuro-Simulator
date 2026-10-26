@@ -13,7 +13,6 @@
     "memory_char_limit": 4000,
     "caption_hide_ms": 1000,
     "caption_step_gap_ms": 1000,
-    "mcp_servers": [],
     "host": "127.0.0.1",
     "port": 8000,
     "external_url": ""
@@ -32,7 +31,7 @@
     "neuro_url": "",
     "channel": "stream",
     "scene_context": "You are streaming on Twitch now.",
-    "messages_per_round": 10,
+    "messages_per_round": 5,
     "speech_cooldown_ms": 1000,
     "game_tool_wait_speech": true,
     "chess": {

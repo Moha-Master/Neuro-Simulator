@@ -109,14 +109,12 @@ class TestReload(unittest.IsolatedAsyncioTestCase):
         agent = SlowAgent()
         h = Harness(agent)
         agent.registry = SimpleNamespace(all_names=lambda: [])
-        h.app.state.mcp = SimpleNamespace(servers=[])
         turn = h.turns.register("stream", "conv")
         h.turns.spawn(turn, "hi")
         await asyncio.wait_for(agent.started.wait(), 2.0)
 
         cfg = SimpleNamespace(
             MEMORY_CHAR_LIMIT=999,
-            MCP_SERVERS=[],
             NEURO_MODEL_REF="fake",
             HOST="127.0.0.1",
             PORT=8000,

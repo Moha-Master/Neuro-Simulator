@@ -31,7 +31,7 @@
           <template #activator="{ props }">
             <v-list-item
               v-bind="props"
-              :active="$route.path.startsWith('/neuro-sama') || $route.path.startsWith('/neuro-view') || $route.path.startsWith('/logs-neuro')"
+              :active="$route.path.startsWith('/neuro-sama') || $route.path.startsWith('/neuro-view') || $route.path.startsWith('/neuro-tools') || $route.path.startsWith('/logs-neuro')"
             >
               <template #prepend>
                 <v-icon>mdi-brain</v-icon>
@@ -56,6 +56,12 @@
               <v-icon>mdi-television-play</v-icon>
             </template>
             <v-list-item-title>View</v-list-item-title>
+          </v-list-item>
+          <v-list-item to="/neuro-tools" :active="$route.path === '/neuro-tools'">
+            <template #prepend>
+              <v-icon>mdi-tools</v-icon>
+            </template>
+            <v-list-item-title>Tools</v-list-item-title>
           </v-list-item>
           <v-list-item to="/logs-neuro" :active="$route.path === '/logs-neuro'">
             <template #prepend>
@@ -156,6 +162,7 @@ onMounted(() => {
 const neuroOpen = ref(
   route.path.startsWith('/neuro-sama') ||
     route.path.startsWith('/neuro-view') ||
+    route.path.startsWith('/neuro-tools') ||
     route.path.startsWith('/logs-neuro'),
 )
 watch(
@@ -164,6 +171,7 @@ watch(
     if (
       p.startsWith('/neuro-sama') ||
       p.startsWith('/neuro-view') ||
+      p.startsWith('/neuro-tools') ||
       p.startsWith('/logs-neuro')
     ) {
       neuroOpen.value = true

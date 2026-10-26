@@ -69,6 +69,58 @@ class TestBuiltinTools(unittest.TestCase):
         self.assertNotIn("game_wordle_submit", chess)
 
 
+class TestToolSwitch(unittest.IsolatedAsyncioTestCase):
+    """registry 级开关：只过滤暴露给 LLM 的 schema/names，不挡 dispatch。"""
+
+    def _registry(self):
+        from neuro_simulator.neuro_sama.tools import Tool, ToolRegistry
+
+        calls: list[dict] = []
+
+        async def handler(**kwargs) -> str:
+            calls.append(kwargs)
+            return "executed"
+
+        registry = ToolRegistry()
+        registry.add(
+            Tool(
+                "memory_add",
+                "fake",
+                {"type": "object", "properties": {}},
+                handler,
+            )
+        )
+        registry.add(Tool("other_tool", "fake", {"type": "object", "properties": {}}, handler))
+        return registry, calls
+
+    async def test_disabled_is_hidden_from_schema_and_names_but_dispatch_still_runs(self):
+        registry, calls = self._registry()
+        registry.set_disabled({"memory_add"})
+        self.assertEqual(registry.disabled, {"memory_add"})
+
+        schema_names = {t["function"]["name"] for t in registry.openai_schema(None)}
+        self.assertNotIn("memory_add", schema_names)
+        self.assertIn("other_tool", schema_names)
+        self.assertEqual(registry.names(None), ["other_tool"])
+        # 全量名与手动运行不受开关影响
+        self.assertEqual(registry.all_names(), ["memory_add", "other_tool"])
+        with patch(
+            "neuro_simulator.neuro_sama.tools.get_config",
+            return_value=SimpleNamespace(TOOL_TIMEOUT=5),
+        ):
+            ok, text = await registry.dispatch("memory_add", {"content": "x"})
+        self.assertTrue(ok)
+        self.assertEqual(text, "executed")
+        self.assertEqual(calls, [{"content": "x"}])
+
+    async def test_set_disabled_replaces_the_whole_set(self):
+        registry, _ = self._registry()
+        registry.set_disabled({"memory_add", "other_tool"})
+        registry.set_disabled({"other_tool"})
+        self.assertEqual(registry.disabled, {"other_tool"})
+        self.assertIn("memory_add", {t["function"]["name"] for t in registry.openai_schema(None)})
+
+
 class _FakeResponse:
     def __init__(self, payload, status_code: int = 200) -> None:
         self._payload = payload

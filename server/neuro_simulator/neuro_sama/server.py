@@ -17,6 +17,8 @@
 
 /manage 管理接口（由 vedal 模块代理给 dashboard 使用；配置管理在 vedal 统一处理）：
 - POST /manage/reload：配置热重载（由 vedal 在配置保存/重载指令时调用）
+- GET /manage/tools、PUT /manage/tools/{name}/enabled、POST /manage/tools/{name}/run
+- /manage/mcp-servers CRUD + enabled（改动即时重建 registry/MCPManager）
 - GET/DELETE /manage/sessions...  会话管理
 - GET /manage/chats...、PUT/DELETE .../messages/{id}  对话记录管理
 """
@@ -26,7 +28,7 @@ import json
 import time
 import uuid
 from contextlib import asynccontextmanager
-from typing import AsyncIterator, Literal
+from typing import Any, AsyncIterator, Literal
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
@@ -43,7 +45,7 @@ from .games import StreamGameProvider
 from .mcp_client import MCPManager
 from .memory import MemoryError, MemoryStore
 from .persona import PLACEHOLDERS, PersonaError, PersonaStore
-from .storage import Storage
+from .storage import Storage, seed_mcp_servers
 from .turns import ActiveTurn, TurnConflict, TurnRunner
 from .tools import ToolRegistry, build_builtin_tools
 from .ui_scene import SceneLoopError, make_runner
@@ -578,13 +580,198 @@ class ScenePayload(BaseModel):
     id: str  # 目标场景 id（来自 neuro_scenes.json）
 
 
+class ToolEnabledPayload(BaseModel):
+    enabled: bool
+
+
+class ToolRunPayload(BaseModel):
+    # 刻意用 Any 而不是 dict：非对象要按任务契约回 400（Pydantic 默认是 422）
+    arguments: Any = None
+
+
+class MCPServerPayload(BaseModel):
+    name: str
+    transport: Literal["stdio", "http"] | None = None
+    command: str | None = None
+    args: list[str] | None = None
+    env: dict[str, str] | None = None
+    url: str | None = None
+    enabled: bool = True
+
+
+def _transport_of(server: dict) -> str:
+    transport = server.get("transport")
+    if transport in ("stdio", "http"):
+        return str(transport)
+    return "stdio" if server.get("command") else "http"
+
+
+def _mcp_servers_from_status(
+    servers: list[dict], statuses: list[dict]
+) -> list[dict]:
+    """DB 文档 + 最近一次连接结果合并成管理端点形状。
+
+    DB 里有、但当前没连上的 server（禁用/失败/被跳过）也必须出现，
+    connected=False；反过来连接结果不会凭空造出 DB 里没有的条目。
+    """
+    by_name = {s.get("name"): s for s in statuses}
+    out: list[dict] = []
+    for server in servers:
+        name = str(server.get("name") or "")
+        status = by_name.get(name) or {}
+        transport = _transport_of(server)
+        row: dict[str, Any] = {
+            "name": name,
+            "transport": transport,
+            "enabled": bool(server.get("enabled", True)),
+            "connected": bool(status.get("connected", False)),
+            "tool_count": int(status.get("tool_count") or 0),
+            "error": status.get("error"),
+        }
+        if transport == "stdio":
+            row["command"] = server.get("command") or ""
+            row["args"] = list(server.get("args") or [])
+            if server.get("env"):
+                row["env"] = dict(server["env"])
+        else:
+            row["url"] = server.get("url") or ""
+        out.append(row)
+    return out
+
+
+async def _tools_payload(app: FastAPI) -> dict:
+    """`GET /manage/tools` 的全量载荷（所有变更端点也返回它，前端直接替换）。"""
+    registry: ToolRegistry = app.state.agent.registry
+    disabled = registry.disabled
+    tools = []
+    for name in registry.all_names():
+        tool = registry.get(name)
+        if tool is None:  # 理论上不会发生；防御性跳过
+            continue
+        tools.append(
+            {
+                "name": tool.name,
+                "origin": tool.origin,
+                "game": tool.game,
+                "phase": tool.phase,
+                "description": tool.description,
+                "parameters": tool.parameters,
+                "enabled": name not in disabled,
+            }
+        )
+    storage: Storage = app.state.storage
+    servers = await storage.get_mcp_servers() or []
+    mcp: MCPManager = app.state.mcp
+    return {
+        "tools": tools,
+        "mcp_servers": _mcp_servers_from_status(servers, mcp.server_status),
+        "tool_timeout_s": get_config().TOOL_TIMEOUT,
+    }
+
+
+async def _build_registry(memory: MemoryStore, storage: Storage) -> ToolRegistry:
+    """内置工具 + DB 里的禁用集（MCP 工具由 MCPManager.start 追加）。"""
+    registry = ToolRegistry()
+    for tool in build_builtin_tools(memory):
+        registry.add(tool)
+    settings = await storage.get_tool_settings()
+    registry.set_disabled({name for name, enabled in settings.items() if not enabled})
+    return registry
+
+
+async def _enabled_mcp_servers(storage: Storage) -> list[dict]:
+    servers = await storage.get_mcp_servers() or []
+    return [s for s in servers if s.get("enabled", True)]
+
+
+async def _rebuild_mcp(app: FastAPI, memory: MemoryStore) -> None:
+    """按 DB 重建 registry + MCPManager（MCP 增删改/启停后调用）。
+
+    先建好新对象再替换、最后关旧的：直播中的一轮即使正持有旧 registry 也能
+    把当前 step 跑完；下一 step / 下一轮才会看到新工具集。
+
+    串行锁：两个管理端点几乎同时重建时会交错（各自 start 一套连接、旧 manager
+    的 close 只看得到已被覆盖的引用），结果是一套没人 close 的 MCPManager
+    泄漏 owner task。单事件循环 + asyncio.Lock 即足够。
+    """
+    lock: asyncio.Lock | None = getattr(app.state, "mcp_rebuild_lock", None)
+    if lock is None:
+        lock = asyncio.Lock()
+        app.state.mcp_rebuild_lock = lock
+    async with lock:
+        storage: Storage = app.state.storage
+        registry = await _build_registry(memory, storage)
+        mcp = MCPManager(await _enabled_mcp_servers(storage))
+        for line in await mcp.start(registry):
+            print(line, flush=True)
+        app.state.agent.registry = registry
+        old_mcp: MCPManager = app.state.mcp
+        app.state.mcp = mcp
+        await old_mcp.close()
+
+
+def _validate_mcp_server(
+    payload: MCPServerPayload, *, path_name: str | None, existing: list[dict]
+) -> dict:
+    """校验并规范化一条 MCP server 配置；不合法抛 HTTPException(400/409)。"""
+    name = payload.name.strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="MCP server name 不能为空")
+    if path_name is not None and name != path_name:
+        raise HTTPException(
+            status_code=409,
+            detail="不支持改名：请新建一条再删除旧的",
+        )
+
+    transport = payload.transport
+    if transport is None:
+        transport = "stdio" if payload.command else ("http" if payload.url else "")
+    if transport not in ("stdio", "http"):
+        raise HTTPException(
+            status_code=400,
+            detail="必须提供 command（stdio）或 url（http）之一",
+        )
+
+    old = next((s for s in existing if s.get("name") == name), None)
+    if path_name is None and old is not None:
+        raise HTTPException(status_code=409, detail=f"MCP server {name!r} 已存在")
+
+    doc: dict[str, Any] = {"name": name, "transport": transport, "enabled": bool(payload.enabled)}
+    if transport == "stdio":
+        command = (payload.command or "").strip()
+        if not command:
+            raise HTTPException(status_code=400, detail="stdio server 必须提供 command")
+        args = payload.args or []
+        if not isinstance(args, list) or not all(isinstance(a, str) for a in args):
+            raise HTTPException(status_code=400, detail="args 必须是字符串数组")
+        env = payload.env or {}
+        if not isinstance(env, dict) or not all(
+            isinstance(k, str) and isinstance(v, str) for k, v in env.items()
+        ):
+            raise HTTPException(status_code=400, detail="env 必须是字符串到字符串的对象")
+        doc["command"] = command
+        doc["args"] = args
+        doc["env"] = env
+    else:
+        url = (payload.url or "").strip()
+        if not url:
+            raise HTTPException(status_code=400, detail="http server 必须提供 url")
+        doc["url"] = url
+    return doc
+
+
+async def _save_mcp_servers(app: FastAPI, servers: list[dict]) -> None:
+    await app.state.storage.upsert_mcp_servers(servers)
+    await _rebuild_mcp(app, app.state.memory)
+
+
 async def _hot_reload(app: FastAPI) -> None:
-    """配置热重载：重读 config.yaml，更新 LLM 客户端 / 记忆上限 / MCP。
+    """配置热重载：重读 config.yaml，更新 LLM 客户端 / 记忆上限 / TTS 锁存。
 
     在途生成先**优雅终止并有界等待**：置位全部 cancel_event，等任务落库半截内容
     并以 cancelled 结束（最多 RELOAD_WAIT_S）。不这样做，旧 LLM 客户端被 close
     后仍在跑的请求会裸 error；无限等则会把配置保存拖死——超时就记日志继续，
-    绝不让 reload 悬挂。
+    绝不让 reload 悬挂。MCP/工具清单已迁 DB，不在此处重建（见 /manage/tools*）。
     """
     turns = app.state.turns.cancel_all()
     if turns:
@@ -618,17 +805,8 @@ async def _hot_reload(app: FastAPI) -> None:
     # 3) TTS：解除 azure 失败锁存，允许配置修复后重新探测
     tts.reset_latch()
 
-    # 4) MCP：配置变化时重建（内置工具随 registry 一起重建）
-    if cfg.MCP_SERVERS != app.state.mcp.servers:
-        new_registry = ToolRegistry()
-        for tool in build_builtin_tools(memory):
-            new_registry.add(tool)
-        new_mcp = MCPManager(cfg.MCP_SERVERS)
-        for line in await new_mcp.start(new_registry):
-            print(line, flush=True)
-        agent.registry = new_registry
-        await app.state.mcp.close()
-        app.state.mcp = new_mcp
+    # MCP/工具集不参与 reload：清单已迁 DB，变更走 /manage/tools* 端点即时重建
+    # registry + MCPManager（config 里的 mcp_servers 只在首次播种时读取）。
 
     print(
         f"[neuro-sama] hot reload: model={(svc.model if svc else cfg.NEURO_MODEL_REF) or cfg.NEURO_MODEL_REF or None!r} host={cfg.HOST}:{cfg.PORT} "
@@ -651,6 +829,8 @@ def create_app() -> FastAPI:
 
         storage = Storage(cfg.DB_PATH)
         await storage.init()
+        # MCP 清单一次性从 config 播种进 DB；此后 DB 权威（含义见 storage.py）
+        await seed_mcp_servers(storage, cfg.MCP_SERVERS)
         persona = PersonaStore(storage)
         await persona.load()
         memory = MemoryStore(storage, cfg.MEMORY_CHAR_LIMIT)
@@ -662,11 +842,8 @@ def create_app() -> FastAPI:
         await scene_store.load()
         ui_scenes.set_store(scene_store)
 
-        registry = ToolRegistry()
-        for tool in build_builtin_tools(memory):
-            registry.add(tool)
-
-        mcp = MCPManager(cfg.MCP_SERVERS)
+        registry = await _build_registry(memory, storage)
+        mcp = MCPManager(await _enabled_mcp_servers(storage))
         for line in await mcp.start(registry):
             print(line, flush=True)
 
@@ -941,6 +1118,95 @@ def create_app() -> FastAPI:
         """配置热重载（由 vedal 在配置保存/重载指令时调用）。"""
         await _hot_reload(app)
         return {"status": "ok", "reloaded": True}
+
+    # ---------- /manage：工具开关 / 手动运行 / MCP CRUD ----------
+
+    @app.get("/manage/tools")
+    async def manage_get_tools():
+        """全量工具（含禁用与当前动态不可见的游戏工具）+ MCP server 状态。"""
+        return await _tools_payload(app)
+
+    @app.put("/manage/tools/{name}/enabled")
+    async def manage_set_tool_enabled(name: str, payload: ToolEnabledPayload):
+        """按暴露名开关工具；落库后即时替换 registry 的禁用集（下一步生成生效）。"""
+        registry: ToolRegistry = app.state.agent.registry
+        if registry.get(name) is None:
+            raise HTTPException(status_code=404, detail=f"unknown tool {name!r}")
+        storage: Storage = app.state.storage
+        await storage.set_tool_enabled(name, payload.enabled)
+        settings = await storage.get_tool_settings()
+        registry.set_disabled({n for n, enabled in settings.items() if not enabled})
+        print(f"[neuro-sama] tool {name}: {'enabled' if payload.enabled else 'disabled'}", flush=True)
+        return {"status": "ok", **await _tools_payload(app)}
+
+    @app.post("/manage/tools/{name}/run")
+    async def manage_run_tool(name: str, payload: ToolRunPayload):
+        """手动运行（调试通道）：不受工具开关限制，参数错误作为结果文本返回。"""
+        registry: ToolRegistry = app.state.agent.registry
+        if registry.get(name) is None:
+            raise HTTPException(status_code=404, detail=f"unknown tool {name!r}")
+        args = payload.arguments if payload.arguments is not None else {}
+        if not isinstance(args, dict):
+            raise HTTPException(status_code=400, detail="arguments 必须是 JSON 对象")
+        started = time.perf_counter()
+        ok, result = await registry.dispatch(name, args)
+        duration_ms = int((time.perf_counter() - started) * 1000)
+        print(
+            f"[neuro-sama] manual tool {name} -> {'ok' if ok else 'error'} ({duration_ms}ms)",
+            flush=True,
+        )
+        return {"ok": ok, "result": result, "duration_ms": duration_ms}
+
+    @app.post("/manage/mcp-servers")
+    async def manage_add_mcp_server(payload: MCPServerPayload):
+        storage: Storage = app.state.storage
+        servers = await storage.get_mcp_servers() or []
+        doc = _validate_mcp_server(payload, path_name=None, existing=servers)
+        servers.append(doc)
+        await _save_mcp_servers(app, servers)
+        print(f"[neuro-sama] MCP server added: {doc['name']}", flush=True)
+        return {"status": "ok", **await _tools_payload(app)}
+
+    @app.put("/manage/mcp-servers/{name}")
+    async def manage_update_mcp_server(name: str, payload: MCPServerPayload):
+        """整条替换（name 必须与路径一致；改名不支持 → 409）。"""
+        storage: Storage = app.state.storage
+        servers = await storage.get_mcp_servers() or []
+        index = next((i for i, s in enumerate(servers) if s.get("name") == name), None)
+        if index is None:
+            raise HTTPException(status_code=404, detail=f"MCP server {name!r} 不存在")
+        doc = _validate_mcp_server(payload, path_name=name, existing=servers)
+        servers[index] = doc
+        await _save_mcp_servers(app, servers)
+        print(f"[neuro-sama] MCP server updated: {name}", flush=True)
+        return {"status": "ok", **await _tools_payload(app)}
+
+    @app.delete("/manage/mcp-servers/{name}")
+    async def manage_delete_mcp_server(name: str):
+        storage: Storage = app.state.storage
+        servers = await storage.get_mcp_servers() or []
+        kept = [s for s in servers if s.get("name") != name]
+        if len(kept) == len(servers):
+            raise HTTPException(status_code=404, detail=f"MCP server {name!r} 不存在")
+        await _save_mcp_servers(app, kept)
+        print(f"[neuro-sama] MCP server deleted: {name}", flush=True)
+        return {"status": "ok", **await _tools_payload(app)}
+
+    @app.put("/manage/mcp-servers/{name}/enabled")
+    async def manage_set_mcp_enabled(name: str, payload: ToolEnabledPayload):
+        storage: Storage = app.state.storage
+        servers = await storage.get_mcp_servers() or []
+        target = next((s for s in servers if s.get("name") == name), None)
+        if target is None:
+            raise HTTPException(status_code=404, detail=f"MCP server {name!r} 不存在")
+        target["enabled"] = payload.enabled
+        await _save_mcp_servers(app, servers)
+        print(
+            f"[neuro-sama] MCP server {name}: "
+            f"{'enabled' if payload.enabled else 'disabled'}",
+            flush=True,
+        )
+        return {"status": "ok", **await _tools_payload(app)}
 
     # ---------- /manage：会话管理 ----------
 

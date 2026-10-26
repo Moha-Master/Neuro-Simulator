@@ -165,7 +165,7 @@ def load() -> StreamSettings:
         neuro_url=neuro_url,
         channel=str(ns.get("channel") or "stream"),
         scene_context=str(ns.get("scene_context") or "You are streaming on Twitch now."),
-        messages_per_round=int(ns.get("messages_per_round") or 10),
+        messages_per_round=int(ns.get("messages_per_round") or 5),
         speech_cooldown_ms=speech_cooldown_ms,
         game_tool_wait_speech=game_tool_wait_speech,
         empty_queue_behavior=behavior,

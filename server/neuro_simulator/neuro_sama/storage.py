@@ -73,7 +73,26 @@ CREATE TABLE IF NOT EXISTS scenes (
     content    TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
+
+-- 工具开关：按暴露名（MCP 重命名后的名字）记禁用状态；
+-- 删掉的工具留下的行无害，读取侧按 registry 交集消费，不做 GC
+CREATE TABLE IF NOT EXISTS tool_settings (
+    tool_name  TEXT PRIMARY KEY,
+    enabled    INTEGER NOT NULL DEFAULT 1,
+    updated_at TEXT NOT NULL
+);
+
+-- MCP server 清单（整份 JSON 数组文档，单行 name='servers'）；
+-- config.json 的 neuro_sama.mcp_servers 只在首次播种时读取
+CREATE TABLE IF NOT EXISTS mcp_config (
+    name       TEXT PRIMARY KEY,
+    content    TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
 """
+
+MCP_DOC_NAME = "servers"
+MCP_SEEDED_KEY = "mcp_seeded"
 
 
 def _now() -> str:
@@ -362,3 +381,58 @@ class Storage:
             (key, value),
         )
         await self.db.commit()
+
+    # ---------- 工具开关 ----------
+
+    async def get_tool_settings(self) -> dict[str, bool]:
+        """全部工具开关（只含落过库的行；未出现的工具按启用处理）。"""
+        cur = await self.db.execute("SELECT tool_name, enabled FROM tool_settings")
+        return {row[0]: bool(row[1]) for row in await cur.fetchall()}
+
+    async def set_tool_enabled(self, name: str, enabled: bool) -> None:
+        await self.db.execute(
+            "INSERT INTO tool_settings (tool_name, enabled, updated_at) VALUES (?, ?, ?) "
+            "ON CONFLICT(tool_name) DO UPDATE SET enabled=excluded.enabled, "
+            "updated_at=excluded.updated_at",
+            (name, 1 if enabled else 0, _now()),
+        )
+        await self.db.commit()
+
+    # ---------- MCP server 清单（DB 权威） ----------
+
+    async def get_mcp_servers(self) -> Optional[list[dict]]:
+        """MCP server 文档；从未播种时返回 None（与"播种成空列表"区分）。"""
+        cur = await self.db.execute(
+            "SELECT content FROM mcp_config WHERE name=?", (MCP_DOC_NAME,)
+        )
+        row = await cur.fetchone()
+        if row is None:
+            return None
+        try:
+            data = json.loads(row[0])
+        except json.JSONDecodeError:
+            return None
+        return data if isinstance(data, list) else None
+
+    async def upsert_mcp_servers(self, servers: list[dict]) -> None:
+        await self.db.execute(
+            "INSERT INTO mcp_config (name, content, updated_at) VALUES (?, ?, ?) "
+            "ON CONFLICT(name) DO UPDATE SET content=excluded.content, "
+            "updated_at=excluded.updated_at",
+            (MCP_DOC_NAME, json.dumps(servers, ensure_ascii=False), _now()),
+        )
+        await self.db.commit()
+
+
+async def seed_mcp_servers(storage: Storage, servers: list[dict]) -> bool:
+    """一次性把 config 里的 MCP 清单播种进 DB（幂等；返回本次是否真的写入）。
+
+    用 meta 标记而不是"表里有没有行"判断：用户清空 MCP 后重启不能被 config
+    再灌回来。写入时逐条补 ``enabled: true``（旧 config 没有这个键）。
+    """
+    if await storage.get_meta(MCP_SEEDED_KEY) == "1":
+        return False
+    seeded = [{**s, "enabled": bool(s.get("enabled", True))} for s in servers]
+    await storage.upsert_mcp_servers(seeded)
+    await storage.set_meta(MCP_SEEDED_KEY, "1")
+    return True

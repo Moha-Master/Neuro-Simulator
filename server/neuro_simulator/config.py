@@ -359,6 +359,9 @@ class Config:
         self.MEMORY_CHAR_LIMIT: int = _as_int(ns, "memory_char_limit", 4000)
         self.CAPTION_HIDE_MS: int = _as_int(ns, "caption_hide_ms", 1000)
         self.CAPTION_STEP_GAP_MS: int = _as_int(ns, "caption_step_gap_ms", 1000)
+        # MCP 已迁 DB（mcp_config 单行文档 + meta.mcp_seeded）：这里只保留旧键
+        # 读取，供首次启动播种与还没被 dashboard 清掉 mcp_servers 的旧文件兼容。
+        # 运行期增删改查走 neuro 的 /manage/mcp-servers，不再回读此字段。
         self.MCP_SERVERS: list = ns.get("mcp_servers", []) or []
         self.NEURO_MODEL_REF: str = str(ns.get("model") or "")
         self.NEURO_TTS_REF: str = str(ns.get("tts") or "")

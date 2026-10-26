@@ -46,5 +46,28 @@ class TestLogLevelValidation(unittest.TestCase):
         validate_config(doc)
 
 
+class TestLegacyMcpServersKey(unittest.TestCase):
+    """MCP 已迁 DB，但旧 config 里的 mcp_servers 仍按"必须是列表"兼容校验。"""
+
+    def setUp(self) -> None:
+        self.base = json.loads(EXAMPLE.read_text(encoding="utf-8"))
+
+    def test_example_without_the_key_is_valid(self) -> None:
+        self.assertNotIn("mcp_servers", self.base["neuro_sama"])
+        validate_config(copy.deepcopy(self.base))
+
+    def test_legacy_list_is_still_accepted(self) -> None:
+        doc = copy.deepcopy(self.base)
+        doc["neuro_sama"]["mcp_servers"] = [{"name": "legacy", "url": "http://127.0.0.1:1/mcp"}]
+        validate_config(doc)
+
+    def test_legacy_non_list_is_rejected(self) -> None:
+        doc = copy.deepcopy(self.base)
+        doc["neuro_sama"]["mcp_servers"] = {"name": "not-a-list"}
+        with self.assertRaises(ValueError) as ctx:
+            validate_config(doc)
+        self.assertIn("mcp_servers", str(ctx.exception))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -139,29 +139,6 @@
                           <div class="text-caption text-medium-emphasis">debug 时才显示 uvicorn 的 HTTP 请求日志</div>
                         </v-col>
                       </v-row>
-
-                      <v-card variant="tonal" class="mt-2">
-                        <v-card-title class="text-body-1 d-flex align-center py-2">
-                          MCP Servers
-                          <v-spacer />
-                          <v-btn size="small" variant="flat" color="primary" @click="openMcpDialog(-1)">
-                            <v-icon start size="small">mdi-plus</v-icon> 添加
-                          </v-btn>
-                        </v-card-title>
-                        <v-card-text class="pt-0">
-                          <div v-if="!cfg.neuro_sama.mcp_servers.length" class="text-caption text-medium-emphasis">未配置</div>
-                          <v-list v-else density="compact" lines="one">
-                            <v-list-item v-for="(m, i) in cfg.neuro_sama.mcp_servers" :key="i" :title="m.name || `#${i}`">
-                              <template #prepend><v-icon :icon="'command' in m ? 'mdi-console' : 'mdi-web'" /></template>
-                              <v-list-item-subtitle class="text-caption">{{ 'command' in m ? `${m.command} ${(m.args || []).join(' ')}` : m.url }}</v-list-item-subtitle>
-                              <template #append>
-                                <v-btn icon="mdi-pencil-outline" size="x-small" variant="text" @click="openMcpDialog(Number(i))" />
-                                <v-btn icon="mdi-delete-outline" size="x-small" variant="text" color="error" @click="cfg.neuro_sama.mcp_servers.splice(i, 1)" />
-                              </template>
-                            </v-list-item>
-                          </v-list>
-                        </v-card-text>
-                      </v-card>
                     </v-window-item>
 
                     <!-- ================= Stream ================= -->
@@ -431,38 +408,6 @@
         </v-card-actions>
       </v-card>
     </v-dialog>
-
-    <!-- ============ MCP 编辑对话框 ============ -->
-    <v-dialog v-model="mcpDialog" max-width="560" persistent>
-      <v-card v-if="mcpDraft">
-        <v-card-title>{{ mcpEditing >= 0 ? '编辑' : '添加' }} MCP Server</v-card-title>
-        <v-card-text>
-          <v-row dense>
-            <v-col cols="12" sm="6"><v-text-field v-model="mcpDraft.name" label="Name（工具前缀）" variant="outlined" density="compact" /></v-col>
-            <v-col cols="12" sm="6">
-              <v-select v-model="mcpDraft.transport" :items="[{ title: 'stdio（本地命令）', value: 'stdio' }, { title: 'streamable HTTP', value: 'http' }]" label="Transport" variant="outlined" density="compact" />
-            </v-col>
-            <template v-if="mcpDraft.transport === 'stdio'">
-              <v-col cols="12"><v-text-field v-model="mcpDraft.command" label="Command（如 npx）" variant="outlined" density="compact" /></v-col>
-              <v-col cols="12">
-                <v-textarea v-model="mcpDraft.argsRaw" label="Args（每行一个参数）" variant="outlined" density="compact" rows="2" auto-grow class="font-mono" />
-              </v-col>
-              <v-col cols="12">
-                <v-textarea v-model="mcpDraft.envRaw" label="Env（每行 KEY=VALUE，可空）" variant="outlined" density="compact" rows="2" auto-grow class="font-mono" />
-              </v-col>
-            </template>
-            <template v-else>
-              <v-col cols="12"><v-text-field v-model="mcpDraft.url" label="URL（如 http://127.0.0.1:9000/mcp）" variant="outlined" density="compact" /></v-col>
-            </template>
-          </v-row>
-        </v-card-text>
-        <v-card-actions>
-          <v-spacer />
-          <v-btn variant="text" @click="mcpDialog = false">取消</v-btn>
-          <v-btn color="primary" variant="flat" @click="commitMcp">确定</v-btn>
-        </v-card-actions>
-      </v-card>
-    </v-dialog>
   </v-container>
 </template>
 
@@ -527,10 +472,6 @@ const svcDraft = ref<LLMEntry & TTSEntry | null>(null)
 const delDialog = ref(false)
 const delTarget = ref<{ kind: ServiceKind; id: string; refs: string[] } | null>(null)
 
-const mcpDialog = ref(false)
-const mcpEditing = ref(-1)
-const mcpDraft = ref<any>(null)
-
 const extraRaw = ref<Record<string, string>>({})
 const extraErrors = ref<Record<string, string>>({})
 
@@ -553,7 +494,7 @@ const normalize = (doc: Record<string, any>) => {
   n.memory_char_limit = n.memory_char_limit ?? 4000
   n.caption_hide_ms = n.caption_hide_ms ?? 1000
   n.caption_step_gap_ms = n.caption_step_gap_ms ?? 1000
-  n.mcp_servers = n.mcp_servers || []
+  delete n.mcp_servers // 已迁移到数据库（Neuro Sama → Tools），旧配置键不再保留
   n.host = n.host ?? '127.0.0.1'
   n.port = n.port ?? 8000
   n.external_url = n.external_url ?? ''
@@ -567,7 +508,7 @@ const normalize = (doc: Record<string, any>) => {
   s.channel = s.channel ?? 'stream'
   s.log_level = s.log_level ?? 'info'
   s.scene_context = s.scene_context ?? 'You are streaming on Twitch now.'
-  s.messages_per_round = s.messages_per_round ?? 10
+  s.messages_per_round = s.messages_per_round ?? 5
   s.speech_cooldown_ms = s.speech_cooldown_ms ?? 1000
   s.game_tool_wait_speech = s.game_tool_wait_speech ?? true
   s.chess = s.chess || {}
@@ -816,44 +757,6 @@ const doDeleteService = () => {
     msgType.value = 'warning'
   }
   delDialog.value = false
-}
-
-// ---------- MCP ----------
-const openMcpDialog = (i: number) => {
-  mcpEditing.value = i
-  const e = i >= 0 ? cfg.value!.neuro_sama.mcp_servers[i] : null
-  mcpDraft.value = {
-    name: e?.name || '',
-    transport: e && 'command' in e ? 'stdio' : 'http',
-    command: e?.command || '',
-    argsRaw: (e?.args || []).join('\n'),
-    envRaw: Object.entries(e?.env || {}).map(([k, v]) => `${k}=${v}`).join('\n'),
-    url: e?.url || '',
-  }
-  mcpDialog.value = true
-}
-
-const commitMcp = () => {
-  const d = mcpDraft.value
-  if (!d || !cfg.value) return
-  const list = cfg.value.neuro_sama.mcp_servers
-  const base: Record<string, any> = { name: d.name || 'mcp' }
-  if (d.transport === 'stdio') {
-    base.command = d.command
-    const args = (d.argsRaw || '').split('\n').map((x: string) => x.trim()).filter(Boolean)
-    if (args.length) base.args = args
-    const env: Record<string, string> = {}
-    for (const line of (d.envRaw || '').split('\n').map((x: string) => x.trim()).filter(Boolean)) {
-      const i = line.indexOf('=')
-      if (i > 0) env[line.slice(0, i)] = line.slice(i + 1)
-    }
-    if (Object.keys(env).length) base.env = env
-  } else {
-    base.url = d.url
-  }
-  if (mcpEditing.value >= 0) list.splice(mcpEditing.value, 1, base)
-  else list.push(base)
-  mcpDialog.value = false
 }
 
 // ---------- 保存 / 放弃 / 重载 ----------
