@@ -107,6 +107,12 @@ body {
   font-weight: inherit;
   color: #fff;
 }
+/* 表情图片随行内字号缩放（.chat-lines 的 cqi 字号 × 场景的 --chat-font-scale） */
+.chat-emote {
+  height: 1em;
+  vertical-align: -0.15em;
+  object-fit: contain;
+}
 
 /* ===== no source：neuro 中途掉线时整屏覆盖（chat 在它上面） ===== */
 #no-source {

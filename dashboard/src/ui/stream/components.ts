@@ -17,7 +17,7 @@ import { ChessBoardView } from './chess'
 import { WordleGameView } from './wordle'
 
 export const COMPONENTS: Record<string, ComponentFactory> = {
-  'chat.overlay': el => new ChatOverlay(el),
+  'chat.overlay': (el, props) => new ChatOverlay(el, props),
   'wordle.game': el => new WordleGameView(el),
   'chess.board': el => new ChessBoardView(el),
 }

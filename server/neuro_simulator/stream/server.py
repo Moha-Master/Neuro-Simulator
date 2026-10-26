@@ -11,6 +11,7 @@
 - GET  /stream/scenes                                         场景清单（读 ui 构建的 scenes.json）
 - POST /game/{game}/action · GET /game/state                   本地小游戏（Wordle…）：动作 + 全量状态
 - PUT  /stream/metadata                                       改本场标题/分区/标签（→ 广播 stream_metadata）
+- GET  /emotes · GET /emotes/images/{name} · POST /emotes/refresh  表情清单/本地图片/手动刷新
 - /manage/chatbot/persona*：chatbot 的 prompt 模板 + core memory（人工编辑，存 stream DB）
 - /manage/templates*：stream 拼给 neuro / chatbot 的 user message 模板（人工编辑 + 预览）
 - GET  /ui/events（SSE）：snapshot（含最近聊天 + 元素状态 + neuro 基线） +
@@ -26,7 +27,7 @@ from contextlib import asynccontextmanager
 from typing import Any
 
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import StreamingResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
 
 from .. import log_kit, scene_kit
@@ -39,6 +40,7 @@ from . import scenes as scene_catalog
 from . import settings as stream_settings
 from . import status as stream_status_projection
 from .audience import AudienceTracker
+from .emotes import EmoteStore, RefreshBusy
 from .games import GameError
 from .loop import StreamConflict, StreamLoop
 from .neuro_client import NeuroClient
@@ -211,6 +213,10 @@ def create_app() -> FastAPI:
         # 状态机投影：provider 只读 loop / 场景清单 / 缓存，绝不 await。
         # 观众数是频道级事实（未开播也要能取），后台任务自己刷新缓存。
         app.state.audience = AudienceTracker()
+        # 表情：工作目录权威（manifest + images/ + custom/）。startup 只读盘，
+        # 缺失/过期才起后台 task 刷新，绝不阻塞启动。
+        app.state.emotes = EmoteStore(cfg.WORKDIR / "stream" / "emotes")
+        await app.state.emotes.startup()
         board = stream_status_projection.build_board(loop, app.state.audience)
         loop.state_board = board
         app.state.status_board = board
@@ -227,6 +233,7 @@ def create_app() -> FastAPI:
         yield
         await mirror.stop()
         await app.state.audience.shutdown()
+        await app.state.emotes.shutdown()
         await loop.shutdown()
         await storage.close()
 
@@ -285,6 +292,33 @@ def create_app() -> FastAPI:
                 "in_flight": lp.chatbot.in_flight,
             },
         }
+
+    # ---------- 表情（本地预下载，前端只吃同源接口） ----------
+
+    @app.get("/emotes")
+    async def emotes_list():
+        """表情清单。custom/ 每次现扫（人工投放不依赖 refresh）。"""
+        return app.state.emotes.snapshot()
+
+    @app.get("/emotes/images/{name}")
+    async def emotes_image(name: str):
+        """图片只按内存索引查名字；绝不把 name 拼进文件系统路径。"""
+        item = app.state.emotes.image(name)
+        if item is None:
+            raise HTTPException(status_code=404, detail="emote not found")
+        return FileResponse(
+            item.path,
+            media_type=item.mime,
+            headers={"Cache-Control": "max-age=3600"},
+        )
+
+    @app.post("/emotes/refresh")
+    async def emotes_refresh():
+        """手动触发一次刷新（持锁；已有刷新在跑 → 409）。"""
+        try:
+            return await app.state.emotes.refresh("manual")
+        except RefreshBusy as e:
+            raise HTTPException(status_code=409, detail=str(e)) from e
 
     @app.get("/stream/status")
     async def stream_status(want: str | None = None, drop: str | None = None):

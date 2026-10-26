@@ -38,8 +38,9 @@ logger = logging.getLogger("stream.chatbot")
 
 # 表情代码大小写敏感（`neuroICANT` 不是 `neuroicant`），但小模型经常写成全小写。
 # 这里对已知代码做一次大小写归一；与 defaults/chatbot_prompt.md 的词表保持一致
-# （不在表里的词原样保留，prompt 改了也不会出错）。
-_EMOTE_CANON = {
+# （不在表里的词原样保留，prompt 改了也不会出错）。公开名：stream/emotes.py 也用它
+# 作为 7TV 搜索的预置名单。
+EMOTE_CANON = {
     name.lower(): name
     for name in (
         "LUL", "KEKW", "LULE", "LOL", "Pog", "Sadge", "monkaS", "Clueless", "ICANT",
@@ -532,7 +533,7 @@ class ChatbotManager:
     def _normalize_emotes(line: str) -> str:
         """把已知表情代码改回正确大小写（`neuroicant` → `neuroICANT`）。"""
         return _EMOTE_WORD.sub(
-            lambda m: _EMOTE_CANON.get(m.group(0).lower(), m.group(0)), line
+            lambda m: EMOTE_CANON.get(m.group(0).lower(), m.group(0)), line
         )
 
     def _parse_output(self, raw: str, count: int) -> list[str]:

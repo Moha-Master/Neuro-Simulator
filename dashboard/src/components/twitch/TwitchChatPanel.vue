@@ -59,7 +59,7 @@
               <span v-if="showTimestamps" class="tw-chat__time">{{ formatTime(m.created_at) }}</span>
               <span class="tw-chat__user" :style="{ color: colorFor(m.username) }">
                 {{ m.username }}
-              </span><span class="tw-chat__colon">: </span><span class="tw-chat__text">{{ m.content }}</span>
+              </span><span class="tw-chat__colon">: </span><span class="tw-chat__text"><template v-for="(token, i) in tokensFor(m.content)" :key="i"><img v-if="token.type === 'emote'" class="tw-emote" :src="token.url" :alt="token.name" :title="token.name"><span v-else>{{ token.text }}</span></template></span>
             </div>
           </div>
 
@@ -67,7 +67,7 @@
             <span v-if="showTimestamps" class="tw-chat__time">{{ formatTime(m.created_at) }}</span>
             <span class="tw-chat__user" :style="{ color: colorFor(m.username) }">
               {{ m.username }}
-            </span><span class="tw-chat__colon">: </span><span class="tw-chat__text">{{ m.content }}</span>
+            </span><span class="tw-chat__colon">: </span><span class="tw-chat__text"><template v-for="(token, i) in tokensFor(m.content)" :key="i"><img v-if="token.type === 'emote'" class="tw-emote" :src="token.url" :alt="token.name" :title="token.name"><span v-else>{{ token.text }}</span></template></span>
           </div>
         </template>
       </div>
@@ -106,6 +106,7 @@
           <img :src="subBadgeUrl" alt="" />
         </button>
         <input
+          ref="inputEl"
           v-model="text"
           class="tw-chat__input"
           type="text"
@@ -124,14 +125,48 @@
         >
           <TwitchIcon name="cheer" :size="20" />
         </button>
-        <button
-          class="tw-icon-btn tw-chat__tool"
-          type="button"
-          title="表情符号选择器"
+        <v-menu
+          v-model="emoteMenuOpen"
+          :close-on-content-click="false"
+          location="top end"
           :disabled="!active"
         >
-          <TwitchIcon name="emote" :size="20" />
-        </button>
+          <template #activator="{ props: menuProps }">
+            <button
+              v-bind="menuProps"
+              class="tw-icon-btn tw-chat__tool"
+              type="button"
+              title="表情符号选择器"
+              :disabled="!active"
+            >
+              <TwitchIcon name="emote" :size="20" />
+            </button>
+          </template>
+          <div class="tw-emote-panel">
+            <input
+              v-model="emoteQuery"
+              class="tw-emote-panel__search"
+              type="search"
+              placeholder="搜索表情"
+              aria-label="搜索表情"
+            />
+            <div class="tw-emote-panel__grid">
+              <button
+                v-for="emote in filteredEmotes"
+                :key="emote.name"
+                class="tw-emote-panel__item"
+                type="button"
+                :title="emote.name"
+                @click="insertEmote(emote.name)"
+              >
+                <img :src="emote.url" :alt="emote.name" loading="lazy">
+              </button>
+              <div v-if="!filteredEmotes.length" class="tw-emote-panel__empty">
+                无匹配表情
+              </div>
+            </div>
+          </div>
+        </v-menu>
       </div>
 
       <div class="tw-chat__toolbar">
@@ -231,10 +266,38 @@
 <script lang="ts" setup>
 import { computed, nextTick, onMounted, ref, watch } from 'vue'
 import { useTheme } from 'vuetify'
+import type { EmotesResponse } from '@/types/emotes'
 import type { QueueMessage } from '@/types/stream'
 import { DEFAULT_CHAT_USERNAME, useChatIdentity } from '@/composables/chatIdentity'
+import { tokenize } from '@/utils/chatEmotes'
 import { colorForUsername } from '@/utils/twitchColors'
 import TwitchIcon from './TwitchIcon.vue'
+
+/** dashboard 挂在 vedal 的 `/manage/stream` 代理下；表情接口同源走这里。 */
+const EMOTE_BASE = '/manage/stream'
+/** name → 已拼好基址的同源 URL（模块级：整个 session 只拉一次）。 */
+const emoteIndex = ref(new Map<string, string>())
+let emoteLoad: Promise<void> | null = null
+
+function ensureEmotes (): Promise<void> {
+  if (!emoteLoad) {
+    emoteLoad = (async () => {
+      try {
+        const response = await fetch(`${EMOTE_BASE}/emotes`)
+        if (!response.ok) return
+        const data = (await response.json()) as EmotesResponse
+        const index = new Map<string, string>()
+        for (const emote of data.emotes) {
+          index.set(emote.name, `${EMOTE_BASE}${emote.url}`)
+        }
+        emoteIndex.value = index
+      } catch {
+        // 失败就是空索引：所有消息按纯文本渲染，不阻塞聊天
+      }
+    })()
+  }
+  return emoteLoad
+}
 
 const props = defineProps<{
   messages: QueueMessage[]
@@ -256,9 +319,12 @@ const subBadgeUrl = '/twitch/sub_badge.svg'
 const channelPointsUrl = '/twitch/channel_points.png'
 
 const listEl = ref<HTMLElement | null>(null)
+const inputEl = ref<HTMLInputElement | null>(null)
 const atBottom = ref(true)
 const viewersOpen = ref(false)
 const settingsOpen = ref(false)
+const emoteMenuOpen = ref(false)
+const emoteQuery = ref('')
 
 /** 聊天身份编辑：仅当前页面会话生效（刷新丢失），回车应用、× 恢复默认 */
 const { username: chatUsername, setUsername } = useChatIdentity()
@@ -312,6 +378,39 @@ function colorFor(name: string): string {
   return colorForUsername(name, isDark.value)
 }
 
+/** 消息内容 → 文本/表情 token；索引为空时整体一个文本 token。 */
+function tokensFor(content: string) {
+  return tokenize(content, emoteIndex.value)
+}
+
+const emoteList = computed(() =>
+  [...emoteIndex.value.entries()]
+    .map(([name, url]) => ({ name, url }))
+    .sort((a, b) => a.name.localeCompare(b.name)),
+)
+
+const filteredEmotes = computed(() => {
+  const query = emoteQuery.value.trim().toLowerCase()
+  return query
+    ? emoteList.value.filter(emote => emote.name.toLowerCase().includes(query))
+    : emoteList.value
+})
+
+/** 在输入框光标处插入 `name + 空格`，并恢复焦点/光标。 */
+function insertEmote(name: string): void {
+  const input = inputEl.value
+  const start = input?.selectionStart ?? text.value.length
+  const end = input?.selectionEnd ?? start
+  text.value = `${text.value.slice(0, start)}${name} ${text.value.slice(end)}`
+  void nextTick(() => {
+    const element = inputEl.value
+    if (!element) return
+    element.focus()
+    const position = start + name.length + 1
+    element.setSelectionRange(position, position)
+  })
+}
+
 function formatTime(value: string): string {
   const d = new Date(value.includes('T') ? value : value.replace(' ', 'T'))
   if (Number.isNaN(d.getTime())) return ''
@@ -331,7 +430,7 @@ function onScroll(): void {
 function scrollToBottom(): void {
   const el = listEl.value
   if (!el) return
-  el.scrollTop = el.scrollHeight
+  el.scrollTo({ top: el.scrollHeight, behavior: 'smooth' })
   atBottom.value = true
 }
 
@@ -351,6 +450,7 @@ watch(lastMessageId, async (id) => {
 })
 
 onMounted(async () => {
+  void ensureEmotes()
   await nextTick()
   scrollToBottom()
 })
@@ -493,6 +593,75 @@ async function submit(): Promise<void> {
 
 .tw-chat__text {
   font-weight: 400;
+}
+
+/* 消息字号 14px → 表情约 19-20px，贴 Twitch 实际比例 */
+.tw-emote {
+  height: 1.375em;
+  vertical-align: text-bottom;
+}
+
+/* ---- 表情面板：搜索框 + 44px 图片网格 ---- */
+.tw-emote-panel {
+  width: 260px;
+  padding: 8px;
+}
+
+.tw-emote-panel__search {
+  width: 100%;
+  height: 30px;
+  margin-bottom: 8px;
+  padding: 0 10px;
+  border: 1px solid var(--tw-border);
+  border-radius: var(--tw-radius);
+  outline: none;
+  background: var(--tw-bg-alt);
+  color: var(--tw-text);
+  font-family: inherit;
+  font-size: 13px;
+}
+
+.tw-emote-panel__search:focus {
+  border-color: var(--tw-purple);
+}
+
+.tw-emote-panel__grid {
+  display: grid;
+  grid-template-columns: repeat(5, 44px);
+  gap: 4px;
+  max-height: 264px;
+  overflow-y: auto;
+}
+
+.tw-emote-panel__item {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 44px;
+  height: 44px;
+  padding: 2px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  cursor: pointer;
+}
+
+.tw-emote-panel__item:hover {
+  background: var(--tw-bg-alt);
+}
+
+.tw-emote-panel__item img {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+}
+
+.tw-emote-panel__empty {
+  grid-column: 1 / -1;
+  padding: 16px 0;
+  color: var(--tw-text-hint);
+  font-size: 12px;
+  text-align: center;
 }
 
 /* ---- 高亮消息 = Twitch Highlighted Message ---- */
