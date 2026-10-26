@@ -428,11 +428,18 @@ async def seed_mcp_servers(storage: Storage, servers: list[dict]) -> bool:
     """一次性把 config 里的 MCP 清单播种进 DB（幂等；返回本次是否真的写入）。
 
     用 meta 标记而不是"表里有没有行"判断：用户清空 MCP 后重启不能被 config
-    再灌回来。写入时逐条补 ``enabled: true``（旧 config 没有这个键）。
+    再灌回来。写入时逐条补 ``enabled: true`` 与推断的 ``transport``（旧 config
+    两个键都可能没有），让 DB 文档自洽——MCPManager 的 sse 分支依赖显式
+    transport。
     """
     if await storage.get_meta(MCP_SEEDED_KEY) == "1":
         return False
-    seeded = [{**s, "enabled": bool(s.get("enabled", True))} for s in servers]
+    seeded = []
+    for s in servers:
+        row = {**s, "enabled": bool(s.get("enabled", True))}
+        if not row.get("transport"):
+            row["transport"] = "stdio" if s.get("command") else "http"
+        seeded.append(row)
     await storage.upsert_mcp_servers(seeded)
     await storage.set_meta(MCP_SEEDED_KEY, "1")
     return True

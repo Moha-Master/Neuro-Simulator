@@ -28,7 +28,7 @@ export interface ToolInfo {
   enabled: boolean
 }
 
-export type McpTransport = 'stdio' | 'http'
+export type McpTransport = 'stdio' | 'http' | 'sse'
 
 export interface McpServerInfo {
   name: string
@@ -37,6 +37,8 @@ export interface McpServerInfo {
   args?: string[]
   env?: Record<string, string>
   url?: string
+  /** 认证头（仅 http/sse；明文回显，编辑需要回填） */
+  headers?: Record<string, string>
   enabled: boolean
   /** 最近一次启动的连接结果 */
   connected: boolean
@@ -71,5 +73,7 @@ export interface McpServerInput {
   args?: string[]
   env?: Record<string, string>
   url?: string
+  /** 认证头（仅 http/sse；stdio 传了后端会 400） */
+  headers?: Record<string, string>
   enabled?: boolean
 }

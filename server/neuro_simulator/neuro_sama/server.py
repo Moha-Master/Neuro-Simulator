@@ -591,17 +591,20 @@ class ToolRunPayload(BaseModel):
 
 class MCPServerPayload(BaseModel):
     name: str
-    transport: Literal["stdio", "http"] | None = None
+    transport: Literal["stdio", "http", "sse"] | None = None
     command: str | None = None
     args: list[str] | None = None
     env: dict[str, str] | None = None
     url: str | None = None
+    # 通用认证头（如 Authorization: Bearer ... / 自定义 API key）；仅 http/sse。
+    # 明文存储/回显，与 env、server.llm_services.api_key 同先例（编辑要回填）。
+    headers: dict[str, str] | None = None
     enabled: bool = True
 
 
 def _transport_of(server: dict) -> str:
     transport = server.get("transport")
-    if transport in ("stdio", "http"):
+    if transport in ("stdio", "http", "sse"):
         return str(transport)
     return "stdio" if server.get("command") else "http"
 
@@ -635,6 +638,8 @@ def _mcp_servers_from_status(
                 row["env"] = dict(server["env"])
         else:
             row["url"] = server.get("url") or ""
+            if server.get("headers"):
+                row["headers"] = dict(server["headers"])
         out.append(row)
     return out
 
@@ -726,11 +731,25 @@ def _validate_mcp_server(
     transport = payload.transport
     if transport is None:
         transport = "stdio" if payload.command else ("http" if payload.url else "")
-    if transport not in ("stdio", "http"):
+    if transport not in ("stdio", "http", "sse"):
         raise HTTPException(
             status_code=400,
-            detail="必须提供 command（stdio）或 url（http）之一",
+            detail="必须提供 command（stdio）或 url（http/sse）之一",
         )
+
+    # 空 dict 与 None 等价，不算"给了 headers"
+    if transport == "stdio" and payload.headers:
+        raise HTTPException(status_code=400, detail="stdio 不支持 headers")
+
+    headers: dict[str, str] = {}
+    for key, value in (payload.headers or {}).items():
+        k = key.strip()
+        if not k:
+            raise HTTPException(status_code=400, detail="headers 的键不能为空")
+        if ":" in k:
+            raise HTTPException(status_code=400, detail="headers 的键不能包含 ':'")
+        # 值只 strip 两侧空白；冒号保留（Bearer x:y 合法）
+        headers[k] = value.strip()
 
     old = next((s for s in existing if s.get("name") == name), None)
     if path_name is None and old is not None:
@@ -755,8 +774,10 @@ def _validate_mcp_server(
     else:
         url = (payload.url or "").strip()
         if not url:
-            raise HTTPException(status_code=400, detail="http server 必须提供 url")
+            raise HTTPException(status_code=400, detail=f"{transport} server 必须提供 url")
         doc["url"] = url
+        if headers:
+            doc["headers"] = headers
     return doc
 
 

@@ -73,12 +73,30 @@ class TestToolStorage(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(servers), 1)
         self.assertEqual(servers[0]["name"], "cfg")
         self.assertTrue(servers[0]["enabled"], "旧 config 没有 enabled 时播种为 true")
+        self.assertEqual(servers[0]["transport"], "stdio", "旧 config 没 transport 时按 command 推断")
         self.assertEqual(await self.storage.get_meta("mcp_seeded"), "1")
 
         # 第二次即便 config 变了也不覆盖 DB
         wrote_again = await seed_mcp_servers(self.storage, [{"name": "other", "url": "http://y"}])
         self.assertFalse(wrote_again)
         self.assertEqual([s["name"] for s in await self.storage.get_mcp_servers()], ["cfg"])
+
+    async def test_seed_infers_transport_for_old_entries(self):
+        wrote = await seed_mcp_servers(
+            self.storage,
+            [
+                {"name": "cmd", "command": "npx", "args": ["-y", "x"]},
+                {"name": "web", "url": "http://y/mcp"},
+                # 显式 transport 不被推断覆盖
+                {"name": "raw", "url": "http://z/sse", "transport": "sse"},
+            ],
+        )
+        self.assertTrue(wrote)
+        by_name = {s["name"]: s for s in await self.storage.get_mcp_servers()}
+        self.assertEqual(by_name["cmd"]["transport"], "stdio")
+        self.assertEqual(by_name["web"]["transport"], "http")
+        self.assertEqual(by_name["raw"]["transport"], "sse")
+        self.assertTrue(all(s["enabled"] for s in by_name.values()))
 
 
 class _ToolAdminBase(unittest.IsolatedAsyncioTestCase):
@@ -268,6 +286,119 @@ class TestManageMcpServers(_ToolAdminBase):
 
             resp = await client.delete("/manage/mcp-servers/fake")
             self.assertEqual(resp.status_code, 404)
+
+    async def test_http_headers_roundtrip_and_put_replaces_without_headers(self):
+        url = "http://127.0.0.1:1/mcp"
+        headers = {"Authorization": "Bearer tok", "X-Trace": "a:b"}
+        async with self._client() as client:
+            resp = await client.post(
+                "/manage/mcp-servers",
+                json={
+                    "name": "h",
+                    "transport": "http",
+                    "url": url,
+                    "headers": headers,
+                },
+            )
+            self.assertEqual(resp.status_code, 200, resp.text)
+            row = next(s for s in resp.json()["mcp_servers"] if s["name"] == "h")
+            self.assertEqual(row["transport"], "http")
+            self.assertEqual(row["url"], url)
+            self.assertEqual(row["headers"], headers, "值与键逐字回显（值内冒号保留）")
+            self.assertFalse(row["connected"])
+
+            # GET 与变更端点形状一致
+            resp = await client.get("/manage/tools")
+            self.assertEqual(resp.status_code, 200)
+            row = next(s for s in resp.json()["mcp_servers"] if s["name"] == "h")
+            self.assertEqual(row["headers"], headers)
+
+            # PUT 整条替换：body 没有 headers → DB 与回显都不再含该键
+            resp = await client.put(
+                "/manage/mcp-servers/h",
+                json={"name": "h", "transport": "http", "url": url, "enabled": True},
+            )
+            self.assertEqual(resp.status_code, 200, resp.text)
+            row = next(s for s in resp.json()["mcp_servers"] if s["name"] == "h")
+            self.assertNotIn("headers", row)
+            self.assertNotIn("headers", (await self.storage.get_mcp_servers())[0])
+
+    async def test_sse_headers_roundtrip(self):
+        url = "http://127.0.0.1:1/sse"
+        async with self._client() as client:
+            resp = await client.post(
+                "/manage/mcp-servers",
+                json={
+                    "name": "s",
+                    "transport": "sse",
+                    "url": url,
+                    "headers": {"X-API-Key": "k"},
+                },
+            )
+            self.assertEqual(resp.status_code, 200, resp.text)
+            self.assertFalse(
+                next(s for s in resp.json()["mcp_servers"] if s["name"] == "s")["connected"]
+            )
+
+            resp = await client.get("/manage/tools")
+            row = next(s for s in resp.json()["mcp_servers"] if s["name"] == "s")
+            self.assertEqual(row["transport"], "sse")
+            self.assertEqual(row["url"], url)
+            self.assertEqual(row["headers"], {"X-API-Key": "k"})
+            self.assertFalse(row["connected"])
+
+    async def test_headers_validation(self):
+        async with self._client() as client:
+            # stdio 不支持 headers（即便 command 合法）
+            resp = await client.post(
+                "/manage/mcp-servers",
+                json={
+                    "name": "bad",
+                    "transport": "stdio",
+                    "command": "npx",
+                    "headers": {"X-Key": "v"},
+                },
+            )
+            self.assertEqual(resp.status_code, 400)
+            self.assertIn("stdio 不支持 headers", resp.json()["detail"])
+
+            # 空键（strip 后）→ 400
+            resp = await client.post(
+                "/manage/mcp-servers",
+                json={
+                    "name": "bad-empty-key",
+                    "transport": "http",
+                    "url": "http://127.0.0.1:1/mcp",
+                    "headers": {"  ": "v"},
+                },
+            )
+            self.assertEqual(resp.status_code, 400)
+
+            # 键内含 ':' → 400（值内冒号合法，由上面的 X-Trace 覆盖）
+            resp = await client.post(
+                "/manage/mcp-servers",
+                json={
+                    "name": "bad-colon-key",
+                    "transport": "http",
+                    "url": "http://127.0.0.1:1/mcp",
+                    "headers": {"X:Bad": "v"},
+                },
+            )
+            self.assertEqual(resp.status_code, 400)
+
+            # 键/值两侧空白被 strip，值内冒号保留
+            resp = await client.post(
+                "/manage/mcp-servers",
+                json={
+                    "name": "trim",
+                    "transport": "http",
+                    "url": "http://127.0.0.1:1/mcp",
+                    "headers": {" Authorization ": " Bearer a:b "},
+                },
+            )
+            self.assertEqual(resp.status_code, 200, resp.text)
+            row = next(s for s in resp.json()["mcp_servers"] if s["name"] == "trim")
+            self.assertEqual(row["headers"], {"Authorization": "Bearer a:b"})
 
     async def test_stdio_validation_without_spawning(self):
         async with self._client() as client:

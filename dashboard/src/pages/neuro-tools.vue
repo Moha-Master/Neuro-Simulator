@@ -109,7 +109,10 @@
               <div v-for="server in mcpServers" :key="server.name" class="neuro-tools__mcp">
                 <div class="d-flex align-center ga-2 flex-wrap">
                   <span class="font-mono text-body-2">{{ server.name }}</span>
-                  <v-chip size="x-small" variant="tonal">{{ server.transport }}</v-chip>
+                  <v-chip size="x-small" variant="tonal">
+                    <v-icon start size="x-small">{{ transportIcon(server.transport) }}</v-icon>
+                    {{ server.transport }}
+                  </v-chip>
                   <v-tooltip
                     v-if="server.error"
                     location="top"
@@ -259,6 +262,7 @@
                   :items="[
                     { title: 'stdio（本地命令）', value: 'stdio' },
                     { title: 'streamable HTTP', value: 'http' },
+                    { title: 'SSE（legacy）', value: 'sse' },
                   ]"
                   label="Transport"
                   variant="outlined"
@@ -304,6 +308,20 @@
                     label="URL（如 http://127.0.0.1:9000/mcp）"
                     variant="outlined"
                     density="compact"
+                  />
+                </v-col>
+                <v-col cols="12">
+                  <v-textarea
+                    v-model="mcpDraft.headersRaw"
+                    label="Headers（每行 KEY: VALUE）"
+                    hint="示例：Authorization: Bearer <token>；只按每行第一个冒号拆分，值内冒号保留"
+                    persistent-hint
+                    variant="outlined"
+                    density="compact"
+                    rows="2"
+                    auto-grow
+                    class="font-mono"
+                    spellcheck="false"
                   />
                 </v-col>
               </template>
@@ -407,6 +425,12 @@ function originColor(tool: ToolInfo): string {
   return 'blue-grey'
 }
 
+function transportIcon(transport: McpTransport): string {
+  if (transport === 'stdio') return 'mdi-console'
+  if (transport === 'sse') return 'mdi-wifi'
+  return 'mdi-web'
+}
+
 // ---------- 工具开关 ----------
 
 async function toggleTool(tool: ToolInfo, enabled: boolean): Promise<void> {
@@ -507,6 +531,7 @@ interface McpDraft {
   argsRaw: string
   envRaw: string
   url: string
+  headersRaw: string
   enabled: boolean
 }
 
@@ -526,9 +551,31 @@ function openMcpDialog(server: McpServerInfo | null): void {
       .map(([k, v]) => `${k}=${v}`)
       .join('\n'),
     url: server?.url ?? '',
+    headersRaw: Object.entries(server?.headers ?? {})
+      .map(([k, v]) => `${k}: ${v}`)
+      .join('\n'),
     enabled: server?.enabled ?? true,
   }
   mcpDialog.value = true
+}
+
+/** 逐行 KEY: VALUE；只按每行第一个冒号拆分（值内冒号保留）。 */
+function parseHeaders(raw: string): Record<string, string> {
+  const out: Record<string, string> = {}
+  raw.split('\n').forEach((rawLine, index) => {
+    const line = rawLine.trim()
+    if (!line) return
+    const i = line.indexOf(':')
+    if (i < 0) {
+      throw new Error(`Headers 第 ${index + 1} 行缺少 ':'`)
+    }
+    const key = line.slice(0, i).trim()
+    if (!key) {
+      throw new Error(`Headers 第 ${index + 1} 行的键为空`)
+    }
+    out[key] = line.slice(i + 1).trim()
+  })
+  return out
 }
 
 function draftPayload(draft: McpDraft): McpServerInput {
@@ -552,6 +599,8 @@ function draftPayload(draft: McpDraft): McpServerInput {
     if (Object.keys(env).length) payload.env = env
   } else {
     payload.url = draft.url.trim()
+    const headers = parseHeaders(draft.headersRaw)
+    if (Object.keys(headers).length) payload.headers = headers
   }
   return payload
 }
@@ -559,9 +608,15 @@ function draftPayload(draft: McpDraft): McpServerInput {
 async function saveMcp(): Promise<void> {
   const draft = mcpDraft.value
   if (!draft) return
+  let body: string
+  try {
+    body = JSON.stringify(draftPayload(draft))
+  } catch (e) {
+    notify(e instanceof Error ? e.message : String(e))
+    return
+  }
   savingMcp.value = true
   try {
-    const body = JSON.stringify(draftPayload(draft))
     const editing = mcpEditing.value
     apply(
       await api<ToolsMutationResponse>(

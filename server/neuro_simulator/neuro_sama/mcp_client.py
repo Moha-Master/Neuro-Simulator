@@ -1,8 +1,12 @@
 """MCP 客户端接入（mcp Python SDK v2 标准用法，已实测）：
 
 - stdio：stdio_client(StdioServerParameters) -> (read, write)
-- streamable HTTP：streamable_http_client(url) -> (read, write)
-- 两者之上统一挂 ClientSession，initialize -> list_tools -> call_tool
+- streamable HTTP：streamable_http_client(url) -> (read, write)；
+  带 headers 时 SDK 不接受该参数——自建 ``create_mcp_http_client(headers=...)``
+  并**先进栈**（SDK 不关闭传入的 client），再把 client 交给 transport。
+- legacy SSE：sse_client(url, headers=...) -> (read, write)，headers 原生支持，
+  client 由 SDK 自管。
+- 三者之上统一挂 ClientSession，initialize -> list_tools -> call_tool
 - 发现的 MCP 工具物化成与内置工具同构的 Tool，注册进同一张 ToolRegistry，
   agent loop 对本地/远程工具无差别调度（Gemini CLI / AstrBot 同款模式）。
 - 注意 v2 字段为 snake_case：Tool.input_schema、CallToolResult.is_error。
@@ -14,8 +18,12 @@ from contextlib import AsyncExitStack
 from urllib.parse import urlparse
 
 from mcp import ClientSession, StdioServerParameters
+from mcp.client.sse import sse_client
 from mcp.client.stdio import stdio_client
 from mcp.client.streamable_http import streamable_http_client
+# SDK 私有路径，但 mcp 自身公开使用它；升级 mcp 后若移动，test_tool_admin
+# 会在导入阶段第一时间报错（可接受的取舍）。不要顶层 import httpx2。
+from mcp.shared._httpx_utils import create_mcp_http_client
 
 from .tools import Tool, ToolRegistry
 
@@ -123,9 +131,26 @@ class MCPManager:
                     )
                 elif cfg.get("url"):
                     await _check_http_endpoint(cfg["url"])
-                    read, write = await stack.enter_async_context(
-                        streamable_http_client(cfg["url"])
-                    )
+                    # headers 是通用认证通道（Authorization: Bearer ... 或自定义
+                    # API key 头）；SSE 的 timeout 类参数刻意不进配置，用 SDK 默认。
+                    headers = cfg.get("headers") or None
+                    if cfg.get("transport") == "sse":
+                        read, write = await stack.enter_async_context(
+                            sse_client(cfg["url"], headers=headers)
+                        )
+                    elif headers:
+                        # SDK 对传入的 client 不负责任何关闭——必须自己进栈，
+                        # 且在 transport 之前（后进先出：transport 先关、client 后关）。
+                        client = create_mcp_http_client(headers=headers)
+                        await stack.enter_async_context(client)
+                        read, write = await stack.enter_async_context(
+                            streamable_http_client(cfg["url"], http_client=client)
+                        )
+                    else:
+                        # 无 headers 的 streamable HTTP 走原路径，行为零变化。
+                        read, write = await stack.enter_async_context(
+                            streamable_http_client(cfg["url"])
+                        )
                 else:
                     status["error"] = "config has neither 'command' nor 'url'"
                     logs.append(f"[mcp] {server_name}: config has neither 'command' nor 'url', skipped")
