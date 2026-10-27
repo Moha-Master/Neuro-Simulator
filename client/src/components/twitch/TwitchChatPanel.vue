@@ -265,10 +265,10 @@
 
 <script lang="ts" setup>
 import { computed, nextTick, onMounted, ref, watch } from 'vue'
-import { useTheme } from 'vuetify'
 import type { EmotesResponse } from '@/types/emotes'
 import type { QueueMessage } from '@/types/stream'
 import { DEFAULT_CHAT_USERNAME, useChatIdentity } from '@/composables/chatIdentity'
+import { isDark } from '@/theme'
 import { tokenize } from '@/utils/chatEmotes'
 import { colorForUsername } from '@/utils/twitchColors'
 import TwitchIcon from './TwitchIcon.vue'
@@ -311,9 +311,6 @@ const props = defineProps<{
 }>()
 
 const collapsed = defineModel<boolean>('collapsed', { default: false })
-
-const theme = useTheme()
-const isDark = computed(() => theme.global.current.value.dark)
 
 const subBadgeUrl = '/twitch/sub_badge.svg'
 const channelPointsUrl = '/twitch/channel_points.png'

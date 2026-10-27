@@ -16,18 +16,22 @@
 - /manage/templates*：stream 拼给 neuro / chatbot 的 user message 模板（人工编辑 + 预览）
 - GET  /ui/events（SSE）：snapshot（含最近聊天 + 元素状态 + neuro 基线） +
   循环/控制/聊天事件 + 转发自 neuro 的 `neuro` 事件（内容/状态两条总线的聚合）
-- /ui：直播画面静态托管（Vite 构建产物）
+- GET  /view：观看前端（client/ 构建产物，经 vedal 为 /manage/stream/view/）；
+  产物缺失时跳过挂载并告警（stream 照常启动）
 
 直播循环语义见 loop.py；跨模块访问（neuro URL）约定见 settings.py。
 """
 
 import asyncio
 import json
+import logging
 from contextlib import asynccontextmanager
-from typing import Any
+from pathlib import Path
+from typing import Any, Optional
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from .. import log_kit, scene_kit
@@ -52,6 +56,24 @@ from .persona import (
 )
 from .storage import Storage
 
+logger = logging.getLogger(__name__)
+
+
+def client_dist() -> Optional[Path]:
+    """观看前端（client/）的构建产物目录。
+
+    - wheel 安装：包内 `neuro_simulator/stream/client/`（pyproject force-include）
+    - editable 安装：仓库根 `client/dist`
+    - 都没有 → None（/view 不挂载，stream 照常启动）
+    """
+    pkg = Path(__file__).parent / "client"
+    if (pkg / "index.html").is_file():
+        return pkg
+    repo = Path(__file__).parents[3] / "client" / "dist"
+    if (repo / "index.html").is_file():
+        return repo
+    return None
+
 
 class MessagePayload(BaseModel):
     username: str = "viewer"
@@ -63,11 +85,16 @@ class MessagePayload(BaseModel):
 
 
 class StartPayload(BaseModel):
-    """开播参数（全部可选）：缺省用 config 的 stream 默认值。"""
+    """开播参数（全部可选）：缺省用 config 的 stream 默认值。
+
+    `record=True` = 模拟直播：与正常开播走完全相同的流程（intro/starting/live），
+    唯一区别是 `metadata.live` 为 False（录制排练，不对外宣称开播）。
+    """
 
     title: str | None = None
     category: str | None = None
     tags: list[str] | None = None
+    record: bool = False
 
 
 class MetadataPayload(BaseModel):
@@ -395,9 +422,10 @@ def create_app() -> FastAPI:
             tags = None if payload.tags is None else stream_settings.normalize_tags(payload.tags)
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
-        session = await _guard(_loop().start(title, category, tags))
+        session = await _guard(_loop().start(title, category, tags, record=payload.record))
         return {
             "status": "starting",
+            "recording": bool(payload.record),
             "session": session["session_id"],
             "queue": session["queue_id"],
             "title": session.get("title", ""),
@@ -507,15 +535,13 @@ def create_app() -> FastAPI:
 
     @app.post("/scene")
     async def scene_set(payload: ScenePayload):
-        # hidden 内部场景（如 starting_soon）只能由程序化路径触发，不允许手动选中——
-        # 手动切进去没有"到点回 room"的驱动者，画面会卡住。
-        # 注：dashboard 已不再提供手动切场景按钮（避免与循环/游戏的自动切换打架），
-        # 端点保留给调试与未来的固定时长场景。
-        if not scene_catalog.exists(payload.id) or scene_catalog.hidden(payload.id):
-            known = ", ".join(s["id"] for s in scene_catalog.overview()) or "（ui 未构建）"
+        # 所有场景都可手动切换（开场/预定开播也只是普通画面场景）；只校验 id 存在。
+        # 循环/游戏仍会自动切场景，手动切换可能被下一轮覆盖。
+        if not scene_catalog.exists(payload.id):
+            known = ", ".join(s["id"] for s in scene_catalog.overview()) or "（清单为空）"
             raise HTTPException(
                 status_code=400,
-                detail=f"未知或不可手动选择的场景 {payload.id!r}；可用：{known}",
+                detail=f"未知场景 {payload.id!r}；可用：{known}",
             )
         _loop().on_scene(payload.id)
         return {"status": "ok", "scene": payload.id}
@@ -789,6 +815,17 @@ def create_app() -> FastAPI:
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
+
+    # ---------- 观看前端静态托管（放在所有 API 路由之后） ----------
+    # client/ 是独立 Vite 工程（无 router，单页）；经 vedal 的通用代理访问
+    # `/manage/stream/view/`。产物不存在时只告警，不让 stream 起不来。
+    dist = client_dist()
+    if dist is None:
+        logger.warning(
+            "client dist 未找到（/view 不挂载）：跑 `cd client && npm install && npm run build`"
+        )
+    else:
+        app.mount("/view", StaticFiles(directory=dist, html=True), name="client")
 
     return app
 

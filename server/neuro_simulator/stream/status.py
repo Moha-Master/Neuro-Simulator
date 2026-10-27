@@ -103,6 +103,8 @@ def _loop_current(loop: Any) -> dict:
         "highlight_cursor": session.get("highlight_cursor"),
         "highlight_paused": bool(getattr(loop, "highlight_paused", False)),
         "highlight_source": getattr(loop, "highlight_source", None),
+        # 模拟直播（record）：loop 在跑但不算"开播"（见 metadata.live 判据）
+        "recording": bool(getattr(loop, "recording", False)),
         "intro": loop.intro_status(),
         "last_error": loop.last_error,
         "started_at": session.get("started_at"),
@@ -144,7 +146,9 @@ def _metadata_current(loop: Any) -> dict:
         "title": title,
         "category": category,
         "tags": loop.session_tags(),
-        "live": loop.session is not None,
+        # `running` 与 `live` 正交：record 场次循环在跑（starting/live/paused），但不对外
+        # 宣称开播。正常 starting 也算 live——观众要能看开场。
+        "live": loop.session is not None and not bool(getattr(loop, "recording", False)),
     }
 
 

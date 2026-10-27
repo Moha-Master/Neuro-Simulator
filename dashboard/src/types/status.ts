@@ -99,6 +99,8 @@ export interface LoopStatus {
   highlight_paused: boolean
   /** 最后写入开关的来源：scene:stream / scene:neuro / manual */
   highlight_source: string | null
+  /** 模拟直播（录制排练）：循环在跑但不播开场、metadata.live 为 false */
+  recording: number | boolean
   intro: IntroGate | null
   last_error: StreamLastError | null
   started_at: string | null

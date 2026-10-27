@@ -1,0 +1,154 @@
+/* Twitch 观看页设计 token。
+ *
+ * 数值来自 2026-10 对线上 twitch.tv 频道页的 computed style 实测（见 AGENTS.md）。
+ * 所有选择器都收在 .twitch-shell 下，避免污染 dashboard 其余页面。
+ */
+
+.twitch-shell {
+  --tw-font: "Inter", "Roboto", "Helvetica Neue", Helvetica, Arial, sans-serif;
+  --tw-purple: #9147ff;
+  --tw-purple-hover: #772ce8;
+  --tw-live: #e91916;
+
+  --tw-radius: 4px;
+  --tw-sidebar-width: 340px;
+  --tw-chat-header-height: 40px;
+  --tw-chat-font-size: 14px;
+  --tw-chat-line-height: 22px;
+
+  font-family: var(--tw-font);
+  -webkit-font-smoothing: antialiased;
+}
+
+.twitch-shell.tw-dark {
+  color-scheme: dark;
+
+  --tw-bg-body: #0e0e10;
+  --tw-bg-base: #18181b;
+  --tw-bg-alt: #26262c;
+  --tw-bg-float: #323239;
+  --tw-bg-input: #18181b;
+  --tw-bg-hover: rgba(255, 255, 255, 0.13);
+  --tw-border: rgba(83, 83, 95, 0.48);
+  --tw-border-input: rgba(222, 222, 227, 0.95);
+  --tw-border-focus: #a970ff;
+  --tw-text: #efeff1;
+  --tw-text-alt: #d3d3d9;
+  --tw-text-hint: #848494;
+  --tw-link: #bf94ff;
+  --tw-link-hover: #a970ff;
+  --tw-text-live: #ff8280;
+  --tw-scrollbar: rgba(255, 255, 255, 0.25);
+
+  --tw-highlight-bits-bg: #451093;
+  --tw-highlight-bits-text: #ffffff;
+  --tw-highlight-points-bg: #5c1635;
+  --tw-highlight-points-text: #ffffff;
+}
+
+.twitch-shell.tw-light {
+  color-scheme: light;
+
+  --tw-bg-body: #f7f7f8;
+  --tw-bg-base: #ffffff;
+  --tw-bg-alt: #efeff1;
+  --tw-bg-float: #ffffff;
+  --tw-bg-input: #ffffff;
+  --tw-bg-hover: rgba(0, 0, 0, 0.05);
+  --tw-border: rgba(173, 173, 184, 0.35);
+  --tw-border-input: rgba(50, 50, 57, 0.62);
+  --tw-border-focus: #772ce8;
+  --tw-text: #0e0e10;
+  --tw-text-alt: #3b3b44;
+  --tw-text-hint: #53535f;
+  --tw-link: #5c16c5;
+  --tw-link-hover: #772ce8;
+  --tw-text-live: #971311;
+  --tw-scrollbar: rgba(0, 0, 0, 0.25);
+
+  --tw-highlight-bits-bg: #efe5ff;
+  --tw-highlight-bits-text: #2d0a5e;
+  --tw-highlight-points-bg: #ffe5ef;
+  --tw-highlight-points-text: #5c1635;
+}
+
+.twitch-shell::-webkit-scrollbar,
+.twitch-shell ::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+.twitch-shell::-webkit-scrollbar-track,
+.twitch-shell ::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.twitch-shell::-webkit-scrollbar-thumb,
+.twitch-shell ::-webkit-scrollbar-thumb {
+  background: var(--tw-scrollbar);
+  border-radius: 4px;
+}
+
+/* ---- 共用按钮（Twitch 规格：32px 高、全圆角） ---- */
+
+.twitch-shell .tw-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  height: 32px;
+  padding: 0 12px;
+  border: 0;
+  border-radius: 9000px;
+  font-family: inherit;
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1;
+  color: var(--tw-text);
+  background: var(--tw-bg-alt);
+  cursor: pointer;
+  transition: background-color 0.12s ease, color 0.12s ease;
+  white-space: nowrap;
+}
+
+.twitch-shell .tw-btn:hover:not(:disabled) {
+  background: var(--tw-bg-hover);
+}
+
+.twitch-shell .tw-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.twitch-shell .tw-btn--primary {
+  color: #fff;
+  background: var(--tw-purple);
+}
+
+.twitch-shell .tw-btn--primary:hover:not(:disabled) {
+  background: var(--tw-purple-hover);
+}
+
+.twitch-shell .tw-icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border: 0;
+  border-radius: 9000px;
+  color: var(--tw-text);
+  background: transparent;
+  cursor: pointer;
+  transition: background-color 0.12s ease;
+}
+
+.twitch-shell .tw-icon-btn:hover {
+  background: var(--tw-bg-hover);
+}
+
+.twitch-shell .tw-icon-btn:disabled {
+  opacity: 0.4;
+  cursor: default;
+}

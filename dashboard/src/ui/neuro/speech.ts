@@ -87,6 +87,8 @@ export class CaptionPlayer {
   private turnEnded = false // 已收到 turn_end（生成侧结束）
   private idleFired = false // 本轮 idle 回调已触发
   muted = false
+  /** 语音音量（0..1）：父页面（合成器）经 `neuro-window volume` 下发。 */
+  volume = 1
   audioBlocked = false
   private audioOk = false // 当前句音频是否已成功起播（waitAudio 依据）
   /** 本轮全部语音播完（队列空且已收到 turn_end）时回调；供画面联动（zoom 复位）。 */
@@ -266,6 +268,14 @@ export class CaptionPlayer {
     this.stepGapMs = Math.max(0, ms)
   }
 
+  /** 语音音量 / 静音：对**当前在播**的 Audio 立即生效（后续句沿用）。 */
+  setVolume (value: number, muted: boolean): void {
+    this.volume = Math.min(1, Math.max(0, Number.isFinite(value) ? value : 1))
+    this.muted = Boolean(muted)
+    this.audioEl.volume = this.volume
+    this.audioEl.muted = this.muted
+  }
+
   private async drain (): Promise<void> {
     this.busy = true
     const gen = this.gen
@@ -354,6 +364,7 @@ export class CaptionPlayer {
     }
     this.audioEl.pause()
     this.audioEl.src = `data:${seg.mime};base64,${seg.audio}`
+    this.audioEl.volume = this.volume
     this.audioEl.muted = this.muted
     this.audioOk = true
     // 断点续播：数据 URI 元数据就绪后 seek 到已发声处

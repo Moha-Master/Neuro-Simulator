@@ -143,10 +143,10 @@ def _patch_client(fake):
 class TestIntroSceneData(unittest.TestCase):
     """场景数据侧：开场画面归 stream 自己声明，neuro 的场景 id 不出现在 stream 清单里。"""
 
-    def test_room_intro_is_a_hidden_neuro_only_scene(self):
+    def test_room_intro_is_a_neuro_only_scene(self):
         scenes = {s["id"]: s for s in stream_scenes()}
         intro = scenes[SCENE_ROOM_INTRO]
-        self.assertTrue(intro["hidden"], "开场画面不该出现在手动/只读场景清单里")
+        self.assertNotIn("hidden", intro, "场景级 hidden 已废除")
         self.assertEqual(intro["elements"], [], "开场只有 neuro 窗口层，不叠 chat/highlight")
         self.assertEqual(intro["neuro"], {"x": 0, "y": 0, "w": 1, "z": 10, "hide": []})
 
@@ -168,10 +168,11 @@ class TestIntroSceneData(unittest.TestCase):
         self.assertNotIn("intro", stream_ids)
         self.assertEqual(stream_ids & neuro_ids, set())
 
-    def test_catalog_excludes_room_intro_from_manual_list(self):
+    def test_catalog_includes_room_intro_in_manual_list(self):
         with patch.object(scene_catalog, "load_scenes", return_value=stream_scenes()):
-            self.assertTrue(scene_catalog.hidden(SCENE_ROOM_INTRO))
-            self.assertNotIn(SCENE_ROOM_INTRO, [s["id"] for s in scene_catalog.overview()])
+            ids = [s["id"] for s in scene_catalog.overview()]
+            self.assertIn("starting_soon", ids)
+            self.assertIn(SCENE_ROOM_INTRO, ids)
             self.assertEqual(scene_catalog.label(SCENE_ROOM_INTRO), "开场")
 
 
@@ -263,6 +264,17 @@ class TestIntroGate(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(self.loop.last_error)
         scenes = [e["id"] for e in self.drain() if e["type"] == "scene_set"]
         self.assertEqual(scenes, [SCENE_ROOM], "开场画面 → 常态画面是这一次真实的场景切换")
+
+    async def test_record_waits_for_the_same_intro_gate(self):
+        """record 的 _main 同样等开场闸门：放行后才进 live 并切 room。"""
+        fake = _ScriptedNeuro(["intro", "normal"])
+        self.loop.recording = True
+        await self.run_main(fake)
+        self.assertTrue(self.loop._reached_live)
+        self.assertEqual(fake.calls, 2, "record 也要等她离开开场场景")
+        self.assertIsNone(self.loop.last_error)
+        scenes = [e["id"] for e in self.drain() if e["type"] == "scene_set"]
+        self.assertEqual(scenes, [SCENE_ROOM])
 
     async def test_empty_scene_counts_as_ready(self):
         """neuro 刚重启/场景数据缺失时 scene 为空——不能因为读不到就一直等。"""
@@ -440,6 +452,75 @@ class TestStartPath(unittest.IsolatedAsyncioTestCase):
         self.assertIn("neuro", str(ctx.exception))
         self.assertIsNone(self.loop.session)
         self.assertEqual(self.loop.state, "offline")
+
+    async def test_record_start_runs_the_same_intro_path(self):
+        """模拟直播与正常开播走完全相同的 intro/starting 路径，只有旗标不同。"""
+        fake = _ScriptedNeuro(["intro"])
+        with _patch_client(fake):
+            session = await self.loop.start(record=True)
+
+        self.assertEqual(self.loop.state, "starting", "record 同样从 starting 开始")
+        self.assertTrue(self.loop.recording)
+        self.assertEqual(self.loop.last_scene, SCENE_ROOM_INTRO)
+        gate = self.loop._intro_gate
+        self.assertIsNotNone(gate, "record 同样建开场闸门")
+        self.assertEqual(gate["waiting_for"], "intro")
+        events = self.drain()
+        scenes = [e["id"] for e in events if e["type"] == "scene_set"]
+        self.assertEqual(scenes, [SCENE_ROOM_INTRO], "record 同样先落开场画面")
+        begin = next(e for e in events if e["type"] == "session_begin")
+        self.assertTrue(begin["recording"])
+        row = await self.storage.get_session(session["session_id"])
+        self.assertEqual(row["recording"], 1)
+
+    async def test_record_start_survives_health_failure(self):
+        """record 与正常开播一样要求 neuro 可达（循环要 chat + 开场）。"""
+
+        class _Down:
+            async def health(self):
+                raise NeuroError("connection refused")
+
+            async def intro(self):
+                raise NeuroError("connection refused")
+
+        with _patch_client(_Down()):
+            with self.assertRaises(StreamConflict):
+                await self.loop.start(record=True)
+        self.assertEqual(self.loop.state, "offline")
+        self.assertIsNone(self.loop.session)
+        self.assertFalse(self.loop.recording)
+
+    async def test_record_flag_is_cleared_on_finalize(self):
+        fake = _ScriptedNeuro([])
+        with _patch_client(fake):
+            await self.loop.start(record=True)
+        self.assertTrue(self.loop.recording)
+        await self.loop._finalize()
+        self.assertFalse(self.loop.recording)
+        self.assertEqual(self.loop.state, "offline")
+
+    async def test_record_stop_clears_recording(self):
+        """stop 语义不变：循环退出 → _finalize 把 recording 清零。"""
+
+        class _StopOnSignal(StreamLoop):
+            async def _main(self):
+                try:
+                    await self._run_round(None, self.session)
+                finally:
+                    await self._finalize()
+
+            async def _run_round(self, settings, session):
+                await self._stop_event.wait()
+
+        loop = _StopOnSignal(self.storage, self.bus, self.persona, self.templates)
+        loop.chatbot = _NoopChatbot()
+        with _patch_client(_ScriptedNeuro([])):
+            await loop.start(record=True)
+            self.assertTrue(loop.recording)
+            await loop.stop()
+        self.assertFalse(loop.recording)
+        self.assertEqual(loop.state, "offline")
+        self.assertIsNone(loop.session)
 
 
 class _FakeLoop(StreamLoop):

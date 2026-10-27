@@ -86,11 +86,21 @@
             <template #prepend>
               <v-icon>mdi-record-circle-outline</v-icon>
             </template>
-            <v-list-item-title>Control</v-list-item-title>
+            <v-list-item-title>Studio</v-list-item-title>
           </v-list-item>
-          <v-list-item to="/stream-view" :active="$route.path === '/stream-view'">
+          <v-list-item to="/stream-sessions" :active="$route.path === '/stream-sessions'">
             <template #prepend>
-              <v-icon>mdi-television-classic</v-icon>
+              <v-icon>mdi-history</v-icon>
+            </template>
+            <v-list-item-title>Sessions</v-list-item-title>
+          </v-list-item>
+          <v-list-item
+            href="/manage/stream/view/"
+            target="_blank"
+            rel="noopener"
+          >
+            <template #prepend>
+              <v-icon>mdi-open-in-new</v-icon>
             </template>
             <v-list-item-title>View</v-list-item-title>
           </v-list-item>
@@ -179,7 +189,7 @@ watch(
   },
 )
 
-// Stream 侧边栏分组：同上（注意 /stream-view 也以 /stream 开头）
+// Stream 侧边栏分组：同上（/stream-sessions 也以 /stream 开头）
 const streamOpen = ref(
   route.path.startsWith('/stream') || route.path.startsWith('/logs-stream'),
 )

@@ -1,36 +1,22 @@
+<route lang="json">
+{
+  "meta": { "fullBleed": true }
+}
+</route>
+
 <template>
-  <div class="stream-page">
-    <div v-if="!status.checked.value" class="stream-loading">
+  <div class="studio-page">
+    <div v-if="!status.checked.value" class="studio-loading">
       <v-progress-circular indeterminate size="48" width="4" />
     </div>
 
-    <ModuleOffline
-      v-else-if="!status.reachable.value"
-      module-name="stream"
-      :on-started="status.check"
-    />
-
     <template v-else>
-      <v-alert
-        v-if="st.error.value"
-        type="error"
-        variant="tonal"
-        density="compact"
-        closable
-        class="mb-4"
-        @click:close="st.error.value = ''"
-      >
-        {{ st.error.value }}
-      </v-alert>
-
-      <!-- 上一次"异常终止开播"的原因：服务端在下次成功开播时清空，所以它只描述
-           刚才那一次为什么没开成（例如 neuro 卡在开场场景、轮询不到状态）。 -->
       <v-alert
         v-if="lastError"
         type="warning"
         variant="tonal"
         density="compact"
-        class="mb-4"
+        class="mb-2"
       >
         {{ lastError.message }}
         <div class="text-caption mt-1 text-medium-emphasis">
@@ -42,286 +28,990 @@
         </div>
       </v-alert>
 
-      <div class="d-flex align-center mb-4">
-        <div class="text-h5">Stream Control</div>
-        <v-spacer />
-        <v-chip :color="stateColor" variant="tonal" class="ml-2">
-          <v-icon start size="small" :icon="stateIcon" />
-          {{ stateLabel }}
-        </v-chip>
+      <!-- 画布：合成器整页（OBS 源同款），letterbox 黑边由 iframe 内部处理 -->
+      <div class="studio-canvas">
+        <ModuleOffline
+          v-if="!status.reachable.value"
+          module-name="stream"
+          :on-started="status.check"
+        />
+        <iframe
+          v-else
+          ref="canvasFrame"
+          class="studio-canvas__iframe"
+          src="/ui/stream/"
+          allow="autoplay"
+          title="Stream canvas"
+        />
       </div>
 
-      <!-- 当前场次 -->
-      <v-card class="mb-6">
-        <v-card-title class="text-subtitle-1">当前场次</v-card-title>
-        <v-card-text>
-          <template v-if="currentState !== 'offline'">
-            <v-row dense>
-              <v-col cols="6" md="3">
-                <div class="text-caption text-disabled">Session</div>
-                <div class="text-body-2">{{ short(sid) }}</div>
-              </v-col>
-              <v-col cols="6" md="3">
-                <div class="text-caption text-disabled">对话</div>
-                <div class="text-body-2">{{ short(conv) }}</div>
-              </v-col>
-              <v-col cols="6" md="3">
-                <div class="text-caption text-disabled">轮次 / 待消费（普通 · 高亮）</div>
-                <div class="text-body-2">
-                  {{ rounds }} / {{ st.status.value?.sections.chat.current?.normal_pending ?? '—' }} ·
-                  {{ st.status.value?.sections.chat.current?.highlight_pending ?? '—' }}
-                </div>
-              </v-col>
-              <v-col cols="6" md="3">
-                <div class="text-caption text-disabled">队列</div>
-                <div class="text-body-2">
-                  <router-link to="/stream-view" class="text-primary">查看 →</router-link>
-                </div>
-              </v-col>
-            </v-row>
-            <!-- 开场阶段：循环在等 neuro 离开她自己的开场场景（判据是她的权威状态，
-                 不是本地倒计时）。这里把"在等什么、等了多久、还剩多久"摊开，
-                 免得卡在开播中时只能看到一个不动的状态 chip。 -->
-            <div v-if="introGate" class="text-caption text-medium-emphasis mt-2">
-              <v-icon size="x-small" icon="mdi-movie-open" class="mr-1" />
-              等待开场结束 · neuro 场景 {{ introGate.neuro_scene ?? '—' }} · 已等
-              {{ introGate.waited_s }}s / 上限 {{ introGate.timeout_s }}s
-              <template v-if="introGate.status_error">
-                · 状态读取失败：{{ introGate.status_error }}
-              </template>
+      <!-- dock：五张操作卡，内部滚动，不把页面撑出视口 -->
+      <div class="studio-dock">
+        <!-- 场景：OBS 场景列表（行式、当前高亮、选中态） -->
+        <v-card variant="outlined" class="studio-card">
+          <v-card-title class="studio-card__title">
+            场景
+            <v-spacer />
+            <v-btn
+              icon="mdi-restore"
+              size="x-small"
+              variant="text"
+              title="恢复默认场景清单"
+              @click="resetDialog = true"
+            />
+          </v-card-title>
+          <v-card-text class="studio-card__body studio-card__body--flush">
+            <div
+              v-for="s in st.scenes.value"
+              :key="s.id"
+              class="studio-scene-row"
+              :class="{
+                'studio-scene-row--current': s.id === displayedSceneId,
+                'studio-scene-row--selected': s.id === selectedSceneId && s.id !== displayedSceneId,
+              }"
+              @click="selectSceneRow(s.id)"
+              @contextmenu.prevent.stop="openSceneMenu($event, s.id)"
+            >
+              <v-icon size="16">{{ s.icon || 'mdi-image-frame' }}</v-icon>
+              <span class="text-truncate">{{ s.label || s.id }}</span>
             </div>
-          </template>
-          <div v-else class="text-body-2 text-disabled">
-            未在直播。点击下方「开始直播」新建场次（会话 + 消息队列 + 画面入场）。
+            <div v-if="!st.scenes.value.length" class="text-caption text-disabled py-1">
+              场景清单加载中…
+            </div>
+          </v-card-text>
+          <div class="studio-card__actions">
+            <v-btn icon="mdi-plus" size="x-small" variant="text" title="新增场景" @click="openCreateScene" />
+            <v-btn
+              icon="mdi-delete"
+              size="x-small"
+              variant="text"
+              title="删除选中场景"
+              :disabled="!canDeleteScene"
+              @click="openDeleteScene"
+            />
+            <v-btn
+              icon="mdi-filter"
+              size="x-small"
+              variant="text"
+              title="滤镜（即将推出）"
+              disabled
+            />
+            <v-btn
+              icon="mdi-arrow-up"
+              size="x-small"
+              variant="text"
+              title="上移场景"
+              :disabled="!canMoveScene(-1)"
+              @click="moveScene(-1)"
+            />
+            <v-btn
+              icon="mdi-arrow-down"
+              size="x-small"
+              variant="text"
+              title="下移场景"
+              :disabled="!canMoveScene(1)"
+              @click="moveScene(1)"
+            />
           </div>
+        </v-card>
 
-          <!-- 高亮消息队列开关：on = 正常消费，off = 暂停（消息留在队列里） -->
-          <div class="d-flex align-center flex-wrap ga-3 mt-3">
+        <!-- 元素：OBS 源列表（行式、眼睛=运行时强制隐藏、齿轮=设置） -->
+        <v-card variant="outlined" class="studio-card">
+          <v-card-title class="studio-card__title">
+            元素
+            <v-spacer />
+            <v-btn
+              icon="mdi-restore"
+              size="x-small"
+              variant="text"
+              title="恢复默认场景清单"
+              @click="resetDialog = true"
+            />
+          </v-card-title>
+          <v-card-text class="studio-card__body studio-card__body--flush">
+            <template v-for="row in elementRows" :key="row.id">
+              <div
+                class="studio-element-row"
+                :class="{
+                  'studio-element-row--selected': isSelectedElement('element', row.id),
+                  'studio-element-row--readonly': !row.visible,
+                }"
+                @click="selectElement('element', row.id)"
+              >
+                <span
+                  v-if="row.color"
+                  class="studio-color-block"
+                  :style="{ background: row.color }"
+                />
+                <v-icon v-else size="16">{{ row.icon }}</v-icon>
+                <span class="text-truncate flex-grow-1">
+                  {{ row.name }}
+                  <span v-if="!row.visible" class="text-disabled">· 本场景不显示</span>
+                </span>
+                <v-btn
+                  :icon="hiddenIds.includes(row.id) ? 'mdi-eye-off' : 'mdi-eye'"
+                  size="x-small"
+                  variant="text"
+                  density="compact"
+                  :disabled="!row.visible"
+                  :title="row.visible
+                    ? '关闭 = 合成器层强制隐藏（只隐藏，不强制显示脚本控制的层）'
+                    : '本场景不显示'"
+                  @click.stop="setElementHidden(row.id, !hiddenIds.includes(row.id))"
+                />
+              </div>
+            </template>
+
+            <!-- [neuro 窗口] 伪源：可选中、可打齿轮；visible=false 时眼睛置灰 -->
+            <div
+              class="studio-element-row"
+              :class="{
+                'studio-element-row--selected': isSelectedElement('neuro-window', NEURO_WINDOW_ID),
+                'studio-element-row--readonly': !neuroWindowVisible,
+              }"
+              @click="selectElement('neuro-window', NEURO_WINDOW_ID)"
+            >
+              <v-icon size="16">mdi-monitor</v-icon>
+              <span class="text-truncate flex-grow-1">
+                [neuro 窗口]
+                <span v-if="!neuroWindowVisible" class="text-disabled">· 本场景不显示</span>
+              </span>
+              <v-btn
+                :icon="hiddenIds.includes(NEURO_WINDOW_ID) ? 'mdi-eye-off' : 'mdi-eye'"
+                size="x-small"
+                variant="text"
+                density="compact"
+                :disabled="!neuroWindowVisible"
+                :title="neuroWindowVisible
+                  ? '关闭 = 合成器层强制隐藏（只隐藏，不强制显示脚本控制的层）'
+                  : '本场景不显示'"
+                @click.stop="setElementHidden(NEURO_WINDOW_ID, !hiddenIds.includes(NEURO_WINDOW_ID))"
+              />
+            </div>
+
+            <!-- neuro 内部层：只给眼睛（属于 neuro 自己的清单，不可选中/无齿轮） -->
+            <div
+              v-for="layer in neuroLayerRows"
+              :key="layer.sourceId"
+              class="studio-element-row"
+              :class="{ 'studio-element-row--readonly': !layer.visible }"
+            >
+              <v-icon size="16">mdi-layers</v-icon>
+              <span class="text-truncate flex-grow-1">
+                {{ layer.name }}
+                <span v-if="!layer.visible" class="text-disabled">· 本场景不显示</span>
+              </span>
+              <v-btn
+                :icon="hiddenIds.includes(layer.sourceId) ? 'mdi-eye-off' : 'mdi-eye'"
+                size="x-small"
+                variant="text"
+                density="compact"
+                :disabled="!layer.visible"
+                :title="layer.visible
+                  ? '关闭 = 合成器层强制隐藏（只隐藏，不强制显示脚本控制的层）'
+                  : '本场景不显示'"
+                @click.stop="setElementHidden(layer.sourceId, !hiddenIds.includes(layer.sourceId))"
+              />
+            </div>
+
+            <div
+              v-if="!elementRows.length && !neuroLayerRows.length && neuroScenes"
+              class="text-caption text-disabled py-1"
+            >
+              当前场景没有元素。
+            </div>
+            <div v-else-if="!neuroScenes" class="text-caption text-disabled py-1">
+              neuro 模块不可达，内部层暂不可用。
+            </div>
+          </v-card-text>
+          <div class="studio-card__actions">
+            <v-btn
+              icon="mdi-plus"
+              size="x-small"
+              variant="text"
+              title="新增元素（即将推出）"
+              disabled
+            />
+            <v-btn
+              icon="mdi-delete"
+              size="x-small"
+              variant="text"
+              title="删除元素（即将推出）"
+              disabled
+            />
+            <v-btn
+              icon="mdi-cog"
+              size="x-small"
+              variant="text"
+              title="元素设置"
+              :disabled="!selectedElement"
+              @click="openSelectedSettings"
+            />
+            <v-btn
+              icon="mdi-arrow-up"
+              size="x-small"
+              variant="text"
+              title="上移一层（z 变大）"
+              :disabled="!canMoveElement(-1)"
+              @click="moveElement(-1)"
+            />
+            <v-btn
+              icon="mdi-arrow-down"
+              size="x-small"
+              variant="text"
+              title="下移一层（z 变小）"
+              :disabled="!canMoveElement(1)"
+              @click="moveElement(1)"
+            />
+          </div>
+        </v-card>
+
+        <!-- 混音器 -->
+        <v-card variant="outlined" class="studio-card">
+          <v-card-title class="studio-card__title">混音器</v-card-title>
+          <v-card-text class="studio-card__body">
+            <div class="d-flex align-center ga-2">
+              <v-icon size="small">mdi-volume-high</v-icon>
+              <v-slider
+                v-model="volumePct"
+                :min="0"
+                :max="100"
+                step="1"
+                density="compact"
+                hide-details
+                class="flex-grow-1"
+                @update:model-value="onVolume"
+              />
+              <span class="text-caption" style="width: 3em">{{ volumePct }}</span>
+            </div>
             <v-switch
-              :model-value="!highlightPaused"
-              :label="highlightPaused ? '高亮消息队列：暂停' : '高亮消息队列：正常'"
+              v-model="muted"
+              label="静音"
               color="primary"
               density="compact"
               hide-details
-              :disabled="!highlightControllable"
-              @update:model-value="onHighlightToggle"
+              @update:model-value="onVolume"
             />
-            <v-chip size="small" variant="tonal" prepend-icon="mdi-source-branch">
-              来源：{{ highlightSourceLabel }}
-            </v-chip>
-            <span class="text-caption text-disabled">
-              暂停时高亮消息不被消费（游标不推进），普通消息照常循环。
-            </span>
+            <div class="text-caption text-disabled mt-2">
+              控制 neuro 窗口语音音量（合成器无独立音频）。
+            </div>
+          </v-card-text>
+        </v-card>
+
+        <!-- 转场（占位） -->
+        <v-card variant="outlined" class="studio-card">
+          <v-card-title class="studio-card__title">转场</v-card-title>
+          <v-card-text class="studio-card__body">
+            <v-select
+              :items="['淡入', '推移', '无']"
+              model-value="无"
+              label="转场效果"
+              variant="outlined"
+              density="compact"
+              disabled
+              hide-details
+            />
+            <div class="text-caption text-disabled mt-2">全局转场效果：即将推出</div>
+          </v-card-text>
+        </v-card>
+
+        <!-- 控制：极简按钮组（状态 chip / 说明文字已移除） -->
+        <v-card variant="outlined" class="studio-card">
+          <v-card-title class="studio-card__title">控制</v-card-title>
+          <v-card-text class="studio-card__body d-flex flex-column ga-2">
+            <template v-if="isRunning">
+              <div class="d-flex ga-2">
+                <v-btn
+                  class="flex-grow-1"
+                  :color="currentState === 'paused' ? 'info' : 'warning'"
+                  variant="tonal"
+                  :prepend-icon="currentState === 'paused' ? 'mdi-play' : 'mdi-pause'"
+                  :disabled="currentState === 'starting'"
+                  @click="doAction(currentState === 'paused' ? 'resume' : 'pause')"
+                >
+                  {{ currentState === 'paused' ? '继续' : '暂停' }}
+                </v-btn>
+                <v-btn
+                  class="flex-grow-1"
+                  color="error"
+                  variant="tonal"
+                  prepend-icon="mdi-stop"
+                  @click="doAction('stop')"
+                >
+                  停止
+                </v-btn>
+              </div>
+              <v-btn block variant="tonal" prepend-icon="mdi-record-rec" disabled>
+                模拟直播
+              </v-btn>
+              <v-btn block variant="tonal" prepend-icon="mdi-cog-outline" @click="openSettings">
+                设置
+              </v-btn>
+            </template>
+            <template v-else>
+              <v-btn
+                block
+                color="success"
+                prepend-icon="mdi-broadcast"
+                :loading="st.busy.value"
+                @click="start(false)"
+              >
+                开始直播
+              </v-btn>
+              <v-btn
+                block
+                color="warning"
+                variant="tonal"
+                prepend-icon="mdi-record-rec"
+                :loading="st.busy.value"
+                @click="start(true)"
+              >
+                模拟直播
+              </v-btn>
+              <v-btn block variant="tonal" prepend-icon="mdi-cog-outline" @click="openSettings">
+                设置
+              </v-btn>
+            </template>
+          </v-card-text>
+        </v-card>
+      </div>
+    </template>
+
+    <!-- 场景右键菜单 -->
+    <div v-if="sceneMenu.open" class="studio-menu-backdrop" @click="sceneMenu.open = false" />
+    <div
+      v-if="sceneMenu.open"
+      class="studio-menu"
+      :style="{ left: `${sceneMenu.x}px`, top: `${sceneMenu.y}px` }"
+      @click.stop
+    >
+      <v-list density="compact" nav>
+        <v-list-item @click="openSceneProperties(sceneMenu.sceneId)">
+          <v-list-item-title>属性</v-list-item-title>
+        </v-list-item>
+      </v-list>
+    </div>
+
+    <!-- 新增场景 -->
+    <v-dialog v-model="createOpen" max-width="520">
+      <v-card>
+        <v-card-title>新增场景</v-card-title>
+        <v-card-text>
+          <v-text-field
+            v-model="createForm.id"
+            label="场景 id（必填）"
+            placeholder="test_scene"
+            variant="outlined"
+            density="compact"
+            class="mb-2"
+            :error-messages="createIdError ? [createIdError] : []"
+          />
+          <v-text-field
+            v-model="createForm.label"
+            label="名称（label）"
+            variant="outlined"
+            density="compact"
+            class="mb-2"
+          />
+          <v-text-field
+            v-model="createForm.desc"
+            label="机器/LLM 自述（desc）"
+            variant="outlined"
+            density="compact"
+            class="mb-2"
+          />
+          <v-text-field
+            v-model="createForm.icon"
+            label="图标（mdi 名）"
+            placeholder="mdi-image-frame"
+            variant="outlined"
+            density="compact"
+            class="mb-2"
+          />
+          <v-checkbox
+            v-model="createForm.cloneCurrent"
+            label="克隆当前场景（elements + neuro 块）"
+            density="compact"
+            hide-details
+          />
+          <div class="text-caption text-disabled mt-2">
+            不勾选则创建最小合法场景（elements 为空 + neuro 窗口）。
           </div>
         </v-card-text>
-        <v-divider />
         <v-card-actions>
-          <v-btn
-            color="success"
-            prepend-icon="mdi-broadcast"
-            :disabled="currentState !== 'offline'"
-            :loading="st.busy.value"
-            @click="startStream"
-          >
-            开始直播
-          </v-btn>
-          <v-btn
-            color="warning"
-            variant="tonal"
-            prepend-icon="mdi-pause"
-            :disabled="currentState !== 'live'"
-            @click="doAction('pause')"
-          >
-            暂停
-          </v-btn>
-          <v-btn
-            color="info"
-            variant="tonal"
-            prepend-icon="mdi-play"
-            :disabled="currentState !== 'paused'"
-            @click="doAction('resume')"
-          >
-            继续
-          </v-btn>
-          <v-btn
-            color="error"
-            variant="tonal"
-            prepend-icon="mdi-stop"
-            :disabled="currentState === 'offline'"
-            @click="doAction('stop')"
-          >
-            停止
-          </v-btn>
+          <v-spacer />
+          <v-btn variant="text" @click="createOpen = false">取消</v-btn>
+          <v-btn color="primary" :disabled="!canCreateScene" @click="createScene">创建</v-btn>
         </v-card-actions>
       </v-card>
+    </v-dialog>
 
-      <!-- 本场信息：标题 / 分区（开播时作为初值，直播中可改并实时广播） -->
-      <v-card class="mb-6">
-        <v-card-title class="text-subtitle-1 d-flex align-center">
-          本场信息
+    <!-- 删除场景确认 -->
+    <v-dialog :model-value="deleteOpen" max-width="480" @update:model-value="deleteOpen = false">
+      <v-card>
+        <v-card-title>删除场景</v-card-title>
+        <v-card-text>
+          确定删除「{{ deleteSceneLabel }}」？删除当前画面所在场景也可以，循环再切到它时画面会保持不动。
+          <div class="text-caption text-disabled mt-2">
+            误删可用右上角重置恢复默认清单。
+          </div>
+        </v-card-text>
+        <v-card-actions>
           <v-spacer />
-          <v-chip size="x-small" :color="live ? 'success' : 'grey'" variant="tonal">
-            {{ live ? '直播中 · 实时生效' : '未开播 · 作为下一场初值' }}
+          <v-btn variant="text" @click="deleteOpen = false">取消</v-btn>
+          <v-btn color="error" variant="tonal" @click="deleteScene">删除</v-btn>
+        </v-card-actions>
+      </v-card>
+    </v-dialog>
+
+    <!-- 重置默认清单确认（场景卡 / 元素卡共用） -->
+    <v-dialog v-model="resetDialog" max-width="480">
+      <v-card>
+        <v-card-title>重置场景清单</v-card-title>
+        <v-card-text>
+          确定恢复默认场景清单？当前所有场景改动（含自定义场景/元素设置）都会丢失。
+        </v-card-text>
+        <v-card-actions>
+          <v-spacer />
+          <v-btn variant="text" @click="resetDialog = false">取消</v-btn>
+          <v-btn color="error" variant="tonal" @click="resetManifest">恢复默认</v-btn>
+        </v-card-actions>
+      </v-card>
+    </v-dialog>
+
+    <!-- 场景属性 -->
+    <v-dialog v-model="scenePropsOpen" max-width="720" scrollable>
+      <v-card>
+        <v-card-title class="d-flex align-center">
+          场景属性
+          <v-chip v-if="scenePropsId" class="ml-2" size="x-small" variant="tonal">
+            {{ scenePropsId }}
           </v-chip>
         </v-card-title>
         <v-card-text>
-          <v-row dense align="center">
-            <v-col cols="12" md="7">
+          <v-alert
+            v-if="manifestError"
+            type="error"
+            variant="tonal"
+            density="compact"
+            class="mb-3"
+          >
+            <pre class="text-wrap">{{ manifestError }}</pre>
+          </v-alert>
+
+          <v-text-field
+            v-model="sceneForm.label"
+            label="名称（label）"
+            variant="outlined"
+            density="compact"
+            class="mb-2"
+            @update:model-value="applySceneBasics"
+          />
+          <v-text-field
+            v-model="sceneForm.desc"
+            label="机器/LLM 自述（desc）"
+            variant="outlined"
+            density="compact"
+            class="mb-2"
+            @update:model-value="applySceneBasics"
+          />
+          <v-text-field
+            v-model="sceneForm.icon"
+            label="图标（mdi 名）"
+            variant="outlined"
+            density="compact"
+            class="mb-2"
+            @update:model-value="applySceneBasics"
+          />
+          <v-text-field
+            v-model="sceneForm.duration"
+            label="时长（秒，留空 = 不设）"
+            type="number"
+            variant="outlined"
+            density="compact"
+            class="mb-2"
+            @update:model-value="applySceneBasics"
+          />
+          <v-textarea
+            v-model="sceneForm.prompt_context"
+            label="prompt_context（留空 = 删键）"
+            variant="outlined"
+            density="compact"
+            rows="3"
+            class="mb-2"
+            @update:model-value="applySceneBasics"
+          />
+          <v-switch
+            v-model="sceneForm.highlight_messages"
+            label="允许高亮消息（highlight_messages）"
+            color="primary"
+            density="compact"
+            hide-details
+            class="mb-2"
+            @update:model-value="applySceneBasics"
+          />
+          <v-textarea
+            v-model="sceneForm.timeline"
+            label="timeline JSON（空 = 不带该键）"
+            :error-messages="timelineError ? [timelineError] : []"
+            variant="outlined"
+            density="compact"
+            rows="5"
+            spellcheck="false"
+            class="studio-json mt-2"
+            @update:model-value="applySceneTimeline"
+          />
+          <v-textarea
+            v-model="sceneForm.state_script"
+            label="state_script JSON（空 = 不带该键）"
+            :error-messages="stateScriptError ? [stateScriptError] : []"
+            variant="outlined"
+            density="compact"
+            rows="5"
+            spellcheck="false"
+            class="studio-json"
+            @update:model-value="applySceneStateScript"
+          />
+        </v-card-text>
+        <v-card-actions>
+          <v-spacer />
+          <v-btn variant="text" @click="closeSceneProps">关闭</v-btn>
+        </v-card-actions>
+      </v-card>
+    </v-dialog>
+
+    <!-- 元素设置 -->
+    <v-dialog v-model="elementDialog" max-width="720" scrollable>
+      <v-card>
+        <v-card-title class="d-flex align-center">
+          元素设置
+          <v-chip class="ml-2" size="x-small" variant="tonal">{{ elementTargetId }}</v-chip>
+        </v-card-title>
+        <v-card-text>
+          <v-alert
+            v-if="manifestError || elementFieldError"
+            type="error"
+            variant="tonal"
+            density="compact"
+            class="mb-3"
+          >
+            <pre class="text-wrap">{{ elementFieldError || manifestError }}</pre>
+          </v-alert>
+
+          <div class="text-subtitle-2 mb-1">定位</div>
+          <v-row dense>
+            <v-col cols="12" sm="6">
+              <v-select
+                v-model="elementForm.placement"
+                :items="PLACEMENTS"
+                item-title="title"
+                item-value="value"
+                label="定位方式"
+                variant="outlined"
+                density="compact"
+                @update:model-value="applyElementForm"
+              />
+            </v-col>
+            <v-col cols="12" sm="6">
+              <v-select
+                :items="['舞台（默认）']"
+                model-value="舞台（默认）"
+                label="参照"
+                variant="outlined"
+                density="compact"
+                disabled
+                hint="元素参照：即将推出"
+                persistent-hint
+              />
+            </v-col>
+            <v-col cols="6" sm="3">
               <v-text-field
-                v-model="metaTitle"
-                label="标题（title）"
+                v-model="elementForm.x"
+                label="x（%）"
+                type="number"
                 variant="outlined"
                 density="compact"
                 hide-details
-                placeholder="AI VTuber chatting with chat!"
-                counter="120"
+                @update:model-value="applyElementForm"
               />
             </v-col>
-            <v-col cols="12" md="5">
-              <v-combobox
-                v-model="metaCategory"
-                :items="CATEGORIES"
-                label="分区（category）"
+            <v-col cols="6" sm="3">
+              <v-text-field
+                v-model="elementForm.y"
+                label="y（%）"
+                type="number"
                 variant="outlined"
                 density="compact"
                 hide-details
-                clearable
+                @update:model-value="applyElementForm"
+              />
+            </v-col>
+            <v-col cols="6" sm="3">
+              <v-text-field
+                v-model="elementForm.w"
+                label="w（%，空=auto）"
+                type="number"
+                variant="outlined"
+                density="compact"
+                hide-details
+                @update:model-value="applyElementForm"
+              />
+            </v-col>
+            <v-col cols="6" sm="3">
+              <v-text-field
+                v-model="elementForm.h"
+                label="h（%，空=auto）"
+                type="number"
+                variant="outlined"
+                density="compact"
+                hide-details
+                @update:model-value="applyElementForm"
               />
             </v-col>
           </v-row>
-          <v-row dense class="mt-1">
-            <v-col cols="12">
-              <div class="text-caption text-medium-emphasis mb-1">标签（tags）</div>
-              <TagInput v-model="metaTags" />
+
+          <v-divider class="my-3" />
+          <div class="text-subtitle-2 mb-1">外观</div>
+          <v-row dense>
+            <v-col cols="4">
+              <v-text-field
+                v-model="elementForm.scale"
+                label="scale（空=1）"
+                type="number"
+                variant="outlined"
+                density="compact"
+                hide-details
+                @update:model-value="applyElementForm"
+              />
+            </v-col>
+            <v-col cols="4">
+              <v-text-field
+                v-model="elementForm.rotate"
+                label="rotate（空=0）"
+                type="number"
+                variant="outlined"
+                density="compact"
+                hide-details
+                @update:model-value="applyElementForm"
+              />
+            </v-col>
+            <v-col cols="4">
+              <v-text-field
+                v-model="elementForm.opacity"
+                label="opacity（空=1）"
+                type="number"
+                variant="outlined"
+                density="compact"
+                hide-details
+                @update:model-value="applyElementForm"
+              />
             </v-col>
           </v-row>
-          <div v-pre class="text-caption text-disabled mt-2">
-            标题 / 分区会作为 <code>{{title}}</code> / <code>{{category}}</code> /
-            <code>{{stream_info}}</code> 注入 Neuro 与 Chatbot 的消息模板；
-            标题、分区、标签都会实时同步到 dashboard 观看页。
+
+          <v-divider class="my-3" />
+          <div class="text-subtitle-2 mb-1">层级</div>
+          <v-row dense align="center">
+            <v-col cols="6">
+              <v-text-field
+                v-model="elementForm.z"
+                label="z"
+                type="number"
+                variant="outlined"
+                density="compact"
+                hide-details
+                @update:model-value="applyElementForm"
+              />
+            </v-col>
+            <v-col cols="6">
+              <v-switch
+                v-model="elementForm.visible"
+                label="visible（数据层声明）"
+                color="primary"
+                density="compact"
+                hide-details
+                @update:model-value="applyElementForm"
+              />
+            </v-col>
+          </v-row>
+          <div class="text-caption text-disabled">
+            visible 是数据层声明；眼睛按钮是运行时强制隐藏通道，二者互不改写。
+          </div>
+
+          <v-divider class="my-3" />
+          <div class="text-subtitle-2 mb-1">内容</div>
+          <v-select
+            v-model="elementForm.kind"
+            :items="CONTENT_KINDS"
+            label="kind"
+            variant="outlined"
+            density="compact"
+            class="mb-2"
+            @update:model-value="applyElementForm"
+          />
+          <template v-if="elementForm.kind === 'color'">
+            <v-text-field
+              v-model="elementForm.color"
+              label="颜色值（color）"
+              placeholder="#352634"
+              variant="outlined"
+              density="compact"
+              @update:model-value="applyElementForm"
+            />
+          </template>
+          <template v-else-if="elementForm.kind === 'image' || elementForm.kind === 'video'">
+            <v-text-field
+              v-model="elementForm.src"
+              label="素材地址（src）"
+              variant="outlined"
+              density="compact"
+              @update:model-value="applyElementForm"
+            />
+          </template>
+          <template v-else-if="elementForm.kind === 'text'">
+            <v-text-field
+              v-model="elementForm.text"
+              label="文本（text）"
+              variant="outlined"
+              density="compact"
+              @update:model-value="applyElementForm"
+            />
+          </template>
+          <template v-else-if="elementForm.kind === 'component'">
+            <v-text-field
+              v-model="elementForm.name"
+              label="组件名（name）"
+              placeholder="chat.overlay"
+              variant="outlined"
+              density="compact"
+              class="mb-2"
+              @update:model-value="applyElementForm"
+            />
+            <v-textarea
+              v-model="elementForm.props"
+              label="props JSON（空 = 不带该键）"
+              :error-messages="propsError ? [propsError] : []"
+              variant="outlined"
+              density="compact"
+              rows="3"
+              spellcheck="false"
+              class="studio-json"
+              @update:model-value="applyElementForm"
+            />
+          </template>
+
+          <v-divider class="my-3" />
+          <div class="text-subtitle-2 mb-1">脚本</div>
+          <v-textarea
+            v-model="elementForm.script"
+            label="script JSON（enter / exit / tween；空 = 删键）"
+            :error-messages="scriptError ? [scriptError] : []"
+            variant="outlined"
+            density="compact"
+            rows="5"
+            spellcheck="false"
+            class="studio-json"
+            @update:model-value="applyElementForm"
+          />
+
+          <v-text-field
+            class="mt-3"
+            :model-value="elementTargetId"
+            label="元素 id（锁定）"
+            variant="outlined"
+            density="compact"
+            disabled
+            title="改名请删除重建或重置"
+          />
+        </v-card-text>
+        <v-card-actions>
+          <v-spacer />
+          <v-btn variant="text" @click="closeElementDialog">关闭</v-btn>
+        </v-card-actions>
+      </v-card>
+    </v-dialog>
+
+    <!-- neuro 块设置 -->
+    <v-dialog v-model="neuroDialog" max-width="640" scrollable>
+      <v-card>
+        <v-card-title>neuro 窗口</v-card-title>
+        <v-card-text>
+          <v-alert
+            v-if="manifestError"
+            type="error"
+            variant="tonal"
+            density="compact"
+            class="mb-3"
+          >
+            <pre class="text-wrap">{{ manifestError }}</pre>
+          </v-alert>
+
+          <v-row dense>
+            <v-col cols="4">
+              <v-text-field
+                v-model="neuroForm.x"
+                label="x（%）"
+                type="number"
+                variant="outlined"
+                density="compact"
+                hide-details
+                @update:model-value="applyNeuroForm"
+              />
+            </v-col>
+            <v-col cols="4">
+              <v-text-field
+                v-model="neuroForm.y"
+                label="y（%）"
+                type="number"
+                variant="outlined"
+                density="compact"
+                hide-details
+                @update:model-value="applyNeuroForm"
+              />
+            </v-col>
+            <v-col cols="4">
+              <v-text-field
+                v-model="neuroForm.w"
+                label="w（%）"
+                type="number"
+                variant="outlined"
+                density="compact"
+                hide-details
+                @update:model-value="applyNeuroForm"
+              />
+            </v-col>
+            <v-col cols="6">
+              <v-text-field
+                v-model="neuroForm.z"
+                label="z（可选）"
+                type="number"
+                variant="outlined"
+                density="compact"
+                hide-details
+                @update:model-value="applyNeuroForm"
+              />
+            </v-col>
+            <v-col cols="6">
+              <v-switch
+                v-model="neuroForm.hidden"
+                label="整窗隐藏（neuro.hidden）"
+                color="primary"
+                density="compact"
+                hide-details
+                @update:model-value="applyNeuroForm"
+              />
+            </v-col>
+          </v-row>
+
+          <div class="text-subtitle-2 mt-3 mb-1">隐藏内部层（neuro.hide）</div>
+          <v-select
+            v-model="neuroForm.hide"
+            :items="neuroHideItems"
+            item-title="title"
+            item-value="value"
+            label="勾选 = 写进当前场景的 neuro.hide"
+            variant="outlined"
+            density="compact"
+            multiple
+            chips
+            @update:model-value="applyNeuroForm"
+          />
+          <div class="text-caption text-disabled">
+            这是数据层声明（画面 reload 生效），与眼睛按钮的运行时通道并存。
           </div>
         </v-card-text>
         <v-card-actions>
-          <v-btn
-            color="primary"
-            variant="tonal"
-            prepend-icon="mdi-content-save-outline"
-            :disabled="!live || !metaDirty"
-            :loading="st.busy.value"
-            @click="saveMetadata"
-          >
-            应用到场次
-          </v-btn>
-          <v-btn variant="text" :disabled="!metaDirty" @click="syncMetadata">放弃更改</v-btn>
+          <v-spacer />
+          <v-btn variant="text" @click="closeNeuroDialog">关闭</v-btn>
         </v-card-actions>
       </v-card>
+    </v-dialog>
 
-      <!-- 场景：只读显示。切换由直播循环自动驱动（开播 → room_intro、开场放完 → room、
-           开局 → 游戏场景、下播 → no-source 待机）；手动切会让画面与循环/游戏状态
-           互相打架，所以 dashboard 不再提供按钮（API 仍然可用）。
-           room_intro 是 hidden 场景（不在 GET /stream/scenes 清单里），名字与图标
-           由服务端 status.sections.scene.current 给出。 -->
-      <v-card class="mb-6">
-        <v-card-title class="text-subtitle-1">场景（直播画面）</v-card-title>
+    <!-- 设置：running 改本场（PUT /stream/metadata）；停止时改 config 默认值 -->
+    <v-dialog v-model="settingsOpen" max-width="560">
+      <v-card>
+        <v-card-title>设置</v-card-title>
         <v-card-text>
-          <div class="d-flex align-center flex-wrap ga-2">
-            <v-chip size="small" color="primary" variant="tonal" :prepend-icon="currentSceneIcon">
-              {{ currentSceneLabel }}
-            </v-chip>
-            <v-chip
-              v-if="st.status.value?.sections.games.current?.active"
-              size="small"
-              variant="tonal"
-              prepend-icon="mdi-gamepad-variant"
-            >
-              游戏：{{ st.status.value.sections.games.current?.active }}
-            </v-chip>
-            <v-chip
-              v-if="st.status.value?.sections.scene.current"
-              size="small"
-              variant="tonal"
-              :color="currentHighlightMessages ? 'success' : 'grey'"
-              prepend-icon="mdi-message-alert-outline"
-            >
-              高亮消息{{ currentHighlightMessages ? '启用' : '禁用' }}
-            </v-chip>
-            <v-spacer />
-            <v-btn
-              size="x-small"
-              variant="text"
-              prepend-icon="mdi-code-json"
-              @click="sceneEditor = true"
-            >
-              编辑场景数据
-            </v-btn>
-          </div>
-          <div class="text-caption text-disabled mt-3">
-            场景由直播循环自动切换：开播进 room（开场由 neuro 窗口播放），
-            开局切到对应游戏场景，下播回到 no-source 待机。神经窗口自身的场景
-            （常态 / 开场）在 <b>Neuro Sama → View</b> 的侧栏切换。
+          <v-alert
+            v-if="settingsError"
+            type="error"
+            variant="tonal"
+            density="compact"
+            class="mb-3"
+          >
+            {{ settingsError }}
+          </v-alert>
+          <v-text-field
+            v-model="formTitle"
+            label="标题（title）"
+            variant="outlined"
+            density="compact"
+            counter="120"
+            class="mb-2"
+          />
+          <v-combobox
+            v-model="formCategory"
+            :items="CATEGORIES"
+            label="分区（category）"
+            variant="outlined"
+            density="compact"
+            clearable
+            class="mb-2"
+          />
+          <div class="text-caption text-medium-emphasis mb-1">标签（tags）</div>
+          <TagInput v-model="formTags" />
+          <template v-if="isRunning">
+            <v-divider class="my-3" />
+            <div class="d-flex align-center flex-wrap ga-2">
+              <v-switch
+                :model-value="!highlightPaused"
+                :label="highlightPaused ? '高亮消息队列：暂停' : '高亮消息队列：正常'"
+                color="primary"
+                density="compact"
+                hide-details
+                :disabled="!highlightControllable"
+                @update:model-value="onHighlightToggle"
+              />
+              <v-chip size="small" variant="tonal" prepend-icon="mdi-source-branch">
+                来源：{{ highlightSourceLabel }}
+              </v-chip>
+            </div>
+            <div class="text-caption text-disabled">
+              暂停时高亮轨不消费，普通消息照常。
+            </div>
+          </template>
+          <div class="text-caption text-disabled mt-2">
+            {{
+              isRunning
+                ? '保存 = 立即应用到当前场次（PUT /stream/metadata）。'
+                : '保存 = 写入 config 的 stream.default_*，作为下一场初值。'
+            }}
           </div>
         </v-card-text>
+        <v-card-actions>
+          <v-spacer />
+          <v-btn variant="text" :disabled="settingsBusy" @click="settingsOpen = false">取消</v-btn>
+          <v-btn color="primary" :loading="settingsBusy" @click="saveSettings">保存</v-btn>
+        </v-card-actions>
       </v-card>
+    </v-dialog>
 
-      <!-- 场次史 -->
-      <v-card>
-        <v-card-title class="text-subtitle-1">最近场次</v-card-title>
-        <v-table v-if="st.sessions.value.length" density="comfortable">
-          <thead>
-            <tr>
-              <th class="text-left">Session</th>
-              <th class="text-left">状态</th>
-              <th class="text-left">开始</th>
-              <th class="text-left">结束</th>
-              <th class="text-left">轮次</th>
-              <th class="text-right">操作</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr v-for="s in st.sessions.value" :key="s.session_id">
-              <td class="text-body-2">{{ short(s.session_id) }}</td>
-              <td>
-                <v-chip size="x-small" :color="s.state === 'offline' ? 'grey' : 'success'" variant="tonal">
-                  {{ s.state }}
-                </v-chip>
-              </td>
-              <td class="text-body-2">{{ s.started_at }}</td>
-              <td class="text-body-2">{{ s.ended_at ?? '—' }}</td>
-              <td class="text-body-2">{{ s.rounds }}</td>
-              <td class="text-right">
-                <v-btn
-                  icon="mdi-delete-outline"
-                  size="x-small"
-                  color="error"
-                  variant="text"
-                  title="删除场次及消息队列"
-                  @click="handleDelete(s.session_id)"
-                />
-              </td>
-            </tr>
-          </tbody>
-        </v-table>
-        <v-card-text v-else class="text-disabled">暂无场次记录。</v-card-text>
-      </v-card>
-    </template>
+    <v-snackbar v-model="snackbar" :timeout="5000" color="error" location="bottom">
+      {{ snackbarText }}
+    </v-snackbar>
   </div>
 </template>
 
 <script lang="ts" setup>
-import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
+import ModuleOffline from '@/components/ModuleOffline.vue'
+import TagInput from '@/components/tags/TagInput.vue'
 import { useModuleStatus } from '@/composables/useModuleStatus'
 import { useStream } from '@/composables/useStream'
-import ModuleOffline from '@/components/ModuleOffline.vue'
-import SceneManifestEditor from '@/components/scene/SceneManifestEditor.vue'
-import TagInput from '@/components/tags/TagInput.vue'
+import { api, describeError } from '@/stores/connection'
 
 const status = useModuleStatus('stream')
 const st = useStream()
 
-/** 场景数据编辑器（存的是 stream 模块自己 DB 里的那份） */
-const sceneEditor = ref(false)
-
-/** 常用 Twitch 分区（可自由输入其它值） */
 const CATEGORIES = [
   'Just Chatting',
   'IRL',
@@ -333,37 +1023,966 @@ const CATEGORIES = [
   'Talking',
 ]
 
-let timer: number | null = null
+// ---------- 画布 ⇄ 合成器（postMessage；字段名与 ui/stream/main.ts 逐字一致） ----------
+
+const canvasFrame = ref<HTMLIFrameElement | null>(null)
+const canvasReady = ref(false)
+/** 合成器元素/层的强制隐藏集合（只隐藏，不能强制显示）。
+ *  命名空间：场景元素 id、`neuro.window`、`neuro.layer:<id>`（见 ui/stream/main.ts）。 */
+const hiddenIds = ref<string[]>([])
+
+const NEURO_WINDOW_ID = 'neuro.window'
+const NEURO_LAYER_PREFIX = 'neuro.layer:'
+
+interface ManifestBox {
+  x?: number
+  y?: number
+  w?: number
+  h?: number
+  edge?: { x?: 'left' | 'right', y?: 'top' | 'bottom' }
+  scale?: number
+  rotate?: number
+  opacity?: number
+}
+
+interface ManifestContent {
+  kind?: string
+  [key: string]: unknown
+}
+
+interface ManifestElement {
+  id: string
+  name?: string | null
+  visible?: boolean
+  z?: number
+  box?: ManifestBox
+  content?: ManifestContent
+  script?: Record<string, unknown>
+  css?: Record<string, string>
+}
+
+interface ManifestNeuro {
+  x?: number
+  y?: number
+  w?: number
+  z?: number
+  hidden?: boolean
+  hide?: string[]
+  edge?: { x?: 'left' | 'right', y?: 'top' | 'bottom' }
+}
+
+interface ManifestScene {
+  id: string
+  label?: string
+  desc?: string
+  icon?: string
+  duration?: number
+  prompt_context?: string
+  highlight_messages?: boolean
+  elements?: ManifestElement[]
+  neuro?: ManifestNeuro
+  timeline?: Record<string, unknown>
+  state_script?: Record<string, unknown>
+}
+
+interface StreamManifest {
+  version?: number
+  scenes: ManifestScene[]
+}
+
+interface NeuroSceneElement {
+  id: string
+  name?: string | null
+  z?: number | null
+  visible?: boolean
+  content?: string | null
+  component?: string | null
+}
+
+interface NeuroSceneSummary {
+  id: string
+  label?: string
+  elements: NeuroSceneElement[]
+}
+
+interface NeuroScenesResponse {
+  scenes: NeuroSceneSummary[]
+  current?: { id?: string } | null
+}
+
+interface SceneMenuState {
+  open: boolean
+  x: number
+  y: number
+  sceneId: string
+}
+
+const AUDIO_VOLUME_KEY = 'ns.audio.volume'
+const AUDIO_MUTED_KEY = 'ns.audio.muted'
+
+function readStoredVolume(): number {
+  const raw = Number(localStorage.getItem(AUDIO_VOLUME_KEY))
+  return Number.isFinite(raw) ? Math.min(1, Math.max(0, raw)) : 1
+}
+
+const volume = ref(readStoredVolume())
+const muted = ref(localStorage.getItem(AUDIO_MUTED_KEY) === '1')
+const volumePct = ref(Math.round(volume.value * 100))
+
+function postCanvas(payload: Record<string, unknown>): void {
+  canvasFrame.value?.contentWindow?.postMessage(payload, '*')
+}
+
+function sendVisibility(): void {
+  if (!canvasReady.value) return
+  // Vue 的 ref 数组是 Proxy，structured clone 会抛 DataCloneError：
+  // postMessage 必须传普通数组副本。
+  postCanvas({ ns: 'stream-canvas', type: 'visibility', hidden: [...hiddenIds.value] })
+}
+
+function sendVolume(): void {
+  if (!canvasReady.value) return
+  postCanvas({ ns: 'stream-canvas', type: 'volume', value: volume.value, muted: muted.value })
+}
+
+function onCanvasMessage(event: MessageEvent): void {
+  // 只认自己 iframe 的 ready；其余消息（如 neuro 转发的帧）一概不处理
+  if (event.source !== canvasFrame.value?.contentWindow) return
+  const data = event.data as { ns?: string, type?: string } | undefined
+  if (data?.ns !== 'stream-canvas' || data.type !== 'ready') return
+  canvasReady.value = true
+  // iframe 装载前父页面就持有状态：ready 后补发
+  sendVisibility()
+  sendVolume()
+}
+
+function onVolume(): void {
+  volume.value = volumePct.value / 100
+  localStorage.setItem(AUDIO_VOLUME_KEY, String(volume.value))
+  localStorage.setItem(AUDIO_MUTED_KEY, muted.value ? '1' : '0')
+  sendVolume()
+}
+
+function setElementHidden(id: string, hidden: boolean): void {
+  const next = new Set(hiddenIds.value)
+  if (hidden) next.add(id)
+  else next.delete(id)
+  hiddenIds.value = [...next]
+  sendVisibility()
+}
+
+// ---------- 状态 / 场景 ----------
 
 const currentState = computed(
   () => st.status.value?.sections.loop.current?.state ?? 'offline',
 )
-const sid = computed(() => st.status.value?.sections.loop.current?.session_id ?? '')
-const conv = computed(() => st.status.value?.sections.loop.current?.conversation_id ?? '')
-const rounds = computed(() => st.status.value?.sections.loop.current?.round ?? 0)
-const live = computed(() => Boolean(st.status.value?.sections.metadata.current?.live))
-const currentScene = computed(() => st.status.value?.sections.scene.current?.id ?? '')
-const currentSceneInfo = computed(
-  () => st.scenes.value.find((s) => s.id === currentScene.value) ?? null,
-)
-const currentSceneLabel = computed(() => {
-  if (currentSceneInfo.value) return currentSceneInfo.value.label
-  // hidden 场景（开场的 room_intro）不在手动清单里 → 用服务端给的 label，别显示裸 id
-  const fromServer = st.status.value?.sections.scene.current?.label
-  if (fromServer) return fromServer
-  return currentScene.value ? currentScene.value : '待机（no source）'
-})
-const currentSceneIcon = computed(
-  () =>
-    currentSceneInfo.value?.icon ??
-    st.status.value?.sections.scene.current?.icon ??
-    'mdi-television-pause',
-)
-// 开场闸门与"上次为什么没开成"（服务端在下次成功开播时清空 last_error）
-const introGate = computed(() => st.status.value?.sections.loop.current?.intro ?? null)
+const isRunning = computed(() => ['starting', 'live', 'paused'].includes(currentState.value))
 const lastError = computed(() => st.status.value?.sections.loop.current?.last_error ?? null)
 
-// 高亮消息队列开关（stream 场景 / neuro 场景 / 人工三方写入，最后写入者生效）
+const currentScene = computed(() => st.status.value?.sections.scene.current?.id ?? '')
+
+/** 合成器的完整场景清单（含 starting_soon/开场）：保存 = 防抖 PUT /ui/manifest。 */
+const streamManifest = ref<StreamManifest | null>(null)
+
+/** neuro 当前场景的内部层（来源：GET /manage/neuro_sama/ui/scenes）。 */
+const neuroScenes = ref<NeuroScenesResponse | null>(null)
+
+function cloneData<T>(value: T): T {
+  return JSON.parse(JSON.stringify(value)) as T
+}
+
+function sceneById(id: string): ManifestScene | null {
+  return streamManifest.value?.scenes.find((s) => s.id === id) ?? null
+}
+
+/** 画布实际显示的 stream 场景：状态里的 id 被删了就回落到待机场景。 */
+const displayedSceneId = computed(() => {
+  const scenes = streamManifest.value?.scenes ?? []
+  if (currentScene.value && scenes.some((s) => s.id === currentScene.value)) {
+    return currentScene.value
+  }
+  if (scenes.some((s) => s.id === 'starting_soon')) return 'starting_soon'
+  return scenes.find((s) => (s.elements ?? []).some((e) => e.id === 'chat'))?.id
+    ?? scenes[0]?.id
+    ?? ''
+})
+const displayedScene = computed(() => sceneById(displayedSceneId.value))
+
+const selectedSceneId = ref('')
+// 状态首次到达时把选中行对齐到当前画面；之后尊重用户点击（OBS 点击即选中+切换）。
+watch(
+  displayedSceneId,
+  (id) => {
+    if (id && !selectedSceneId.value) selectedSceneId.value = id
+  },
+  { immediate: true },
+)
+
+const selectedSceneRow = computed(() =>
+  st.scenes.value.find((s) => s.id === selectedSceneId.value) ?? null,
+)
+const canDeleteScene = computed(() => st.scenes.value.length > 1 && !!selectedSceneId.value)
+
+function sceneIndex(id: string): number {
+  return streamManifest.value?.scenes.findIndex((s) => s.id === id) ?? -1
+}
+
+function canMoveScene(delta: number): boolean {
+  const idx = sceneIndex(selectedSceneId.value)
+  if (idx < 0) return false
+  const next = idx + delta
+  return next >= 0 && next < (streamManifest.value?.scenes.length ?? 0)
+}
+
+/** 场景列表的行顺序跟随 manifest 数组顺序（保存后 st.scenes 立即刷新）。 */
+async function selectSceneRow(id: string): Promise<void> {
+  selectedSceneId.value = id
+  if (id === displayedSceneId.value) return
+  await flushManifestSave()
+  await switchScene(id)
+}
+
+async function switchScene(id: string): Promise<void> {
+  await st.setScene(id)
+  await st.refreshStatus()
+}
+
+// ---------- 元素行（OBS 源列表：顶部 = 最上层 = z 降序） ----------
+
+interface ElementRow {
+  id: string
+  name: string
+  icon: string
+  color: string
+  z: number
+  visible: boolean
+}
+
+const ELEMENT_ICONS: Record<string, string> = {
+  color: 'mdi-palette',
+  image: 'mdi-image',
+  video: 'mdi-video',
+  text: 'mdi-format-text',
+  component: 'mdi-puzzle',
+}
+
+const elementRows = computed<ElementRow[]>(() => {
+  const elements = displayedScene.value?.elements ?? []
+  return elements
+    .map((el) => {
+      const kind = String(el.content?.kind ?? '')
+      return {
+        id: el.id,
+        name: el.name || el.id,
+        icon: ELEMENT_ICONS[kind] ?? 'mdi-cube-outline',
+        color: kind === 'color' ? String(el.content?.color ?? '') : '',
+        z: Number(el.z ?? 0),
+        visible: el.visible !== false,
+      }
+    })
+    .sort((a, b) => b.z - a.z)
+})
+
+const neuroWindowVisible = computed(
+  () => !!displayedScene.value?.neuro && !displayedScene.value.neuro.hidden,
+)
+
+const currentNeuroScene = computed(() => {
+  const neuro = neuroScenes.value
+  if (!neuro?.current?.id) return null
+  return neuro.scenes.find((s) => s.id === neuro.current?.id) ?? null
+})
+const neuroLayerRows = computed(() =>
+  (currentNeuroScene.value?.elements ?? []).map((el) => ({
+    sourceId: `${NEURO_LAYER_PREFIX}${el.id}`,
+    layerId: el.id,
+    name: el.name || el.id,
+    // 场景里 visible:false 的层由脚本（如开场时间线）负责显示，外部只能再隐藏。
+    visible: el.visible !== false,
+  })),
+)
+
+// ---------- 选中元素 ----------
+
+type ElementKind = 'element' | 'neuro-window'
+
+interface ElementSelection {
+  kind: ElementKind
+  id: string
+}
+
+const selectedElement = ref<ElementSelection | null>(null)
+
+function isSelectedElement(kind: ElementKind, id: string): boolean {
+  return selectedElement.value?.kind === kind && selectedElement.value.id === id
+}
+
+async function selectElement(kind: ElementKind, id: string): Promise<void> {
+  if (isSelectedElement(kind, id)) return
+  await flushManifestSave()
+  selectedElement.value = { kind, id }
+}
+
+// 切场景 = 上一个场景的选中行作废；未保存改动先落盘。
+watch(displayedSceneId, () => {
+  void flushManifestSave()
+  selectedElement.value = null
+  elementDialog.value = false
+  neuroDialog.value = false
+})
+
+function selectedElementDef(): ManifestElement | null {
+  const selection = selectedElement.value
+  if (!selection || selection.kind !== 'element') return null
+  return displayedScene.value?.elements?.find((e) => e.id === selection.id) ?? null
+}
+
+function canMoveElement(delta: number): boolean {
+  if (selectedElement.value?.kind !== 'element') return false
+  const idx = elementRows.value.findIndex((r) => r.id === selectedElement.value?.id)
+  if (idx < 0) return false
+  const next = idx + delta
+  return next >= 0 && next < elementRows.value.length
+}
+
+// 列表顶部 = 最上层（z 降序）：↑ = 与上一行交换 z（变大一层）。
+function moveElement(delta: number): void {
+  const selection = selectedElement.value
+  if (selection?.kind !== 'element') return
+  const scene = displayedScene.value
+  if (!scene) return
+  const idx = elementRows.value.findIndex((r) => r.id === selection.id)
+  const next = idx + delta
+  if (idx < 0 || next < 0 || next >= elementRows.value.length) return
+  const otherId = elementRows.value[next]?.id
+  const elements = scene.elements ?? []
+  const a = elements.find((e) => e.id === selection.id)
+  const b = elements.find((e) => e.id === otherId)
+  if (!a || !b) return
+  const z = a.z
+  a.z = b.z
+  b.z = z
+  queueManifestSave()
+}
+
+// ---------- manifest 本地缓存 + 1s 防抖保存 ----------
+
+const manifestError = ref('')
+let manifestDirty = false
+let manifestRev = 0
+let manifestTimer: number | null = null
+let manifestSaving = false
+
+function stringifyManifest(): string {
+  return JSON.stringify(streamManifest.value)
+}
+
+function queueManifestSave(): void {
+  if (!streamManifest.value) return
+  manifestDirty = true
+  manifestRev += 1
+  if (manifestTimer !== null) window.clearTimeout(manifestTimer)
+  manifestTimer = window.setTimeout(() => {
+    manifestTimer = null
+    void flushManifestSave()
+  }, 1000)
+}
+
+/** 立即落盘未保存改动（关闭对话框 / 切换选中行 / 切场景时调用）。 */
+async function flushManifestSave(): Promise<void> {
+  if (manifestTimer !== null) {
+    window.clearTimeout(manifestTimer)
+    manifestTimer = null
+  }
+  if (!manifestDirty || !streamManifest.value) return
+  if (manifestSaving) return
+  const rev = manifestRev
+  const content = stringifyManifest()
+  manifestSaving = true
+  manifestError.value = ''
+  try {
+    await api('/manage/stream/ui/manifest', {
+      method: 'PUT',
+      body: JSON.stringify({ content }),
+    })
+    if (rev === manifestRev) manifestDirty = false
+    await st.refreshScenes()
+    if (rev === manifestRev) {
+      // 用服务端刚存下的那份刷新缓存，避免 5s 轮询先拿旧数据覆盖新改动。
+      await refreshStreamManifest(true)
+    }
+  } catch (e) {
+    manifestError.value = describeError(e)
+    showSnack(manifestError.value)
+  } finally {
+    manifestSaving = false
+    if (manifestDirty && rev !== manifestRev) {
+      // 保存期间又有新改动：继续合并到下一次
+      manifestTimer = window.setTimeout(() => {
+        manifestTimer = null
+        void flushManifestSave()
+      }, 1000)
+    }
+  }
+}
+
+function discardPendingManifest(): void {
+  if (manifestTimer !== null) {
+    window.clearTimeout(manifestTimer)
+    manifestTimer = null
+  }
+  manifestDirty = false
+}
+
+async function refreshStreamManifest(force = false): Promise<void> {
+  if (!force && (manifestDirty || manifestSaving)) return
+  try {
+    const data = await api<StreamManifest>('/manage/stream/ui/manifest')
+    if (force || (!manifestDirty && !manifestSaving)) {
+      streamManifest.value = data
+      if (!selectedSceneId.value) selectedSceneId.value = displayedSceneId.value
+    }
+  } catch {
+    // 模块暂时不可达：保留现有缓存，画面/卡片继续用旧数据
+  }
+}
+
+async function ensureManifest(): Promise<boolean> {
+  if (streamManifest.value) return true
+  await refreshStreamManifest(true)
+  return !!streamManifest.value
+}
+
+// ---------- 场景 CRUD ----------
+
+interface SceneMenuEvent { clientX: number, clientY: number }
+
+const sceneMenu = reactive<SceneMenuState>({ open: false, x: 0, y: 0, sceneId: '' })
+
+function openSceneMenu(event: MouseEvent | SceneMenuEvent, sceneId: string): void {
+  sceneMenu.open = true
+  sceneMenu.x = event.clientX
+  sceneMenu.y = event.clientY
+  sceneMenu.sceneId = sceneId
+}
+
+const createOpen = ref(false)
+const createForm = reactive({
+  id: '',
+  label: '',
+  desc: '',
+  icon: '',
+  cloneCurrent: true,
+})
+
+const sceneIdPattern = /^[a-z0-9_-]+$/
+const createIdError = computed(() => {
+  const id = createForm.id.trim()
+  if (!id) return ''
+  if (!sceneIdPattern.test(id)) return '只能使用小写字母、数字、下划线、连字符'
+  if (streamManifest.value?.scenes.some((s) => s.id === id)) return '场景 id 已存在'
+  return ''
+})
+const canCreateScene = computed(() =>
+  !!createForm.id.trim() && !createIdError.value,
+)
+
+function openCreateScene(): void {
+  createForm.id = ''
+  createForm.label = ''
+  createForm.desc = ''
+  createForm.icon = ''
+  createForm.cloneCurrent = true
+  createOpen.value = true
+}
+
+async function createScene(): Promise<void> {
+  if (!(await ensureManifest()) || !streamManifest.value) return
+  const id = createForm.id.trim()
+  if (!id || createIdError.value) return
+  const current = displayedScene.value
+  const base = createForm.cloneCurrent && current
+    ? {
+        elements: cloneData(current.elements ?? []),
+        ...(current.neuro ? { neuro: cloneData(current.neuro) } : {}),
+      }
+    : { elements: [], neuro: { x: 0, y: 0, w: 1 } }
+  const scene: ManifestScene = {
+    id,
+    label: createForm.label.trim() || id,
+    ...(createForm.desc.trim() ? { desc: createForm.desc.trim() } : {}),
+    ...(createForm.icon.trim() ? { icon: createForm.icon.trim() } : {}),
+    ...base,
+  }
+  streamManifest.value.scenes.push(scene)
+  selectedSceneId.value = id
+  selectedElement.value = null
+  createOpen.value = false
+  queueManifestSave()
+}
+
+const deleteOpen = ref(false)
+
+function openDeleteScene(): void {
+  if (!canDeleteScene.value) return
+  deleteOpen.value = true
+  deleteSceneLabel.value = selectedSceneRow.value?.label || selectedSceneId.value
+}
+
+const deleteSceneLabel = ref('')
+
+async function deleteScene(): Promise<void> {
+  const id = selectedSceneId.value
+  if (!id || !streamManifest.value) return
+  const idx = sceneIndex(id)
+  if (idx < 0 || streamManifest.value.scenes.length <= 1) {
+    deleteOpen.value = false
+    return
+  }
+  streamManifest.value.scenes.splice(idx, 1)
+  const fallback = streamManifest.value.scenes[Math.min(idx, streamManifest.value.scenes.length - 1)]
+  selectedSceneId.value = fallback?.id ?? ''
+  selectedElement.value = null
+  deleteOpen.value = false
+  queueManifestSave()
+}
+
+function moveScene(delta: number): void {
+  const list = streamManifest.value?.scenes
+  const idx = sceneIndex(selectedSceneId.value)
+  if (!list || idx < 0) return
+  const next = idx + delta
+  if (next < 0 || next >= list.length) return
+  const [scene] = list.splice(idx, 1)
+  if (!scene) return
+  list.splice(next, 0, scene)
+  queueManifestSave()
+}
+
+// ---------- 重置清单（两个入口共用） ----------
+
+const resetDialog = ref(false)
+
+async function resetManifest(): Promise<void> {
+  resetDialog.value = false
+  discardPendingManifest()
+  manifestError.value = ''
+  try {
+    await api('/manage/stream/ui/manifest/reset', { method: 'POST' })
+    manifestRev += 1
+    selectedElement.value = null
+    await st.refreshScenes()
+    await refreshStreamManifest(true)
+    if (streamManifest.value?.scenes.some((s) => s.id === selectedSceneId.value)) {
+      // 选中行还在就保留
+    } else {
+      selectedSceneId.value = displayedSceneId.value
+    }
+  } catch (e) {
+    manifestError.value = describeError(e)
+    showSnack(manifestError.value)
+  }
+}
+
+// ---------- 场景属性对话框 ----------
+
+const scenePropsOpen = ref(false)
+const scenePropsId = ref('')
+const timelineError = ref('')
+const stateScriptError = ref('')
+const sceneForm = reactive({
+  label: '',
+  desc: '',
+  icon: '',
+  duration: '',
+  prompt_context: '',
+  highlight_messages: true,
+  timeline: '',
+  state_script: '',
+})
+
+function scenePropsScene(): ManifestScene | null {
+  return sceneById(scenePropsId.value)
+}
+
+async function openSceneProperties(sceneId: string): Promise<void> {
+  sceneMenu.open = false
+  if (!(await ensureManifest())) return
+  const scene = sceneById(sceneId)
+  if (!scene) return
+  scenePropsId.value = sceneId
+  sceneForm.label = scene.label ?? ''
+  sceneForm.desc = scene.desc ?? ''
+  sceneForm.icon = scene.icon ?? ''
+  sceneForm.duration = scene.duration == null ? '' : String(scene.duration)
+  sceneForm.prompt_context = scene.prompt_context ?? ''
+  sceneForm.highlight_messages = scene.highlight_messages !== false
+  sceneForm.timeline = scene.timeline ? JSON.stringify(scene.timeline, null, 2) : ''
+  sceneForm.state_script = scene.state_script ? JSON.stringify(scene.state_script, null, 2) : ''
+  timelineError.value = ''
+  stateScriptError.value = ''
+  scenePropsOpen.value = true
+}
+
+function applySceneBasics(): void {
+  const scene = scenePropsScene()
+  if (!scene) return
+  const label = sceneForm.label.trim()
+  if (label) scene.label = label
+  else delete scene.label
+  const desc = sceneForm.desc.trim()
+  if (desc) scene.desc = desc
+  else delete scene.desc
+  const icon = sceneForm.icon.trim()
+  if (icon) scene.icon = icon
+  else delete scene.icon
+  const duration = sceneForm.duration.trim()
+  if (duration) scene.duration = Number(duration)
+  else delete scene.duration
+  const prompt = sceneForm.prompt_context
+  if (prompt.trim()) scene.prompt_context = prompt
+  else delete scene.prompt_context
+  if (sceneForm.highlight_messages) scene.highlight_messages = true
+  else scene.highlight_messages = false
+  queueManifestSave()
+}
+
+function parseJsonField(
+  text: string,
+  label: string,
+): { ok: true, value: unknown | null } | { ok: false, error: string } {
+  if (!text.trim()) return { ok: true, value: null }
+  try {
+    const value = JSON.parse(text)
+    if (!value || typeof value !== 'object' || Array.isArray(value)) {
+      return { ok: false, error: `${label} 必须是 JSON 对象` }
+    }
+    return { ok: true, value }
+  } catch (e) {
+    return { ok: false, error: `${label} JSON 解析失败：${(e as Error).message}` }
+  }
+}
+
+function applySceneTimeline(): void {
+  const scene = scenePropsScene()
+  if (!scene) return
+  const parsed = parseJsonField(sceneForm.timeline, 'timeline')
+  if (!parsed.ok) {
+    timelineError.value = parsed.error
+    return
+  }
+  timelineError.value = ''
+  if (parsed.value === null) delete scene.timeline
+  else scene.timeline = parsed.value as Record<string, unknown>
+  queueManifestSave()
+}
+
+function applySceneStateScript(): void {
+  const scene = scenePropsScene()
+  if (!scene) return
+  const parsed = parseJsonField(sceneForm.state_script, 'state_script')
+  if (!parsed.ok) {
+    stateScriptError.value = parsed.error
+    return
+  }
+  stateScriptError.value = ''
+  if (parsed.value === null) delete scene.state_script
+  else scene.state_script = parsed.value as Record<string, unknown>
+  queueManifestSave()
+}
+
+async function closeSceneProps(): Promise<void> {
+  scenePropsOpen.value = false
+  await flushManifestSave()
+}
+
+// ---------- 元素设置对话框 ----------
+
+const PLACEMENTS = [
+  { title: '左上（默认）', value: 'tl' },
+  { title: '右上', value: 'tr' },
+  { title: '左下', value: 'bl' },
+  { title: '右下', value: 'br' },
+]
+const CONTENT_KINDS = ['color', 'image', 'video', 'text', 'component']
+
+const elementDialog = ref(false)
+const elementTargetId = ref('')
+const scriptError = ref('')
+const propsError = ref('')
+const elementFieldError = computed(() => scriptError.value || propsError.value)
+
+const elementForm = reactive({
+  placement: 'tl',
+  x: '0',
+  y: '0',
+  w: '',
+  h: '',
+  scale: '',
+  rotate: '',
+  opacity: '',
+  z: '0',
+  visible: true,
+  kind: 'component',
+  color: '#000000',
+  src: '',
+  text: '',
+  name: '',
+  props: '',
+  script: '',
+})
+
+function pctValue(value: number | undefined, digits = 2): string {
+  if (value == null || !Number.isFinite(value)) return ''
+  const pct = value * 100
+  return String(Math.round(pct * 10 ** digits) / 10 ** digits)
+}
+
+function parsePct(text: string): number | undefined {
+  if (!text.trim()) return undefined
+  const n = Number(text)
+  return Number.isFinite(n) ? n / 100 : undefined
+}
+
+function placementOf(box: ManifestBox): string {
+  const x = box.edge?.x === 'right'
+  const y = box.edge?.y === 'bottom'
+  if (x && y) return 'br'
+  if (x) return 'tr'
+  if (y) return 'bl'
+  return 'tl'
+}
+
+function loadElementForm(el: ManifestElement): void {
+  const box = el.box ?? { x: 0, y: 0 }
+  elementForm.placement = placementOf(box)
+  elementForm.x = pctValue(box.x ?? 0)
+  elementForm.y = pctValue(box.y ?? 0)
+  elementForm.w = pctValue(box.w)
+  elementForm.h = pctValue(box.h)
+  elementForm.scale = box.scale == null ? '' : String(box.scale)
+  elementForm.rotate = box.rotate == null ? '' : String(box.rotate)
+  elementForm.opacity = box.opacity == null ? '' : String(box.opacity)
+  elementForm.z = String(el.z ?? 0)
+  elementForm.visible = el.visible !== false
+
+  const content = el.content ?? { kind: 'component' }
+  elementForm.kind = String(content.kind ?? 'component')
+  elementForm.color = String(content.color ?? '#000000')
+  elementForm.src = String(content.src ?? '')
+  elementForm.text = String(content.text ?? '')
+  elementForm.name = String(content.name ?? '')
+  elementForm.props = content.props
+    ? JSON.stringify(content.props, null, 2)
+    : ''
+  elementForm.script = el.script ? JSON.stringify(el.script, null, 2) : ''
+  scriptError.value = ''
+  propsError.value = ''
+}
+
+function openElementSettings(elementId: string): void {
+  const el = displayedScene.value?.elements?.find((e) => e.id === elementId)
+  if (!el) return
+  loadElementForm(el)
+  elementTargetId.value = el.id
+  elementDialog.value = true
+}
+
+function openSelectedSettings(): void {
+  const selection = selectedElement.value
+  if (!selection) return
+  if (selection.kind === 'neuro-window') {
+    openNeuroDialog()
+    return
+  }
+  openElementSettings(selection.id)
+}
+
+function buildContent(el: ManifestElement): ManifestContent | null {
+  const kind = elementForm.kind
+  const base = (el.content ?? {}) as Record<string, unknown>
+  if (kind === 'color') {
+    return { kind, color: elementForm.color.trim() || '#000000' }
+  }
+  if (kind === 'image') {
+    return {
+      kind,
+      src: elementForm.src.trim(),
+      ...(base.fit ? { fit: base.fit } : {}),
+    }
+  }
+  if (kind === 'video') {
+    return {
+      kind,
+      src: elementForm.src.trim(),
+      ...(base.muted ? { muted: true } : {}),
+      ...(base.loop ? { loop: true } : {}),
+      ...(base.autoplay ? { autoplay: true } : {}),
+    }
+  }
+  if (kind === 'text') {
+    return {
+      kind,
+      text: elementForm.text,
+      ...(base.class ? { class: base.class } : {}),
+    }
+  }
+  const parsed = parseJsonField(elementForm.props, 'props')
+  if (!parsed.ok) {
+    propsError.value = parsed.error
+    return null
+  }
+  propsError.value = ''
+  return {
+    kind: 'component',
+    name: elementForm.name.trim(),
+    ...(parsed.value ? { props: parsed.value } : {}),
+  }
+}
+
+function applyElementForm(): void {
+  const el = selectedElementDef()
+  if (!el) return
+
+  const box: ManifestBox = el.box ?? { x: 0, y: 0 }
+  box.x = parsePct(elementForm.x) ?? 0
+  box.y = parsePct(elementForm.y) ?? 0
+  const w = parsePct(elementForm.w)
+  const h = parsePct(elementForm.h)
+  if (w === undefined) delete box.w
+  else box.w = w
+  if (h === undefined) delete box.h
+  else box.h = h
+
+  const edge: { x?: 'left' | 'right', y?: 'top' | 'bottom' } = {}
+  if (elementForm.placement === 'tr' || elementForm.placement === 'br') edge.x = 'right'
+  if (elementForm.placement === 'bl' || elementForm.placement === 'br') edge.y = 'bottom'
+  if (edge.x || edge.y) box.edge = edge
+  else delete box.edge
+
+  const scale = elementForm.scale.trim()
+  if (scale) box.scale = Number(scale)
+  else delete box.scale
+  const rotate = elementForm.rotate.trim()
+  if (rotate) box.rotate = Number(rotate)
+  else delete box.rotate
+  const opacity = elementForm.opacity.trim()
+  if (opacity) box.opacity = Number(opacity)
+  else delete box.opacity
+
+  el.box = box
+  const z = Number(elementForm.z)
+  el.z = Number.isFinite(z) ? z : 0
+  el.visible = elementForm.visible
+
+  if (elementForm.kind !== 'component') propsError.value = ''
+  const content = buildContent(el)
+  if (content) el.content = content
+
+  const scriptText = elementForm.script
+  if (!scriptText.trim()) {
+    delete el.script
+    scriptError.value = ''
+  } else {
+    const parsed = parseJsonField(scriptText, 'script')
+    if (parsed.ok && parsed.value) {
+      el.script = parsed.value as Record<string, unknown>
+      scriptError.value = ''
+    } else if (!parsed.ok) {
+      scriptError.value = parsed.error
+    }
+  }
+
+  queueManifestSave()
+}
+
+async function closeElementDialog(): Promise<void> {
+  elementDialog.value = false
+  await flushManifestSave()
+}
+
+// ---------- neuro 块对话框 ----------
+
+const neuroDialog = ref(false)
+const neuroForm = reactive({
+  x: '0',
+  y: '0',
+  w: '100',
+  z: '',
+  hidden: false,
+  hide: [] as string[],
+})
+
+const neuroHideItems = computed(() => {
+  const seen = new Set<string>()
+  const out: { title: string, value: string }[] = []
+  for (const row of neuroLayerRows.value) {
+    if (seen.has(row.layerId)) continue
+    seen.add(row.layerId)
+    out.push({ title: row.name, value: row.layerId })
+  }
+  for (const id of neuroForm.hide) {
+    if (!seen.has(id)) out.push({ title: id, value: id })
+  }
+  return out
+})
+
+function openNeuroDialog(): void {
+  const scene = displayedScene.value
+  if (!scene) return
+  const neuro = scene.neuro
+  neuroForm.x = pctValue(neuro?.x ?? 0)
+  neuroForm.y = pctValue(neuro?.y ?? 0)
+  neuroForm.w = pctValue(neuro?.w ?? 1)
+  neuroForm.z = neuro?.z == null ? '' : String(neuro.z)
+  neuroForm.hidden = Boolean(neuro?.hidden)
+  neuroForm.hide = [...(neuro?.hide ?? [])]
+  neuroDialog.value = true
+}
+
+function applyNeuroForm(): void {
+  const scene = displayedScene.value
+  if (!scene) return
+  const neuro: ManifestNeuro = scene.neuro ?? { x: 0, y: 0, w: 1 }
+  neuro.x = parsePct(neuroForm.x) ?? 0
+  neuro.y = parsePct(neuroForm.y) ?? 0
+  neuro.w = parsePct(neuroForm.w) ?? 1
+  const z = neuroForm.z.trim()
+  if (z) neuro.z = Number(z)
+  else delete neuro.z
+  if (neuroForm.hidden) neuro.hidden = true
+  else delete neuro.hidden
+  neuro.hide = [...neuroForm.hide]
+  scene.neuro = neuro
+  queueManifestSave()
+}
+
+async function closeNeuroDialog(): Promise<void> {
+  neuroDialog.value = false
+  await flushManifestSave()
+}
+
+// ---------- 源签名 / 隐藏集合 ----------
+
+// 场景 / neuro 内部层切换 = 可用 source id 变了：hidden 只保留仍存在的 id。
+// `neuro.window` 恒存在；neuro 层 id 随 neuro 当前场景变化。
+const sourceSignature = computed(() =>
+  [
+    ...elementRows.value.map((el) => el.id),
+    NEURO_WINDOW_ID,
+    ...neuroLayerRows.value.map((row) => row.sourceId),
+  ].join('|'),
+)
+watch(sourceSignature, () => {
+  const ids = new Set(sourceSignature.value.split('|'))
+  const next = hiddenIds.value.filter((id) => ids.has(id))
+  if (next.length !== hiddenIds.value.length) {
+    hiddenIds.value = next
+  }
+  // 切场景时合成器会重建元素层：无论 hidden 是否变化都重新下发
+  sendVisibility()
+})
+
 const highlightPaused = computed(
   () => Boolean(st.status.value?.sections.loop.current?.highlight_paused),
 )
@@ -376,144 +1995,319 @@ const highlightSourceLabel = computed(() => {
   }
   return labels[source] ?? '—'
 })
-const highlightControllable = computed(() =>
-  ['starting', 'live', 'paused'].includes(currentState.value),
-)
-const currentHighlightMessages = computed(() =>
-  Boolean(st.status.value?.sections.scene.current?.highlight_messages),
-)
+const highlightControllable = computed(() => isRunning.value)
 
-async function onHighlightToggle(value: boolean | null) {
-  await st.setHighlightPaused(!Boolean(value))
-}
+// ---------- 轮询 ----------
 
-// 本场信息编辑区：以服务端值为基线；用户有未保存改动时不被轮询覆盖，
-// 但场次切换（开播/下播）会重新对齐（新场次的标题来自上一场或 config 默认值）。
-const metaTitle = ref('')
-const metaCategory = ref('')
-const metaTags = ref<string[]>([])
-const metaBase = ref({ title: '', category: '', tags: [] as string[], live: false })
-
-function sameTags(a: string[], b: string[]): boolean {
-  return a.length === b.length && a.every((tag, i) => tag === b[i])
-}
-
-const metaDirty = computed(
-  () =>
-    metaTitle.value !== metaBase.value.title ||
-    metaCategory.value !== metaBase.value.category ||
-    !sameTags(metaTags.value, metaBase.value.tags),
-)
-
-watch(
-  () => st.status.value?.sections.metadata.current,
-  (m) => {
-    if (!m) return
-    if (!metaDirty.value || m.live !== metaBase.value.live) {
-      metaBase.value = {
-        title: m.title,
-        category: m.category,
-        tags: [...(m.tags ?? [])],
-        live: m.live,
-      }
-      metaTitle.value = m.title
-      metaCategory.value = m.category
-      metaTags.value = [...(m.tags ?? [])]
-    }
-  },
-  { immediate: true, deep: true },
-)
-
-function syncMetadata() {
-  metaTitle.value = metaBase.value.title
-  metaCategory.value = metaBase.value.category
-  metaTags.value = [...metaBase.value.tags]
-}
-
-async function saveMetadata() {
-  if (await st.setMetadata(metaTitle.value, metaCategory.value, metaTags.value)) {
-    metaBase.value = {
-      title: metaTitle.value,
-      category: metaCategory.value,
-      tags: [...metaTags.value],
-      live: true,
-    }
+/** neuro 当前场景的内部层清单；模块不可达时清空（元素卡显示省略说明）。 */
+async function refreshNeuroScenes(): Promise<void> {
+  try {
+    neuroScenes.value = await api<NeuroScenesResponse>('/manage/neuro_sama/ui/scenes')
+  } catch {
+    neuroScenes.value = null
   }
 }
 
-const stateLabel = computed(
-  () => ({ offline: '离线', starting: '开播中', live: '直播中', paused: '已暂停' } as Record<string, string>)[
-    currentState.value
-  ] ?? currentState.value,
-)
-const stateColor = computed(
-  () => ({ offline: 'grey', starting: 'info', live: 'success', paused: 'warning' } as Record<string, string>)[
-    currentState.value
-  ] ?? 'grey',
-)
-const stateIcon = computed(() => (currentState.value === 'live' ? 'mdi-record' : 'mdi-circle'))
+// stream 场景变化常伴随 neuro 换场景（intro→normal）：即时补一次内部层
+watch(currentScene, () => void refreshNeuroScenes())
 
-function short(id: string): string {
-  return id ? id.slice(0, 8) : '—'
-}
-
-async function doAction(kind: 'start' | 'pause' | 'resume' | 'stop') {
+async function doAction(kind: 'pause' | 'resume' | 'stop'): Promise<void> {
   await st.action(kind)
 }
 
-/** 开播：把编辑区里的标题/分区/标签作为本场信息带上（留空则用 config 默认值） */
-async function startStream() {
-  await st.action('start', {
-    title: metaTitle.value,
-    category: metaCategory.value,
-    tags: metaTags.value,
-  })
+async function start(record: boolean): Promise<void> {
+  if (record) await st.startRecord()
+  else await st.action('start')
 }
 
-async function handleDelete(sessionId: string) {
-  if (!confirm(`确定要删除场次 ${short(sessionId)} 及其对应的消息队列和 Neuro 对话吗？`)) return
-  await st.deleteSession(sessionId)
+async function onHighlightToggle(value: boolean | null): Promise<void> {
+  await st.setHighlightPaused(!Boolean(value))
 }
 
-function startPolling() {
-  if (timer !== null) return
+// ---------- 设置对话框 ----------
+
+const settingsOpen = ref(false)
+const settingsBusy = ref(false)
+const settingsError = ref('')
+const formTitle = ref('')
+const formCategory = ref('')
+const formTags = ref<string[]>([])
+
+async function openSettings(): Promise<void> {
+  settingsError.value = ''
+  settingsOpen.value = true
+  if (isRunning.value) {
+    const meta = st.status.value?.sections.metadata.current
+    formTitle.value = meta?.title ?? ''
+    formCategory.value = meta?.category ?? ''
+    formTags.value = [...(meta?.tags ?? [])]
+    return
+  }
+  settingsBusy.value = true
+  try {
+    const data = await api<{ config: Record<string, any> }>('/manage/config')
+    const stream = (data.config?.stream ?? {}) as Record<string, any>
+    formTitle.value = String(stream.default_title ?? '')
+    formCategory.value = String(stream.default_category ?? '')
+    formTags.value = Array.isArray(stream.default_tags) ? [...stream.default_tags] : []
+  } catch (e) {
+    settingsError.value = describeError(e)
+  } finally {
+    settingsBusy.value = false
+  }
+}
+
+async function saveSettings(): Promise<void> {
+  settingsError.value = ''
+  settingsBusy.value = true
+  try {
+    if (isRunning.value) {
+      const ok = await st.setMetadata(
+        formTitle.value,
+        formCategory.value,
+        formTags.value,
+      )
+      if (!ok) {
+        settingsError.value = st.error.value
+        return
+      }
+    } else {
+      // vedal 的全量语义（同 config.vue）：读整份 → 只改 stream.default_* → PUT 回去
+      const data = await api<{ config: Record<string, any> }>('/manage/config')
+      const cfg = data.config ?? {}
+      cfg.stream = cfg.stream ?? {}
+      cfg.stream.default_title = formTitle.value
+      cfg.stream.default_category = formCategory.value
+      cfg.stream.default_tags = [...formTags.value]
+      await api('/manage/config', {
+        method: 'PUT',
+        body: JSON.stringify({ config: cfg }),
+      })
+    }
+    settingsOpen.value = false
+  } catch (e) {
+    settingsError.value = describeError(e)
+  } finally {
+    settingsBusy.value = false
+  }
+}
+
+// ---------- 错误 snackbar（409 等都走这里） ----------
+
+const snackbar = ref(false)
+const snackbarText = ref('')
+
+function showSnack(message: string): void {
+  snackbarText.value = message
+  snackbar.value = true
+}
+
+watch(
+  () => st.error.value,
+  (message) => {
+    if (message) showSnack(message)
+  },
+)
+
+// ---------- 轮询 ----------
+
+let statusTimer: number | null = null
+let sceneTimer: number | null = null
+
+function startPolling(): void {
+  if (statusTimer !== null) return
   void st.refreshStatus()
   void st.refreshSessions()
-  timer = window.setInterval(() => {
+  void st.refreshScenes()
+  statusTimer = window.setInterval(() => {
     void st.refreshStatus()
     void st.refreshSessions()
   }, 3000)
+  // 场景清单 / neuro 内部层不是高频数据：5s，别给后端加压力
+  sceneTimer = window.setInterval(() => {
+    void st.refreshScenes()
+    void refreshNeuroScenes()
+    void refreshStreamManifest()
+  }, 5000)
 }
 
-function stopPolling() {
-  if (timer !== null) {
-    window.clearInterval(timer)
-    timer = null
+function stopPolling(): void {
+  if (statusTimer !== null) {
+    window.clearInterval(statusTimer)
+    statusTimer = null
+  }
+  if (sceneTimer !== null) {
+    window.clearInterval(sceneTimer)
+    sceneTimer = null
   }
 }
 
 watch(
   () => status.reachable.value,
-  (r) => (r ? startPolling() : stopPolling()),
+  (reachable) => (reachable ? startPolling() : stopPolling()),
 )
 
 onMounted(() => {
+  window.addEventListener('message', onCanvasMessage)
   void st.refreshScenes()
+  void refreshNeuroScenes()
+  void refreshStreamManifest(true)
   if (status.reachable.value) startPolling()
 })
-onUnmounted(stopPolling)
+
+onUnmounted(() => {
+  window.removeEventListener('message', onCanvasMessage)
+  stopPolling()
+  discardPendingManifest()
+})
 </script>
 
 <style scoped>
-.stream-page {
-  max-width: 960px;
-  margin: 0 auto;
-  padding: 8px 0 32px;
+.studio-page {
+  display: flex;
+  flex-direction: column;
+  /* fullBleed：App.vue 让 v-main 成为固定高度 flex 容器，页面直接填满剩余空间
+     （不能再减顶栏/v-container padding——这条链由 .tw-main--fullbleed 闭合）。 */
+  flex: 1 1 0;
+  min-height: 0;
 }
-.stream-loading {
+
+.studio-loading {
+  flex: 1;
   display: flex;
   align-items: center;
   justify-content: center;
-  min-height: 50vh;
+}
+
+.studio-canvas {
+  flex: 1 1 0;
+  min-height: 0;
+  position: relative;
+  background: #000;
+  display: flex;
+}
+
+.studio-canvas__iframe {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  border: 0;
+  background: #000;
+}
+
+.studio-dock {
+  flex: 0 0 auto;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 8px 0 0;
+}
+
+.studio-card {
+  flex: 1 1 210px;
+  min-width: 200px;
+  height: 240px;
+  display: flex;
+  flex-direction: column;
+}
+
+.studio-card__title {
+  display: flex;
+  align-items: center;
+  font-size: 0.875rem;
+  min-height: 40px;
+  padding: 0 12px;
+}
+
+.studio-card__body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 8px 12px 12px;
+  font-size: 0.8125rem;
+}
+
+.studio-card__body--flush {
+  padding-top: 2px;
+}
+
+.studio-card__actions {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 2px 6px 4px;
+  border-top: 1px solid rgba(var(--v-border-color), var(--v-border-opacity));
+}
+
+.studio-scene-row,
+.studio-element-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 30px;
+  padding: 2px 6px;
+  border-radius: 4px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.studio-scene-row + .studio-scene-row,
+.studio-element-row + .studio-element-row {
+  margin-top: 2px;
+}
+
+.studio-scene-row:hover,
+.studio-element-row:hover {
+  background: rgba(var(--v-theme-on-surface), 0.06);
+}
+
+.studio-scene-row--current {
+  background: rgb(var(--v-theme-primary));
+  color: rgb(var(--v-theme-on-primary));
+}
+
+.studio-scene-row--current:hover {
+  background: rgb(var(--v-theme-primary));
+}
+
+.studio-scene-row--selected,
+.studio-element-row--selected {
+  background: rgba(var(--v-theme-primary), 0.14);
+}
+
+.studio-element-row--readonly {
+  opacity: 0.55;
+}
+
+.studio-color-block {
+  width: 16px;
+  height: 16px;
+  border-radius: 3px;
+  flex: 0 0 auto;
+  border: 1px solid rgba(var(--v-border-color), 0.6);
+}
+
+.studio-menu-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 2000;
+}
+
+.studio-menu {
+  position: fixed;
+  z-index: 2001;
+  min-width: 140px;
+  background: rgb(var(--v-theme-surface));
+  border-radius: 4px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.24);
+}
+
+.studio-json :deep(textarea) {
+  font-family: 'Roboto Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  tab-size: 2;
 }
 </style>

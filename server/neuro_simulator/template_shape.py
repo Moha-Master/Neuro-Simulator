@@ -59,6 +59,7 @@ STREAM_SHAPE = Shape(
             "highlight_cursor": T("int", "none"),
             "highlight_paused": T("bool"),
             "highlight_source": T("str", "none"),
+            "recording": T("bool"),
             "intro": T("dict", "none"),
             "last_error": T("str", "none"),
             "started_at": T("str", "none"),

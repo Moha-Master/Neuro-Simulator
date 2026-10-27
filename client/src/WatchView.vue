@@ -1,9 +1,3 @@
-<route lang="json">
-{
-  "meta": { "fullBleed": true }
-}
-</route>
-
 <template>
   <div class="twitch-shell" :class="isDark ? 'tw-dark' : 'tw-light'">
     <div v-if="!status.checked.value" class="twitch-loading">
@@ -20,7 +14,7 @@
       <!-- 左列：播放器自适应剩余高度（画面在 iframe 内自行 letterbox），
            频道信息恒显其下，整页无滚动条（Twitch 首屏模型） -->
       <div class="twitch-watch__main">
-        <TwitchOfflinePanel v-if="isOffline" />
+        <TwitchOfflinePanel v-if="!isLive" />
         <div v-else class="twitch-player">
           <iframe
             :src="uiUrl"
@@ -34,15 +28,17 @@
           :title="title"
           :category="category"
           :tags="tags"
-          :state="state"
+          :state="channelState"
           :started-at="startedAt"
           :audience="audience"
         />
       </div>
 
-      <!-- 右列：Twitch 聊天栏（旧 client 离线时整个聊天侧栏隐藏） -->
+      <!-- 右列：Twitch 聊天栏。
+           判据与画面区一致 = metadata.live：正常开播 starting 起观众就能看开场 +
+           聊天；record（模拟直播）metadata.live 恒 false，整个观看页完全离线。 -->
       <TwitchChatPanel
-        v-if="!isOffline"
+        v-if="isLive"
         v-model:collapsed="chatCollapsed"
         :messages="chatMessages"
         :active="chatActive"
@@ -52,7 +48,7 @@
 
       <!-- 折叠后的展开按钮（浮在播放器右上角） -->
       <button
-        v-if="chatCollapsed && !isOffline"
+        v-if="chatCollapsed && isLive"
         class="twitch-expand-chat"
         type="button"
         title="展开聊天"
@@ -70,7 +66,6 @@
 
 <script lang="ts" setup>
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
-import { useTheme } from 'vuetify'
 import ModuleOffline from '@/components/ModuleOffline.vue'
 import TwitchChannelInfo from '@/components/twitch/TwitchChannelInfo.vue'
 import TwitchChatPanel from '@/components/twitch/TwitchChatPanel.vue'
@@ -80,9 +75,9 @@ import { useChatIdentity } from '@/composables/chatIdentity'
 import { useModuleStatus } from '@/composables/useModuleStatus'
 import { useStream } from '@/composables/useStream'
 import { useStreamChat } from '@/composables/useStreamChat'
+import { isDark } from '@/theme'
 
 const status = useModuleStatus('stream')
-const theme = useTheme()
 
 const { status: streamStatus, error: streamError, refreshStatus, postMessage } = useStream()
 const {
@@ -94,10 +89,9 @@ const {
 } = useStreamChat()
 const { username: chatUsername } = useChatIdentity()
 
-// 合成器是 dashboard 构建里的独立页面（与 neuro 窗口同一个构建）
+// 合成器是 dashboard 构建里的独立页面（与 neuro 窗口同一个构建），
+// 经 vedal origin 访问时 `/ui/stream/` 才是对的；直连 :8200/view 时由页面降级兜住。
 const uiUrl = '/ui/stream/'
-
-const isDark = computed(() => theme.global.current.value.dark)
 
 const state = computed(
   // 轮询拿到的是**进程级**生命周期，比 iframe 转发的 chatState 更可靠：
@@ -105,7 +99,13 @@ const state = computed(
   // 若这里让 chatState 优先就会永久停在 offline（iframe 永远不再挂载）。
   () => streamStatus.value?.sections.loop.current?.state || chatState.value || 'offline',
 )
-const isOffline = computed(() => state.value === 'offline')
+
+/** 对外是否在播：唯一判据 = `metadata.live`（有场次且非 record）。
+ *  正常开播 starting 起就为 true——观众要能看开场；record 全程 false，
+ *  观看页因此完全离线（离线面板、无聊天栏）。 */
+const isLive = computed(() => Boolean(streamStatus.value?.sections.metadata.current?.live))
+/** 频道信息条：非 live（record/待机）不显示 LIVE 徽标与直播详情。 */
+const channelState = computed(() => (isLive.value ? state.value : 'offline'))
 
 const title = computed(
   () => chatMetadata.value.title || streamStatus.value?.sections.metadata.current?.title || '',
@@ -133,7 +133,7 @@ const startedAt = computed(() => {
 const chatActive = computed(
   () =>
     chatSessionActive.value ||
-    (Boolean(streamStatus.value?.sections.loop.current?.session_id) && state.value !== 'offline'),
+    (Boolean(streamStatus.value?.sections.loop.current?.session_id) && isLive.value),
 )
 
 // 折叠状态与 Twitch 一样持久化

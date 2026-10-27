@@ -104,10 +104,11 @@ class TestManifestOwnership(unittest.TestCase):
         overview = next(s for s in scene_catalog.overview() if s["id"] == "room")
         self.assertNotIn("box", overview["elements"][0], "概览是子集，不带 box")
 
-    def test_dashboard_overview_stays_a_subset(self):
+    def test_dashboard_overview_lists_all_scenes(self):
         ids = {s["id"] for s in scene_catalog.overview()}
         self.assertIn("room", ids)
-        self.assertNotIn("room_intro", ids, "hidden 内部场景不进 dashboard 清单")
+        self.assertIn("starting_soon", ids, "全部场景都可手动切换，不再过滤")
+        self.assertIn("room_intro", ids)
 
 
 class TestSceneValidation(unittest.TestCase):
@@ -159,6 +160,16 @@ class TestSceneValidation(unittest.TestCase):
 
     def test_rejects_bad_neuro_hide(self):
         self.bad(lambda data: data["scenes"][0]["neuro"].update(hide="bg_room"))
+
+    def test_scene_level_hidden_is_normalized_away(self):
+        import copy
+
+        data = copy.deepcopy(MANIFEST)
+        data["scenes"][0]["hidden"] = True
+        data["scenes"][0]["neuro"]["hidden"] = True
+        scene_catalog._validate(data)
+        self.assertNotIn("hidden", data["scenes"][0], "场景级 hidden 保存时剥键")
+        self.assertTrue(data["scenes"][0]["neuro"]["hidden"], "neuro.hidden 保留")
 
     def test_rejects_missing_neuro_geometry(self):
         self.bad(lambda data: data["scenes"][0]["neuro"].pop("w"))

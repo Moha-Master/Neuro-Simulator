@@ -3,7 +3,7 @@
 场景（背景/游戏/chat + neuro 窗口配置）是**服务端的数据**
 （`stream/defaults/scenes.json`，包内数据文件），服务端做五件事：
 
-1. 校验切场景的 id 是否存在且不是 `hidden` 内部场景（`POST /scene`、`on_scene`）；
+1. 校验切场景的 id 是否存在（`POST /scene`、`on_scene`）；
 2. 把清单（id/label/icon + 元素概览）交给 dashboard 渲染只读预览，**加场景只改一处**；
 3. 提供场景的 `prompt_context`，让 `{{scene_context}}` 随场景变（玩 Wordle 时她知道
    自己在猜词，但棋盘细节仍只从工具返回里看）；
@@ -128,14 +128,8 @@ def require(scene_id: str) -> Dict[str, Any]:
     return scene
 
 
-def hidden(scene_id: str) -> bool:
-    """是否为内部场景：只能程序化 on_scene，不允许 dashboard/API 手动选择。"""
-    scene = find(scene_id)
-    return bool(scene and scene.get("hidden") is True)
-
-
 def label(scene_id: Optional[str]) -> Optional[str]:
-    """场景的人类可读名（hidden 场景也认，供控制面显示当前场景）。"""
+    """场景的人类可读名（供控制面显示当前场景）。"""
     scene = find(scene_id)
     if scene is None:
         return None
@@ -143,7 +137,7 @@ def label(scene_id: Optional[str]) -> Optional[str]:
 
 
 def icon(scene_id: Optional[str]) -> Optional[str]:
-    """场景图标（hidden 场景也认）；数据没写则 None，由调用方决定回退。"""
+    """场景图标；数据没写则 None，由调用方决定回退。"""
     scene = find(scene_id)
     if scene is None:
         return None
@@ -256,7 +250,6 @@ def overview() -> List[Dict[str, Any]]:
             ],
         }
         for s in load_scenes()
-        if s.get("hidden") is not True
     ]
 
 
@@ -293,6 +286,9 @@ def _validate(data: Any) -> None:
     for scene in items:
         if not isinstance(scene, dict):
             raise SceneError("场景必须是对象")
+        # 场景级 hidden 字段已废除：旧库里的残留键在保存/加载校验时静默剥掉。
+        # 注意 `neuro.hidden`（神经窗口整窗不显示）是元素层属性，那个保留。
+        scene.pop("hidden", None)
         sid = str(scene.get("id") or "").strip()
         if not sid:
             raise SceneError("场景缺少 id")

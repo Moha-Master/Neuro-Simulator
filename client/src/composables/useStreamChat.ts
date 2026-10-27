@@ -1,5 +1,5 @@
 import { computed, onMounted, onUnmounted, ref } from 'vue'
-import { api } from '@/stores/connection'
+import { api } from '@/api'
 import type { QueueMessage } from '@/types/stream'
 
 /** 聊天只保留最近 N 条（Twitch 同样只保留有限历史，避免 DOM 无限增长）。 */

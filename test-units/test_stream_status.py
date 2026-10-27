@@ -179,6 +179,7 @@ class TestStreamStatus(unittest.IsolatedAsyncioTestCase):
         app = create_app()
         app.state.status_board = self.board
         app.state.loop = self.loop
+        app.state.storage = self.storage
         return app
 
     def _status(self) -> dict:
@@ -414,6 +415,45 @@ class TestStreamStatus(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(plain(ctx), "模板 context 里混进了业务对象")
         self.assertIn("metadata", ctx["stream_status"])
 
+    async def test_record_mode_is_running_but_never_live(self):
+        """live = 有场次且非 record：record 全程 false（含 starting/live/paused）。"""
+        self.loop.session = {
+            "session_id": "s1",
+            "queue_id": "q1",
+            "channel": "stream",
+            "conversation_id": "c1",
+            "cursor": 0,
+            "highlight_cursor": 0,
+            "rounds": 0,
+        }
+        self.loop.recording = True
+        for state in ("starting", "live", "paused"):
+            self.loop.state = state
+            body = self._status()
+            self.assertTrue(body["sections"]["loop"]["current"]["recording"])
+            self.assertFalse(
+                body["sections"]["metadata"]["current"]["live"],
+                f"record 在 {state} 时也必须对外离线",
+            )
+
+        self.loop.recording = False
+        for state in ("starting", "live", "paused"):
+            self.loop.state = state
+            body = self._status()
+            self.assertFalse(body["sections"]["loop"]["current"]["recording"])
+            self.assertTrue(
+                body["sections"]["metadata"]["current"]["live"],
+                f"正常开播在 {state} 时观众可见（starting 要看开场）",
+            )
+
+    async def test_sessions_endpoint_carries_recording(self):
+        queue_row, _ = await self.storage.create_queue("recording test")
+        await self.storage.create_session(
+            queue_row, "stream", "conv-rec", recording=True
+        )
+        rows = TestClient(self._app()).get("/stream/sessions").json()["sessions"]
+        self.assertEqual(rows[0]["recording"], 1)
+
     async def test_rev_bumps_on_note_change(self):
         before = self._status()["rev"]
         self.loop._touch("loop")
@@ -427,6 +467,11 @@ class TestStreamStatus(unittest.IsolatedAsyncioTestCase):
         self.assertIn(
             {"from": "starting", "to": "offline", "by": "intro_timeout or POST /stream/stop"},
             graph["transitions"],
+        )
+        self.assertNotIn(
+            {"from": "offline", "to": "live", "by": "start (record)"},
+            graph["transitions"],
+            "record 不再分叉，状态机与正常开播一致",
         )
         blob = json.dumps(self._status(), ensure_ascii=False)
         self.assertNotIn("audio", blob)

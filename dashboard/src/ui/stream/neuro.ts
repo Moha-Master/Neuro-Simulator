@@ -31,6 +31,12 @@ export class NeuroLayer {
   private ready = false
   private available = true
   private feedReady = false
+  /** 父页面下发的语音音量（合成器本身没有音频；只有 neuro 窗口的 speech 播放）。 */
+  private volume = 1
+  private muted = false
+  /** 父页面（Studio 源 dock）下发的额外隐藏：`neuro.window` / `neuro.layer:<id>`。
+   *  与场景声明的 `hide` 取并集——外部只能"再隐藏"，不能强制显示。 */
+  private externalHidden: string[] = []
   private observer: ResizeObserver | null = null
   /** iframe 表示愿意接收 feed 后触发（main.ts 用它补发 snapshot）。 */
   onFeedReady?: () => void
@@ -97,6 +103,21 @@ export class NeuroLayer {
     this.applyVisible()
   }
 
+  /** 父页面（Studio）的额外隐藏集合：整个窗口 `neuro.window` 或内部层
+   *  `neuro.layer:<id>`。与场景 `hide` 并集后下发；**不会**取消场景声明的隐藏。 */
+  setExternalHidden (ids: string[]): void {
+    this.externalHidden = Array.isArray(ids) ? ids.slice() : []
+    this.applyVisible()
+  }
+
+  /** 语音音量（0..1）+ 静音：转给 neuro iframe 的 speech 播放器。
+   *  与 visibility 同一份 `neuro-window` 协议，iframe ready 后补发。 */
+  setVolume (value: number, muted: boolean): void {
+    this.volume = Math.min(1, Math.max(0, Number.isFinite(value) ? value : 1))
+    this.muted = Boolean(muted)
+    this.sendVolume()
+  }
+
   /** 把一帧画面事件转发给 iframe（远程模式；未握手前静默丢弃）。 */
   forward (event: unknown): void {
     if (!this.feedReady) {
@@ -139,6 +160,7 @@ export class NeuroLayer {
     if (data.type === 'ready') {
       this.ready = true
       this.applyVisibility()
+      this.sendVolume()
       return
     }
     if (data.type === 'feed_ready') {
@@ -190,7 +212,11 @@ export class NeuroLayer {
   }
 
   private applyVisible (): void {
-    const visible = !!this.config && !this.config.hidden && this.available
+    const visible
+      = !!this.config
+      && !this.config.hidden
+      && this.available
+      && !this.externalHidden.includes('neuro.window')
     this.wrap.style.display = visible ? 'block' : 'none'
     if (visible) {
       this.fit()
@@ -204,12 +230,29 @@ export class NeuroLayer {
     }
     // 只发"要隐藏哪些层 id"：neuro 窗口对它自己场景里的每一层应用这个集合，
     // 所以新增一层（贴纸/告警横幅…）不必回头改这里的枚举。
+    // 外部隐藏与场景声明取并集：父页面只能再隐藏，不能把脚本控制的层点亮。
+    const hidden = new Set(this.config.hide ?? [])
+    for (const id of this.externalHidden) {
+      if (id.startsWith('neuro.layer:')) {
+        hidden.add(id.slice('neuro.layer:'.length))
+      }
+    }
     this.frame.contentWindow?.postMessage(
       {
         ns: 'neuro-window',
         type: 'visibility',
-        hidden: this.config.hide ?? [],
+        hidden: [...hidden],
       },
+      '*',
+    )
+  }
+
+  private sendVolume (): void {
+    if (!this.ready) {
+      return
+    }
+    this.frame.contentWindow?.postMessage(
+      { ns: 'neuro-window', type: 'volume', value: this.volume, muted: this.muted },
       '*',
     )
   }

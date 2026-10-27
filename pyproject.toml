@@ -57,14 +57,17 @@ dev = [
 ]
 chess = ["esca>=0.4"]
 
-# 前端构建 hook：只有一个前端工程（dashboard）；client 部分仍保持禁用（待 client 重写后恢复）
+# 前端构建 hook：dashboard（主应用 + /ui/ 两个画面入口）与 client（观看页 /view）。
 [tool.hatch.build.hooks.custom]
 path = "hatch_build.py"
 
 [tool.hatch.build.targets.wheel]
 sources = ["server"]
-# 前端只有一个工程：dashboard（神经窗口 /ui/neuro/ 与直播合成器 /ui/stream/
-# 是同一个构建里的两个独立 HTML 入口，代码在 dashboard/src/ui/）。
-# wheel 只带编译后的 dashboard；神经窗口的开场视频作为模块数据随包分发
-# （neuro_sama/assets/neuro_start.mp4——后端要探测它的时长）。
-force-include = { "dashboard/dist" = "neuro_simulator/dashboard" }
+# wheel 带两个前端的编译产物：
+# - dashboard/dist → neuro_simulator/dashboard（vedal 托管主应用与 /ui/ 画面入口）
+# - client/dist    → neuro_simulator/stream/client（stream 挂在 /view）
+# 神经窗口的开场视频作为模块数据随包分发（neuro_sama/assets/neuro_start.mp4）。
+force-include = {
+  "dashboard/dist" = "neuro_simulator/dashboard",
+  "client/dist" = "neuro_simulator/stream/client",
+}

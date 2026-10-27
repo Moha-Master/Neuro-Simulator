@@ -13,7 +13,7 @@
  *
  * 字幕/音频/立绘动作来自后端转发的 `neuro {plane, event, data}` 帧：本页把它
  * 通过 postMessage 喂给 neuro iframe（iframe 因此不建自己的 SSE）。同时本页
- * 作为子页面被 `/stream-view` 嵌入时，把收到的每一条事件与最近一次 snapshot
+ * 作为子页面被观看页（client /view）嵌入时，把收到的每一条事件与最近一次 snapshot
  * 用 `{ns:'stream-feed', ...}` 转发给父页面。
  *
  * 这个页面是**独立文档**（不是 dashboard 的 Vue 路由）：OBS 浏览器源要的是一个
@@ -80,7 +80,14 @@ export async function bootstrapStream (stage: HTMLElement): Promise<void> {
     actions: ACTIONS,
     assetUrl: makeAssetUrl(),
   })
-  await engine.setScene(SCENE_STARTING_SOON, { instant: true })
+  // 场景可以删：首帧优先 starting_soon，被删了就挑一个带 chat 的（聊天层实例要建好），
+  // 再不行用清单第一项。清单本身保证非空。
+  const initialScene = sceneMap.has(SCENE_STARTING_SOON)
+    ? SCENE_STARTING_SOON
+    : scenes.find(s => (s.elements ?? []).some(e => e.id === 'chat'))?.id ?? scenes[0]?.id
+  if (initialScene) {
+    await engine.setScene(initialScene, { instant: true })
+  }
 
   // 实时管线组件从元素引擎取（starting_soon 也声明了 chat，保证实例先建好）
   const chat = engine.view<ChatOverlay>('chat')
@@ -95,7 +102,46 @@ export async function bootstrapStream (stage: HTMLElement): Promise<void> {
   let healthUrl = ''
   let healthTimer: number | null = null
 
-  // ---------- 父页面转发（/stream-view 嵌入时）----------
+  // ---------- stream-canvas 协议（父页面 → 本合成器）----------
+  // 字段名与 dashboard 的 OBS 页（pages/stream.vue）以及 neuro 窗口的监听逐字一致：
+  //   {ns:"stream-canvas", type:"visibility", hidden: string[]}
+  //   {ns:"stream-canvas", type:"volume", value: number, muted: boolean}
+  //   {ns:"stream-canvas", type:"ready"}        ← 本页 → 父页面（挂载完成后一次）
+  // 只隐藏不显示；与场景数据取交集（父页面可能残留上一个场景的元素 id）。
+  let externalHidden: string[] = []
+  let canvasVolume = 1
+  let canvasMuted = false
+
+  function applyExternalHidden (): void {
+    const ids = new Set((engine.current?.elements ?? []).map(el => el.id))
+    // 场景元素只取当前场景仍存在的 id（父页面可能残留上一个场景的 id）。
+    // `neuro.*` 是合成器扩展命名空间：整体窗口 / 内部层，交给 NeuroLayer 合并。
+    engine.setHidden(externalHidden.filter(id => ids.has(id)))
+    neuro?.setExternalHidden(externalHidden)
+  }
+
+  window.addEventListener('message', (event: MessageEvent) => {
+    // 只认父页面（dashboard/vedal 顶层页）；neuro iframe 自己转发的帧不回头处理。
+    if (window.parent === window || event.source !== window.parent) {
+      return
+    }
+    const data = event.data as
+      | { ns?: string, type?: string, hidden?: string[], value?: number, muted?: boolean }
+      | undefined
+    if (data?.ns !== 'stream-canvas') {
+      return
+    }
+    if (data.type === 'visibility') {
+      externalHidden = Array.isArray(data.hidden) ? data.hidden : []
+      applyExternalHidden()
+    } else if (data.type === 'volume') {
+      canvasVolume = Math.min(1, Math.max(0, Number(data.value ?? 1)))
+      canvasMuted = Boolean(data.muted)
+      neuro?.setVolume(canvasVolume, canvasMuted)
+    }
+  })
+
+  // ---------- 父页面转发（观看页嵌入时）----------
   // 本页在 OBS 直载时是顶层文档；被 Vue 观看页嵌入时是 iframe，父页面替它
   // 展示聊天栏/标题，但不再自己连 SSE。
   const parent = window.parent !== window ? window.parent : null
@@ -192,7 +238,7 @@ export async function bootstrapStream (stage: HTMLElement): Promise<void> {
 
   /** neuro 场景的当前快照（scene + layers）。
    *
-   *  `/stream-view` 在开播后才挂载合成器时，neuro iframe 会在 intro 中途才握手；
+   *  观看页在开播后才挂载合成器时，neuro iframe 会在 intro 中途才握手；
    *  `NeuroMirror` 缓存里的 `scene.elapsed` 是场景切换那一刻的 0（状态总线按设计
    *  不推时间流逝），直接补发会让 iframe 从 0 重播，`rise_in` 被后端切回 normal
    *  的时机截断，看起来就是"直接跳到常态"。握手时拉一次权威 `/status` 拿现在
@@ -297,6 +343,8 @@ export async function bootstrapStream (stage: HTMLElement): Promise<void> {
     } else {
       neuro = new NeuroLayer(stage!, { uiUrl: next.uiUrl, channel: next.channel })
       applySceneNeuro()
+      neuro.setExternalHidden(externalHidden)
+      neuro.setVolume(canvasVolume, canvasMuted)
     }
     neuro.onFeedReady = () => {
       neuroNeedsSnapshot = true
@@ -309,9 +357,16 @@ export async function bootstrapStream (stage: HTMLElement): Promise<void> {
     id: string,
     opts: { instant?: boolean, elapsed?: number, duration?: number } = {},
   ): Promise<void> {
+    // 循环/脚本可能还指向刚被删掉的场景：保持当前画面不动，不白屏。
+    if (!sceneMap.has(id)) {
+      console.warn(`忽略不存在的场景: ${id}（保持当前画面）`)
+      return
+    }
     try {
       await engine.setScene(id, opts)
       applySceneNeuro()
+      // 切场景 = 元素清单变了：外部隐藏集合按新场景重新取交集
+      applyExternalHidden()
     } catch (error) {
       console.warn(`场景切换失败: ${id}`, error)
     }
@@ -413,7 +468,7 @@ export async function bootstrapStream (stage: HTMLElement): Promise<void> {
     // iframe 可能在这个 snapshot 之前就完成握手（例如热更新）；补一次基线
     neuroNeedsSnapshot = true
     pushNeuroSnapshot()
-    // 父页面（/stream-view）可能在 iframe 就绪前就注册了监听，早发的 ready 会丢；
+    // iframe 就绪前父页面可能 iframe 就绪前就注册了监听，早发的 ready 会丢；
     // 这里反向通知一次"基线已就绪"，让它按需请求（同一份 snapshot 只回一次）
     toParent('hello', null)
   })
@@ -498,5 +553,11 @@ export async function bootstrapStream (stage: HTMLElement): Promise<void> {
     setScene,
     ensureNeuro,
     isNeuroHealthy: () => neuroHealthy,
+  }
+
+  // 被 OBS 页 / 观看页嵌入时通知父页面：可以补发 visibility/volume 了
+  // （父页面在 iframe 装载前就持有状态，早发的消息会丢）。
+  if (window.parent !== window) {
+    window.parent.postMessage({ ns: 'stream-canvas', type: 'ready' }, '*')
   }
 }

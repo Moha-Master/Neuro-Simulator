@@ -30,9 +30,5 @@ declare module 'vue' {
     TagInput: typeof import('./components/tags/TagInput.vue')['default']
     ThinkingBlock: typeof import('./components/chat/ThinkingBlock.vue')['default']
     ToolCallBlock: typeof import('./components/chat/ToolCallBlock.vue')['default']
-    TwitchChannelInfo: typeof import('./components/twitch/TwitchChannelInfo.vue')['default']
-    TwitchChatPanel: typeof import('./components/twitch/TwitchChatPanel.vue')['default']
-    TwitchIcon: typeof import('./components/twitch/TwitchIcon.vue')['default']
-    TwitchOfflinePanel: typeof import('./components/twitch/TwitchOfflinePanel.vue')['default']
   }
 }

@@ -41,6 +41,8 @@ export interface SessionRow {
   ended_at: string | null
   rounds: number
   tags?: string[]
+  /** 1 = 模拟直播（录制/排练），0 = 正常直播 */
+  recording?: number | boolean
 }
 
 /** 场景里的一个元素（清单来自画面侧 scenes.json，服务端只做概览转发）。 */

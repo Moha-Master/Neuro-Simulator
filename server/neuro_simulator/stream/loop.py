@@ -150,6 +150,9 @@ class StreamLoop:
         self.templates = templates
         self.chatbot = ChatbotManager(storage, persona, templates)
         self.state: str = STATE_OFFLINE
+        # 模拟直播（录制排练）：与正常开播走完全相同的运行时路径（intro/starting/live），
+        # 唯一区别是 `metadata.live` 投影为 False（对外呈现不在线）。
+        self.recording: bool = False
         self.session: Optional[dict[str, Any]] = None
         self.last_scene: Optional[str] = None
         # 合成器场景的权威状态：进入时刻与时长供 scene_set / snapshot 断点恢复
@@ -355,7 +358,15 @@ class StreamLoop:
         title: Optional[str] = None,
         category: Optional[str] = None,
         tags: Optional[list[str]] = None,
+        *,
+        record: bool = False,
     ) -> dict[str, Any]:
+        """开播。`record=True` 是**模拟直播**：与正常开播走完全相同的流程
+        （intro → starting → live），唯一区别是 `metadata.live` 投影为 False。
+
+        `running`（state ∈ starting/live/paused）与 `live`（对外宣称开播）是两件事：
+        模拟直播的场次/开场/循环与正常开播逐字节一致，只是录制/排练不上台。
+        """
         if self.state != STATE_OFFLINE:
             raise StreamConflict(f"直播已在进行中（state={self.state}），先停止再开始")
         try:
@@ -400,6 +411,7 @@ class StreamLoop:
             title=meta_title,
             category=meta_category,
             tags=meta_tags,
+            recording=record,
         )
         self.session = {
             "session_row": session_row,
@@ -415,6 +427,9 @@ class StreamLoop:
             "category": meta_category,
             "tags": meta_tags,
         }
+        # 必须在任何 await 之前落旗标：metadata.live 判据是
+        # `session is not None and not recording`，否则 record 会有一瞬被判为 live。
+        self.recording = bool(record)
         # 供 /stream/status 的 loop.started_at / loop.persisted（无 I/O 投影）；
         # 新队列从空开始，深度与最近消息 id 都归零。
         self.persisted = await self.storage.get_session(session_id)
@@ -427,12 +442,15 @@ class StreamLoop:
         self.highlight_paused = False
         self.highlight_source = None
         self._touch("loop", "chat")
-        self.state = STATE_STARTING
-        self._stop_event.clear()
-        self._wakeup.clear()
-        self.last_scene = SCENE_ROOM_INTRO
         # 上一次开播的异常原因不跨场次留痕（dashboard 关心的是"这一次怎么样了"）
         self.last_error = None
+        self._stop_event.clear()
+        self._wakeup.clear()
+
+        # record 与正常开播走**完全相同**的运行时路径：一律 starting + room_intro +
+        # 开场闸门；唯一区别是 `recording` 旗标（metadata.live 投影为 False）。
+        self.state = STATE_STARTING
+        self.last_scene = SCENE_ROOM_INTRO
         self._intro_gate = {
             "waiting_for": intro_scene,
             "neuro_scene": intro_scene,
@@ -442,7 +460,8 @@ class StreamLoop:
         }
         self.publish({"type": "session_begin", "session_id": session_id, "channel": s.channel,
                       "conversation_id": conversation_id,
-                      "title": meta_title, "category": meta_category, "tags": meta_tags})
+                      "title": meta_title, "category": meta_category, "tags": meta_tags,
+                      "recording": bool(record)})
         self._publish_state()
         # 合成器切到开场画面：开场视频此刻已经在 neuro iframe 里播放（POST /ui/intro 已触发），
         # 而 chat 不该盖在开场动画上（真实开场没有弹幕）。
@@ -904,6 +923,7 @@ class StreamLoop:
         session = self.session
         try:
             # neuro 场景订阅常驻在 NeuroMirror 里（进程启动即建立），这里只等开场闸门。
+            # 模拟直播与正常开播同样要等开场放完（record 只是不上台）。
             if not await self._await_intro_ready():
                 return  # 人工下播（静默）或开场超时（已记 last_error），都不进循环
             self.state = STATE_LIVE
@@ -945,6 +965,7 @@ class StreamLoop:
             await self.games.aclear()
         was = self.state
         self.state = STATE_OFFLINE
+        self.recording = False
         self._intro_gate = None
         if self.session is not None:
             await self.storage.update_session(

@@ -47,14 +47,18 @@ export function useStream() {
   async function action(
     kind: 'start' | 'pause' | 'resume' | 'stop',
     meta?: { title?: string; category?: string; tags?: string[] },
+    options?: { record?: boolean },
   ) {
     busy.value = true
     error.value = ''
     try {
       await api(`/manage/${MODULE}/stream/${kind}`, {
         method: 'POST',
-        // 只有 start 需要本场信息；其余保持无 body
-        ...(kind === 'start' ? { body: JSON.stringify(meta ?? {}) } : {}),
+        // 只有 start 需要本场信息；record=true 是模拟直播（同样走 intro/starting，
+        // 唯一区别是 metadata.live 恒 false）
+        ...(kind === 'start'
+          ? { body: JSON.stringify({ ...(meta ?? {}), ...(options?.record ? { record: true } : {}) }) }
+          : {}),
       })
       await Promise.all([refreshStatus(), refreshSessions()])
       return true
@@ -64,6 +68,11 @@ export function useStream() {
     } finally {
       busy.value = false
     }
+  }
+
+  /** 模拟直播（录制排练）：与正常开播走完全相同的流程，metadata.live 恒 false。 */
+  async function startRecord(meta?: { title?: string; category?: string; tags?: string[] }) {
+    return action('start', meta, { record: true })
   }
 
   /** 直播中修改本场标题 / 分区（→ 广播给画面，下一轮消息即生效）。 */
@@ -85,8 +94,7 @@ export function useStream() {
     }
   }
 
-  /** 手动切场景：dashboard 暂不提供按钮（避免与循环/游戏的自动切换打架），
-   *  端点仍然可用，需要时把按钮加回 Control 页即可。 */
+  /** 手动切场景（OBS Studio 的场景卡）。循环/游戏仍会自动切，手选可能被下一轮覆盖。 */
   async function setScene(id: string) {
     error.value = ''
     try {
@@ -200,6 +208,7 @@ export function useStream() {
     refreshScenes,
     refreshSessions,
     action,
+    startRecord,
     setMetadata,
     setScene,
     pollQueue,

@@ -84,6 +84,7 @@ class TestStreamStorageMigration(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn("priority_type", message_cols)
             self.assertIn("highlight_cursor", session_cols)
             self.assertNotIn("priority_cursor", session_cols)
+            self.assertIn("recording", session_cols)
 
             messages = await storage.list_messages(1)
             self.assertEqual(messages[0]["highlight_type"], "bits")
@@ -98,6 +99,7 @@ class TestStreamStorageMigration(unittest.IsolatedAsyncioTestCase):
 
             session = await storage.get_session("s1")
             self.assertEqual(session["highlight_cursor"], 1)
+            self.assertEqual(session["recording"], 0, "旧场次默认不是模拟直播")
         finally:
             await storage.close()
 

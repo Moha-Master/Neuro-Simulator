@@ -73,6 +73,9 @@ node_modules/
 
 # Build output
 # /dist/ # 保留，因为这是Vite前端的构建输出目录
+# 观看前端（client）是独立工程：依赖与产物都不入库
+client/node_modules/
+client/dist/
 /release/
 /out/
 /.vitepress/dist/
@@ -133,3 +136,4 @@ AGENTS.md
 TODO.md
 .playwright-cli/
 references/
+scripts/

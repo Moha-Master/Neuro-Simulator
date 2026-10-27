@@ -1,8 +1,9 @@
-"""前端结构契约：合并成**一份**前端之后要守住的东西。
+"""前端结构契约：页面拆分之后要守住的东西。
 
 过去两个前端工程各持一份逐字相同的元素引擎，靠 `test_ui_engine_parity.py`
 防漂移；现在引擎只有一份（`dashboard/src/ui/engine/`），那份测试就没意义了。
-但合并引入了新的风险面，换成这个测试来守：
+观看页单独成工程（`client/`，无引擎），但画面/协议仍归 dashboard 构建。
+合并/拆分引入的新风险面，换成这个测试来守：
 
 1. **只有一份引擎**：旧的 `stream/ui`、`neuro_sama/ui` 前端工程必须已经消失
    （它们留在包内就等于"前端又分散回 Python 包了"）。
@@ -13,8 +14,8 @@
 4. **场景数据说要用什么，画面就得有**：场景里 `content.kind == "component"`
    的组件名必须在对应页面的组件注册表里；图片/视频素材必须真的存在
    （前端在 `dashboard/public/`，模块媒体在模块的 `assets/`）。
-5. **模块不再托管页面**：`/ui` 只剩 API（事件流/场景清单/媒体），静态页面
-   由 dashboard 的构建产物经 vedal 提供。
+5. **模块不托管画面页**：neuro 的 `/ui` 只剩 API；stream 只用 StaticFiles
+   挂客户端观看页 `/view`（HTML/JS/CSS），画面页仍由 dashboard 构建经 vedal 提供。
 """
 
 import json
@@ -24,6 +25,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 DASH = ROOT / "dashboard"
+CLIENT = ROOT / "client"
 ENGINE = DASH / "src/ui/engine/elements.ts"
 STREAM_UI = DASH / "src/ui/stream"
 NEURO_UI = DASH / "src/ui/neuro"
@@ -98,8 +100,9 @@ class TestStreamNeuroMirrorContract(unittest.TestCase):
         self.assertIn("new NeuroFeed()", src, "超时后必须能回退到本地自连")
         self.assertIn("interface FeedSource", src)
 
-    def test_stream_view_chat_has_no_event_source(self):
-        src = (DASH / "src/composables/useStreamChat.ts").read_text(encoding="utf-8")
+    def test_watch_view_chat_has_no_event_source(self):
+        """观看页（client）的聊天只吃合成器转发的消息，不自己建第二条 SSE。"""
+        src = (CLIENT / "src/composables/useStreamChat.ts").read_text(encoding="utf-8")
         self.assertNotIn("new EventSource", src)
         self.assertIn("'stream-feed'", src)
         self.assertIn("requestSnapshot", src)
@@ -181,11 +184,16 @@ class TestSingleFrontend(unittest.TestCase):
                         )
 
     def test_modules_no_longer_serve_static_pages(self):
-        """模块的 /ui 只剩 API：静态页面由 dashboard 构建产物提供。"""
+        """neuro 的 /ui 只剩 API；stream 额外用 StaticFiles 挂自托管观看页 /view。"""
         for server in (STREAM_SERVER, NEURO_SERVER):
             src = server.read_text(encoding="utf-8")
             self.assertNotIn('app.mount("/ui"', src, f"{server.name} 还在托管静态页面")
-            self.assertNotIn("StaticFiles", src, f"{server.name} 还挂着静态目录")
+        # neuro 仍然没有任何静态目录
+        self.assertNotIn("StaticFiles", NEURO_SERVER.read_text(encoding="utf-8"))
+        # stream 唯一的静态挂载是 client 的 /view（不是 /ui 画面页）
+        stream_src = STREAM_SERVER.read_text(encoding="utf-8")
+        self.assertIn('app.mount("/view", StaticFiles', stream_src)
+        self.assertIn("def client_dist", stream_src)
 
 
 if __name__ == "__main__":

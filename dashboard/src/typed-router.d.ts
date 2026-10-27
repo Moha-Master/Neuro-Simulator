@@ -31,8 +31,8 @@ declare module 'vue-router/auto-routes' {
     '/state': RouteRecordInfo<'/state', '/state', Record<never, never>, Record<never, never>>,
     '/stream': RouteRecordInfo<'/stream', '/stream', Record<never, never>, Record<never, never>>,
     '/stream-chatbot': RouteRecordInfo<'/stream-chatbot', '/stream-chatbot', Record<never, never>, Record<never, never>>,
+    '/stream-sessions': RouteRecordInfo<'/stream-sessions', '/stream-sessions', Record<never, never>, Record<never, never>>,
     '/stream-templates': RouteRecordInfo<'/stream-templates', '/stream-templates', Record<never, never>, Record<never, never>>,
-    '/stream-view': RouteRecordInfo<'/stream-view', '/stream-view', Record<never, never>, Record<never, never>>,
   }
 
   /**
@@ -98,12 +98,12 @@ declare module 'vue-router/auto-routes' {
       routes: '/stream-chatbot'
       views: never
     }
-    'src/pages/stream-templates.vue': {
-      routes: '/stream-templates'
+    'src/pages/stream-sessions.vue': {
+      routes: '/stream-sessions'
       views: never
     }
-    'src/pages/stream-view.vue': {
-      routes: '/stream-view'
+    'src/pages/stream-templates.vue': {
+      routes: '/stream-templates'
       views: never
     }
   }

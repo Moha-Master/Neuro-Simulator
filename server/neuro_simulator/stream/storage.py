@@ -51,7 +51,9 @@ CREATE TABLE IF NOT EXISTS sessions (
     rounds          INTEGER NOT NULL DEFAULT 0,
     title           TEXT,
     category        TEXT,
-    tags            TEXT
+    tags            TEXT,
+    -- 1 = 模拟直播（录制/排练）：循环照跑，但不播开场、metadata.live 为 False
+    recording       INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS ix_sessions_started ON sessions (started_at DESC);
 
@@ -152,6 +154,9 @@ class Storage:
         await self._ensure_column("sessions", "title", "title TEXT")
         await self._ensure_column("sessions", "category", "category TEXT")
         await self._ensure_column("sessions", "tags", "tags TEXT")
+        await self._ensure_column(
+            "sessions", "recording", "recording INTEGER NOT NULL DEFAULT 0"
+        )
 
     async def _columns(self, table: str) -> set[str]:
         cur = await self.db.execute(f"PRAGMA table_info({table})")
@@ -295,12 +300,13 @@ class Storage:
         title: Optional[str] = None,
         category: Optional[str] = None,
         tags: Optional[list[str]] = None,
+        recording: bool = False,
     ) -> tuple[int, str]:
         session_id = new_id()
         cur = await self.db.execute(
             "INSERT INTO sessions "
-            "(session_id, queue_row, channel, conversation_id, state, started_at, title, category, tags) "
-            "VALUES (?, ?, ?, ?, 'online', ?, ?, ?, ?) RETURNING id",
+            "(session_id, queue_row, channel, conversation_id, state, started_at, title, category, tags, recording) "
+            "VALUES (?, ?, ?, ?, 'online', ?, ?, ?, ?, ?) RETURNING id",
             (
                 session_id,
                 queue_row,
@@ -310,6 +316,7 @@ class Storage:
                 title,
                 category,
                 json.dumps(tags or [], ensure_ascii=False),
+                1 if recording else 0,
             ),
         )
         row = await cur.fetchone()
@@ -364,7 +371,7 @@ class Storage:
         cur = await self.db.execute(
             "SELECT s.id, s.session_id, s.queue_row, q.queue_id, s.channel, s.conversation_id, "
             "s.state, s.started_at, s.cursor_msg, s.highlight_cursor, s.rounds, "
-            "s.title, s.category, s.tags "
+            "s.title, s.category, s.tags, s.recording "
             "FROM sessions s JOIN queues q ON q.id=s.queue_row "
             "WHERE s.ended_at IS NULL ORDER BY s.id DESC LIMIT 1"
         )
@@ -374,7 +381,7 @@ class Storage:
     async def get_session(self, session_id: str) -> Optional[dict[str, Any]]:
         cur = await self.db.execute(
             "SELECT s.id, s.session_id, s.queue_row, q.queue_id, s.channel, s.conversation_id, "
-            "s.state, s.started_at, s.ended_at, s.highlight_cursor, s.rounds, s.title, s.category, s.tags "
+            "s.state, s.started_at, s.ended_at, s.highlight_cursor, s.rounds, s.title, s.category, s.tags, s.recording "
             "FROM sessions s JOIN queues q ON q.id=s.queue_row "
             "WHERE s.session_id=?",
             (session_id,),
@@ -396,7 +403,7 @@ class Storage:
     async def list_sessions(self, limit: int = 20) -> list[dict[str, Any]]:
         cur = await self.db.execute(
             "SELECT s.session_id, q.queue_id, s.channel, s.conversation_id, "
-            "s.state, s.started_at, s.ended_at, s.rounds, s.title, s.category, s.tags "
+            "s.state, s.started_at, s.ended_at, s.rounds, s.title, s.category, s.tags, s.recording "
             "FROM sessions s JOIN queues q ON q.id=s.queue_row "
             "ORDER BY s.id DESC LIMIT ?",
             (limit,),

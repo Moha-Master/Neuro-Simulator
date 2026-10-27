@@ -58,6 +58,31 @@ const FEED_READY_TIMEOUT_MS = 500
 /** 父页面（/neuro-view 调试卡）可直接驱动的立绘动作；只动 DOM，不改直播状态。 */
 const DEBUG_ACTIONS = new Set(['avatar.spin', 'avatar.zoom_in', 'avatar.zoom_out'])
 
+// 语音音量：控制页（OBS 页 / client 观看页）写 localStorage，neuro 窗口只读。
+// 同源（vedal:8100）下三个页面看到的是同一个键；读不到就按 1 / 未静音。
+const AUDIO_VOLUME_KEY = 'ns.audio.volume'
+const AUDIO_MUTED_KEY = 'ns.audio.muted'
+
+function readStoredVolume (): number {
+  try {
+    const raw = Number(localStorage.getItem(AUDIO_VOLUME_KEY))
+    return Number.isFinite(raw) ? Math.min(1, Math.max(0, raw)) : 1
+  } catch {
+    return 1
+  }
+}
+
+function readStoredMuted (): boolean {
+  try {
+    return localStorage.getItem(AUDIO_MUTED_KEY) === '1'
+  } catch {
+    return false
+  }
+}
+
+let masterVolume = readStoredVolume()
+let masterMuted = readStoredMuted()
+
 export async function bootstrapNeuro (stage: HTMLElement): Promise<void> {
   await loadFonts()
 
@@ -116,6 +141,7 @@ export async function bootstrapNeuro (stage: HTMLElement): Promise<void> {
       player = view
       player.onIdle = () => resetZoom()
       applyCaptionSettings()
+      player.setVolume(masterVolume, masterMuted)
     }
     return player
   }
@@ -247,6 +273,8 @@ export async function bootstrapNeuro (stage: HTMLElement): Promise<void> {
         id?: string
         action?: string
         params?: Record<string, unknown>
+        value?: number
+        muted?: boolean
       }
       | undefined
     if (!data || data.ns !== 'neuro-window') {
@@ -255,6 +283,11 @@ export async function bootstrapNeuro (stage: HTMLElement): Promise<void> {
     if (data.type === 'visibility') {
       parentHidden = Array.isArray(data.hidden) ? data.hidden : []
       applyHidden()
+    } else if (data.type === 'volume') {
+      // 合成器（或直接嵌入的调试页）下发的语音音量：当前在播的 Audio 立即生效
+      masterVolume = Math.min(1, Math.max(0, Number(data.value ?? 1)))
+      masterMuted = Boolean(data.muted)
+      ensurePlayer()?.setVolume(masterVolume, masterMuted)
     } else if (data.type === 'action') {
       const id = typeof data.id === 'string' && data.id ? data.id : avatarId
       const action = typeof data.action === 'string' ? data.action : ''

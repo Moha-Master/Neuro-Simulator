@@ -6,7 +6,6 @@
       "label": "Starting Soon",
       "icon": "mdi-clock-outline",
       "desc": "The stream has not started yet: a no-source backdrop fills the frame, the chat overlay is visible, and the Neuro window is hidden.",
-      "hidden": true,
       "elements": [
         {
           "id": "bg_no_source",
@@ -54,7 +53,6 @@
       "label": "开场",
       "icon": "mdi-movie-open",
       "desc": "The intro bumper is playing: the Neuro window fills the frame edge to edge, with no chat overlay.",
-      "hidden": true,
       "elements": [],
       "neuro": {
         "x": 0,

@@ -203,6 +203,7 @@ const loopRows = computed<Row[]>(() => {
     { label: 'highlight_cursor', value: fmt(v.highlight_cursor) },
     { label: 'highlight_paused', value: fmt(v.highlight_paused) },
     { label: 'highlight_source', value: fmt(v.highlight_source) },
+    ...(v.recording ? [{ label: 'recording', value: fmt(v.recording) }] : []),
     { label: 'started_at', value: fmt(v.started_at) },
     { label: 'persisted', value: fmt(v.persisted) },
     { label: 'intro', value: fmt(v.intro) },
