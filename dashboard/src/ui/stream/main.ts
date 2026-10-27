@@ -450,7 +450,9 @@ export async function bootstrapStream (stage: HTMLElement): Promise<void> {
     applyElements(snap.elements)
 
     if (snap.state === 'offline') {
-      void setScene(SCENE_STARTING_SOON, { instant: true })
+      // 停止态也跟随后端权威场景（Studio 手动选过就保持），无权威或已删才回落待机画面。
+      const sid = String((snap.scene as { id?: string } | null | undefined)?.id ?? '')
+      void setScene(sceneMap.has(sid) ? sid : SCENE_STARTING_SOON, { instant: true })
       return
     }
     if (snap.state === 'starting' || snap.state === 'live' || snap.state === 'paused') {

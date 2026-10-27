@@ -189,39 +189,14 @@
               />
             </div>
 
-            <!-- neuro 内部层：只给眼睛（属于 neuro 自己的清单，不可选中/无齿轮） -->
-            <div
-              v-for="layer in neuroLayerRows"
-              :key="layer.sourceId"
-              class="studio-element-row"
-              :class="{ 'studio-element-row--readonly': !layer.visible }"
-            >
-              <v-icon size="16">mdi-layers</v-icon>
-              <span class="text-truncate flex-grow-1">
-                {{ layer.name }}
-                <span v-if="!layer.visible" class="text-disabled">· 本场景不显示</span>
-              </span>
-              <v-btn
-                :icon="hiddenIds.includes(layer.sourceId) ? 'mdi-eye-off' : 'mdi-eye'"
-                size="x-small"
-                variant="text"
-                density="compact"
-                :disabled="!layer.visible"
-                :title="layer.visible
-                  ? '关闭 = 合成器层强制隐藏（只隐藏，不强制显示脚本控制的层）'
-                  : '本场景不显示'"
-                @click.stop="setElementHidden(layer.sourceId, !hiddenIds.includes(layer.sourceId))"
-              />
-            </div>
+            <!-- neuro 内部层不再作为顶层行：她们是"[neuro 窗口] 采集源"的内容，
+                 编辑入口在 neuro 窗口对话框的"内部层"区（OBS 窗口捕获语义）。 -->
 
             <div
-              v-if="!elementRows.length && !neuroLayerRows.length && neuroScenes"
+              v-if="!elementRows.length"
               class="text-caption text-disabled py-1"
             >
               当前场景没有元素。
-            </div>
-            <div v-else-if="!neuroScenes" class="text-caption text-disabled py-1">
-              neuro 模块不可达，内部层暂不可用。
             </div>
           </v-card-text>
           <div class="studio-card__actions">
@@ -243,7 +218,7 @@
               icon="mdi-cog"
               size="x-small"
               variant="text"
-              title="元素设置"
+              :title="selectedElement ? '设置所选元素' : '先在列表中单击选中一个元素'"
               :disabled="!selectedElement"
               @click="openSelectedSettings"
             />
@@ -589,238 +564,21 @@
         </v-card-title>
         <v-card-text>
           <v-alert
-            v-if="manifestError || elementFieldError"
+            v-if="elementDialogError"
             type="error"
             variant="tonal"
             density="compact"
             class="mb-3"
           >
-            <pre class="text-wrap">{{ elementFieldError || manifestError }}</pre>
+            <pre class="text-wrap">{{ elementDialogError }}</pre>
           </v-alert>
 
-          <div class="text-subtitle-2 mb-1">定位</div>
-          <v-row dense>
-            <v-col cols="12" sm="6">
-              <v-select
-                v-model="elementForm.placement"
-                :items="PLACEMENTS"
-                item-title="title"
-                item-value="value"
-                label="定位方式"
-                variant="outlined"
-                density="compact"
-                @update:model-value="applyElementForm"
-              />
-            </v-col>
-            <v-col cols="12" sm="6">
-              <v-select
-                :items="['舞台（默认）']"
-                model-value="舞台（默认）"
-                label="参照"
-                variant="outlined"
-                density="compact"
-                disabled
-                hint="元素参照：即将推出"
-                persistent-hint
-              />
-            </v-col>
-            <v-col cols="6" sm="3">
-              <v-text-field
-                v-model="elementForm.x"
-                label="x（%）"
-                type="number"
-                variant="outlined"
-                density="compact"
-                hide-details
-                @update:model-value="applyElementForm"
-              />
-            </v-col>
-            <v-col cols="6" sm="3">
-              <v-text-field
-                v-model="elementForm.y"
-                label="y（%）"
-                type="number"
-                variant="outlined"
-                density="compact"
-                hide-details
-                @update:model-value="applyElementForm"
-              />
-            </v-col>
-            <v-col cols="6" sm="3">
-              <v-text-field
-                v-model="elementForm.w"
-                label="w（%，空=auto）"
-                type="number"
-                variant="outlined"
-                density="compact"
-                hide-details
-                @update:model-value="applyElementForm"
-              />
-            </v-col>
-            <v-col cols="6" sm="3">
-              <v-text-field
-                v-model="elementForm.h"
-                label="h（%，空=auto）"
-                type="number"
-                variant="outlined"
-                density="compact"
-                hide-details
-                @update:model-value="applyElementForm"
-              />
-            </v-col>
-          </v-row>
-
-          <v-divider class="my-3" />
-          <div class="text-subtitle-2 mb-1">外观</div>
-          <v-row dense>
-            <v-col cols="4">
-              <v-text-field
-                v-model="elementForm.scale"
-                label="scale（空=1）"
-                type="number"
-                variant="outlined"
-                density="compact"
-                hide-details
-                @update:model-value="applyElementForm"
-              />
-            </v-col>
-            <v-col cols="4">
-              <v-text-field
-                v-model="elementForm.rotate"
-                label="rotate（空=0）"
-                type="number"
-                variant="outlined"
-                density="compact"
-                hide-details
-                @update:model-value="applyElementForm"
-              />
-            </v-col>
-            <v-col cols="4">
-              <v-text-field
-                v-model="elementForm.opacity"
-                label="opacity（空=1）"
-                type="number"
-                variant="outlined"
-                density="compact"
-                hide-details
-                @update:model-value="applyElementForm"
-              />
-            </v-col>
-          </v-row>
-
-          <v-divider class="my-3" />
-          <div class="text-subtitle-2 mb-1">层级</div>
-          <v-row dense align="center">
-            <v-col cols="6">
-              <v-text-field
-                v-model="elementForm.z"
-                label="z"
-                type="number"
-                variant="outlined"
-                density="compact"
-                hide-details
-                @update:model-value="applyElementForm"
-              />
-            </v-col>
-            <v-col cols="6">
-              <v-switch
-                v-model="elementForm.visible"
-                label="visible（数据层声明）"
-                color="primary"
-                density="compact"
-                hide-details
-                @update:model-value="applyElementForm"
-              />
-            </v-col>
-          </v-row>
-          <div class="text-caption text-disabled">
-            visible 是数据层声明；眼睛按钮是运行时强制隐藏通道，二者互不改写。
-          </div>
-
-          <v-divider class="my-3" />
-          <div class="text-subtitle-2 mb-1">内容</div>
-          <v-select
-            v-model="elementForm.kind"
-            :items="CONTENT_KINDS"
-            label="kind"
-            variant="outlined"
-            density="compact"
-            class="mb-2"
-            @update:model-value="applyElementForm"
-          />
-          <template v-if="elementForm.kind === 'color'">
-            <v-text-field
-              v-model="elementForm.color"
-              label="颜色值（color）"
-              placeholder="#352634"
-              variant="outlined"
-              density="compact"
-              @update:model-value="applyElementForm"
-            />
-          </template>
-          <template v-else-if="elementForm.kind === 'image' || elementForm.kind === 'video'">
-            <v-text-field
-              v-model="elementForm.src"
-              label="素材地址（src）"
-              variant="outlined"
-              density="compact"
-              @update:model-value="applyElementForm"
-            />
-          </template>
-          <template v-else-if="elementForm.kind === 'text'">
-            <v-text-field
-              v-model="elementForm.text"
-              label="文本（text）"
-              variant="outlined"
-              density="compact"
-              @update:model-value="applyElementForm"
-            />
-          </template>
-          <template v-else-if="elementForm.kind === 'component'">
-            <v-text-field
-              v-model="elementForm.name"
-              label="组件名（name）"
-              placeholder="chat.overlay"
-              variant="outlined"
-              density="compact"
-              class="mb-2"
-              @update:model-value="applyElementForm"
-            />
-            <v-textarea
-              v-model="elementForm.props"
-              label="props JSON（空 = 不带该键）"
-              :error-messages="propsError ? [propsError] : []"
-              variant="outlined"
-              density="compact"
-              rows="3"
-              spellcheck="false"
-              class="studio-json"
-              @update:model-value="applyElementForm"
-            />
-          </template>
-
-          <v-divider class="my-3" />
-          <div class="text-subtitle-2 mb-1">脚本</div>
-          <v-textarea
-            v-model="elementForm.script"
-            label="script JSON（enter / exit / tween；空 = 删键）"
-            :error-messages="scriptError ? [scriptError] : []"
-            variant="outlined"
-            density="compact"
-            rows="5"
-            spellcheck="false"
-            class="studio-json"
-            @update:model-value="applyElementForm"
-          />
-
-          <v-text-field
-            class="mt-3"
-            :model-value="elementTargetId"
-            label="元素 id（锁定）"
-            variant="outlined"
-            density="compact"
-            disabled
-            title="改名请删除重建或重置"
+          <ElementFormFields
+            :form="elementForm"
+            :script-error="scriptError"
+            :props-error="propsError"
+            :locked-id="elementTargetId"
+            @change="applyElementForm"
           />
         </v-card-text>
         <v-card-actions>
@@ -830,26 +588,30 @@
       </v-card>
     </v-dialog>
 
-    <!-- neuro 块设置 -->
-    <v-dialog v-model="neuroDialog" max-width="640" scrollable>
+    <!-- neuro 窗口（采集源）：窗口摆放 + 内部层内容（写 neuro 自己的清单） -->
+    <v-dialog v-model="neuroDialog" max-width="720" scrollable>
       <v-card>
         <v-card-title>neuro 窗口</v-card-title>
         <v-card-text>
           <v-alert
-            v-if="manifestError"
+            v-if="manifestError || neuroManifestError"
             type="error"
             variant="tonal"
             density="compact"
             class="mb-3"
           >
-            <pre class="text-wrap">{{ manifestError }}</pre>
+            <pre class="text-wrap">{{ manifestError || neuroManifestError }}</pre>
           </v-alert>
 
+          <div class="text-subtitle-2 mb-1">窗口</div>
+          <div class="text-caption text-medium-emphasis mb-2">
+            坐标相对画面（舞台）尺寸，100 = 满屏；负值可把窗口移出画面。
+          </div>
           <v-row dense>
             <v-col cols="4">
               <v-text-field
                 v-model="neuroForm.x"
-                label="x（%）"
+                label="X · 距左缘（%）"
                 type="number"
                 variant="outlined"
                 density="compact"
@@ -860,7 +622,7 @@
             <v-col cols="4">
               <v-text-field
                 v-model="neuroForm.y"
-                label="y（%）"
+                label="Y · 距顶缘（%）"
                 type="number"
                 variant="outlined"
                 density="compact"
@@ -871,7 +633,7 @@
             <v-col cols="4">
               <v-text-field
                 v-model="neuroForm.w"
-                label="w（%）"
+                label="宽度（%画面宽）"
                 type="number"
                 variant="outlined"
                 density="compact"
@@ -882,7 +644,7 @@
             <v-col cols="6">
               <v-text-field
                 v-model="neuroForm.z"
-                label="z（可选）"
+                label="层级（越大越靠前，空=默认）"
                 type="number"
                 variant="outlined"
                 density="compact"
@@ -917,6 +679,62 @@
           />
           <div class="text-caption text-disabled">
             这是数据层声明（画面 reload 生效），与眼睛按钮的运行时通道并存。
+          </div>
+
+          <v-divider class="my-3" />
+          <div class="text-subtitle-2 mb-1">内部层（neuro 窗口的内容 · 写入 neuro 自己的清单）</div>
+          <template v-if="neuroLayerRows.length">
+            <v-expansion-panels
+              v-model="neuroExpandedLayer"
+              variant="accordion"
+              flat
+              density="compact"
+              @update:model-value="onLayerExpand"
+            >
+              <v-expansion-panel
+                v-for="layer in neuroLayerRows"
+                :key="layer.layerId"
+                :value="layer.layerId"
+              >
+                <v-expansion-panel-title>
+                  <div class="d-flex align-center w-100">
+                    <v-icon size="16" class="mr-2">mdi-layers</v-icon>
+                    <span class="flex-grow-1">{{ layer.name }}</span>
+                    <span v-if="!layer.visible" class="text-caption text-disabled mr-2">
+                      本场景不显示
+                    </span>
+                    <v-btn
+                      :icon="hiddenIds.includes(layer.sourceId) ? 'mdi-eye-off' : 'mdi-eye'"
+                      size="x-small"
+                      variant="text"
+                      density="compact"
+                      :disabled="!layer.visible"
+                      :title="layer.visible
+                        ? '关闭 = 运行时强制隐藏（不改数据）'
+                        : '本场景不显示'"
+                      @click.stop="setElementHidden(layer.sourceId, !hiddenIds.includes(layer.sourceId))"
+                    />
+                  </div>
+                </v-expansion-panel-title>
+                <v-expansion-panel-text>
+                  <ElementFormFields
+                    v-if="layer.editable && neuroExpandedLayer === layer.layerId"
+                    :form="elementForm"
+                    :script-error="scriptError"
+                    :props-error="propsError"
+                    :show-content="false"
+                    cross-scene
+                    @change="applyElementForm"
+                  />
+                  <div v-else class="text-caption text-disabled py-1">
+                    neuro 清单未到达，暂不可编辑。
+                  </div>
+                </v-expansion-panel-text>
+              </v-expansion-panel>
+            </v-expansion-panels>
+          </template>
+          <div v-else-if="!neuroScenes" class="text-caption text-disabled py-1">
+            neuro 模块不可达，内部层暂不可用。
           </div>
         </v-card-text>
         <v-card-actions>
@@ -1003,6 +821,8 @@
 
 <script lang="ts" setup>
 import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
+
+import type { ElementFormState } from '@/components/studio/ElementFormFields.vue'
 import ModuleOffline from '@/components/ModuleOffline.vue'
 import TagInput from '@/components/tags/TagInput.vue'
 import { useModuleStatus } from '@/composables/useModuleStatus'
@@ -1110,6 +930,37 @@ interface NeuroScenesResponse {
   current?: { id?: string } | null
 }
 
+/** neuro 完整清单里的元素（结构与 stream 元素同构：box + z + script）。 */
+interface NeuroManifestElement {
+  id: string
+  name?: string | null
+  visible?: boolean
+  z?: number
+  box?: ManifestBox
+  content?: ManifestContent
+  script?: Record<string, unknown>
+  css?: Record<string, string>
+}
+
+interface NeuroManifestScene {
+  id: string
+  label?: string
+  desc?: string
+  icon?: string
+  duration?: number | Record<string, unknown>
+  highlight_messages?: boolean
+  elements?: NeuroManifestElement[]
+  timeline?: Record<string, unknown>
+  state_script?: Record<string, unknown>
+}
+
+interface NeuroManifest {
+  version?: number
+  default_scene?: string
+  refs?: Record<string, string>
+  scenes: NeuroManifestScene[]
+}
+
 interface SceneMenuState {
   open: boolean
   x: number
@@ -1186,6 +1037,10 @@ const streamManifest = ref<StreamManifest | null>(null)
 
 /** neuro 当前场景的内部层（来源：GET /manage/neuro_sama/ui/scenes）。 */
 const neuroScenes = ref<NeuroScenesResponse | null>(null)
+
+/** neuro 完整清单（来源：GET /manage/neuro_sama/ui/manifest；内部层的几何在这里）。
+ *  neuro 不可达时保持 null，内部层行退回"只给眼睛"的旧行为。 */
+const neuroManifest = ref<NeuroManifest | null>(null)
 
 function cloneData<T>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T
@@ -1287,20 +1142,36 @@ const neuroWindowVisible = computed(
   () => !!displayedScene.value?.neuro && !displayedScene.value.neuro.hidden,
 )
 
+function neuroSceneById(id: string): NeuroManifestScene | null {
+  return neuroManifest.value?.scenes.find((s) => s.id === id) ?? null
+}
+
 const currentNeuroScene = computed(() => {
   const neuro = neuroScenes.value
   if (!neuro?.current?.id) return null
   return neuro.scenes.find((s) => s.id === neuro.current?.id) ?? null
 })
-const neuroLayerRows = computed(() =>
-  (currentNeuroScene.value?.elements ?? []).map((el) => ({
+/** neuro 当前场景在完整清单里的那份（内部层几何/脚本来源）。 */
+const currentNeuroManifestScene = computed(() => {
+  const id = neuroScenes.value?.current?.id
+  return id ? neuroSceneById(id) : null
+})
+const neuroLayerRows = computed(() => {
+  const summary = currentNeuroScene.value
+  if (!summary) return []
+  const fullById = new Map(
+    (currentNeuroManifestScene.value?.elements ?? []).map((el) => [el.id, el]),
+  )
+  return (summary.elements ?? []).map((el) => ({
     sourceId: `${NEURO_LAYER_PREFIX}${el.id}`,
     layerId: el.id,
     name: el.name || el.id,
     // 场景里 visible:false 的层由脚本（如开场时间线）负责显示，外部只能再隐藏。
     visible: el.visible !== false,
-  })),
-)
+    // 完整清单拿到之前只给眼睛（不选中、无齿轮）。
+    editable: fullById.has(el.id),
+  }))
+})
 
 // ---------- 选中元素 ----------
 
@@ -1320,21 +1191,35 @@ function isSelectedElement(kind: ElementKind, id: string): boolean {
 async function selectElement(kind: ElementKind, id: string): Promise<void> {
   if (isSelectedElement(kind, id)) return
   await flushManifestSave()
+  await flushNeuroManifestSave()
   selectedElement.value = { kind, id }
 }
 
 // 切场景 = 上一个场景的选中行作废；未保存改动先落盘。
 watch(displayedSceneId, () => {
   void flushManifestSave()
+  void flushNeuroManifestSave()
   selectedElement.value = null
   elementDialog.value = false
   neuroDialog.value = false
+  neuroEditingLayer.value = null
 })
 
 function selectedElementDef(): ManifestElement | null {
   const selection = selectedElement.value
   if (!selection || selection.kind !== 'element') return null
   return displayedScene.value?.elements?.find((e) => e.id === selection.id) ?? null
+}
+
+function findNeuroLayerEl(layerId: string): NeuroManifestElement | null {
+  const inCurrent = currentNeuroManifestScene.value?.elements?.find((e) => e.id === layerId)
+  if (inCurrent) return inCurrent
+  // neuro 当前场景切走过：同 id 在整个清单里是同一家族，任取一份兜底。
+  for (const scene of neuroManifest.value?.scenes ?? []) {
+    const el = scene.elements?.find((e) => e.id === layerId)
+    if (el) return el
+  }
+  return null
 }
 
 function canMoveElement(delta: number): boolean {
@@ -1451,6 +1336,85 @@ async function ensureManifest(): Promise<boolean> {
   if (streamManifest.value) return true
   await refreshStreamManifest(true)
   return !!streamManifest.value
+}
+
+// ---------- neuro manifest 本地缓存 + 1s 防抖保存（与 stream 各一份，互不干扰） ----------
+
+const neuroManifestError = ref('')
+let neuroManifestDirty = false
+let neuroManifestRev = 0
+let neuroManifestTimer: number | null = null
+let neuroManifestSaving = false
+
+function stringifyNeuroManifest(): string {
+  return JSON.stringify(neuroManifest.value)
+}
+
+function queueNeuroManifestSave(): void {
+  if (!neuroManifest.value) return
+  neuroManifestDirty = true
+  neuroManifestRev += 1
+  if (neuroManifestTimer !== null) window.clearTimeout(neuroManifestTimer)
+  neuroManifestTimer = window.setTimeout(() => {
+    neuroManifestTimer = null
+    void flushNeuroManifestSave()
+  }, 1000)
+}
+
+/** 立即落盘未保存的 neuro 内部层改动（关闭对话框 / 切换选中行 / 切场景时调用）。 */
+async function flushNeuroManifestSave(): Promise<void> {
+  if (neuroManifestTimer !== null) {
+    window.clearTimeout(neuroManifestTimer)
+    neuroManifestTimer = null
+  }
+  if (!neuroManifestDirty || !neuroManifest.value) return
+  if (neuroManifestSaving) return
+  const rev = neuroManifestRev
+  const content = stringifyNeuroManifest()
+  neuroManifestSaving = true
+  neuroManifestError.value = ''
+  try {
+    await api('/manage/neuro_sama/ui/manifest', {
+      method: 'PUT',
+      body: JSON.stringify({ content }),
+    })
+    if (rev === neuroManifestRev) neuroManifestDirty = false
+    // 概览里的 name/visible 也来自这份清单；保存后立即对齐，避免 5s 轮询先拿旧值。
+    await refreshNeuroScenes()
+    if (rev === neuroManifestRev) await refreshNeuroManifest(true)
+  } catch (e) {
+    neuroManifestError.value = describeError(e)
+    showSnack(neuroManifestError.value)
+  } finally {
+    neuroManifestSaving = false
+    if (neuroManifestDirty && rev !== neuroManifestRev) {
+      neuroManifestTimer = window.setTimeout(() => {
+        neuroManifestTimer = null
+        void flushNeuroManifestSave()
+      }, 1000)
+    }
+  }
+}
+
+function discardPendingNeuroManifest(): void {
+  if (neuroManifestTimer !== null) {
+    window.clearTimeout(neuroManifestTimer)
+    neuroManifestTimer = null
+  }
+  neuroManifestDirty = false
+}
+
+async function refreshNeuroManifest(force = false): Promise<void> {
+  if (!force && (neuroManifestDirty || neuroManifestSaving)) return
+  try {
+    const data = await api<NeuroManifest>('/manage/neuro_sama/ui/manifest')
+    if (force || (!neuroManifestDirty && !neuroManifestSaving)) {
+      neuroManifest.value = data
+    }
+  } catch {
+    // 模块暂时不可达：内部层行退回"只给眼睛"（有未保存改动时保留本地缓存）。
+    if (!neuroManifestDirty && !neuroManifestSaving) neuroManifest.value = null
+  }
 }
 
 // ---------- 场景 CRUD ----------
@@ -1696,23 +1660,16 @@ async function closeSceneProps(): Promise<void> {
   await flushManifestSave()
 }
 
-// ---------- 元素设置对话框 ----------
-
-const PLACEMENTS = [
-  { title: '左上（默认）', value: 'tl' },
-  { title: '右上', value: 'tr' },
-  { title: '左下', value: 'bl' },
-  { title: '右下', value: 'br' },
-]
-const CONTENT_KINDS = ['color', 'image', 'video', 'text', 'component']
+// ---------- 元素设置对话框（stream 元素专用；neuro 内部层在 neuro 窗口面板编辑） ----------
 
 const elementDialog = ref(false)
 const elementTargetId = ref('')
 const scriptError = ref('')
 const propsError = ref('')
 const elementFieldError = computed(() => scriptError.value || propsError.value)
+const elementDialogError = computed(() => elementFieldError.value || manifestError.value)
 
-const elementForm = reactive({
+const elementForm = reactive<ElementFormState>({
   placement: 'tl',
   x: '0',
   y: '0',
@@ -1840,11 +1797,9 @@ function buildContent(el: ManifestElement): ManifestContent | null {
   }
 }
 
-function applyElementForm(): void {
-  const el = selectedElementDef()
-  if (!el) return
-
-  const box: ManifestBox = el.box ?? { x: 0, y: 0 }
+/** 表单 → box（保持 stream 元素与 neuro 内部层同一套几何语义）。 */
+function boxFromForm(base: ManifestBox | undefined): ManifestBox {
+  const box: ManifestBox = { ...(base ?? { x: 0, y: 0 }) }
   box.x = parsePct(elementForm.x) ?? 0
   box.y = parsePct(elementForm.y) ?? 0
   const w = parsePct(elementForm.w)
@@ -1869,8 +1824,36 @@ function applyElementForm(): void {
   const opacity = elementForm.opacity.trim()
   if (opacity) box.opacity = Number(opacity)
   else delete box.opacity
+  return box
+}
 
-  el.box = box
+/** 表单 → script；空 = 删键，JSON 不合法写进 scriptError 并保留原值。 */
+function applyScriptField(target: { script?: Record<string, unknown> }): void {
+  const scriptText = elementForm.script
+  if (!scriptText.trim()) {
+    delete target.script
+    scriptError.value = ''
+    return
+  }
+  const parsed = parseJsonField(scriptText, 'script')
+  if (parsed.ok && parsed.value) {
+    target.script = parsed.value as Record<string, unknown>
+    scriptError.value = ''
+  } else if (!parsed.ok) {
+    scriptError.value = parsed.error
+  }
+}
+
+function applyElementForm(): void {
+  // neuro 窗口面板展开着某层时，同一份表单写 neuro manifest；否则写 stream 元素。
+  if (neuroEditingLayer.value) {
+    applyNeuroLayerForm(neuroEditingLayer.value)
+    return
+  }
+  const el = selectedElementDef()
+  if (!el) return
+
+  el.box = boxFromForm(el.box)
   const z = Number(elementForm.z)
   el.z = Number.isFinite(z) ? z : 0
   el.visible = elementForm.visible
@@ -1879,31 +1862,46 @@ function applyElementForm(): void {
   const content = buildContent(el)
   if (content) el.content = content
 
-  const scriptText = elementForm.script
-  if (!scriptText.trim()) {
-    delete el.script
-    scriptError.value = ''
-  } else {
-    const parsed = parseJsonField(scriptText, 'script')
-    if (parsed.ok && parsed.value) {
-      el.script = parsed.value as Record<string, unknown>
-      scriptError.value = ''
-    } else if (!parsed.ok) {
-      scriptError.value = parsed.error
-    }
-  }
+  applyScriptField(el)
 
   queueManifestSave()
+}
+
+/** neuro 内部层：同 id 在 normal/intro 里是同一家族，几何/z/脚本一起改；
+ *  visible 是场景级状态（开场本来就和常态不同），只写 neuro 当前场景。 */
+function applyNeuroLayerForm(layerId: string): void {
+  const manifest = neuroManifest.value
+  if (!manifest) return
+  const currentSceneId = currentNeuroManifestScene.value?.id ?? ''
+  const z = Number(elementForm.z)
+  const zValue = Number.isFinite(z) ? z : 0
+  let applied = 0
+  for (const scene of manifest.scenes) {
+    const el = scene.elements?.find((e) => e.id === layerId)
+    if (!el) continue
+    el.box = boxFromForm(el.box)
+    el.z = zValue
+    applyScriptField(el)
+    if (scene.id === currentSceneId) el.visible = elementForm.visible
+    applied += 1
+  }
+  if (!applied) return
+  queueNeuroManifestSave()
 }
 
 async function closeElementDialog(): Promise<void> {
   elementDialog.value = false
   await flushManifestSave()
+  await flushNeuroManifestSave()
 }
 
-// ---------- neuro 块对话框 ----------
+// ---------- neuro 窗口对话框（窗口摆放 + 内部层内容） ----------
 
 const neuroDialog = ref(false)
+/** 手风琴当前展开层（单开模式；v-expansion-panels 的 model 值）。 */
+const neuroExpandedLayer = ref<string | number | null>(null)
+/** 表单当前服务的层（展开切换时先 flush 上一层的待发保存）。 */
+const neuroEditingLayer = ref<string | null>(null)
 const neuroForm = reactive({
   x: '0',
   y: '0',
@@ -1927,9 +1925,24 @@ const neuroHideItems = computed(() => {
   return out
 })
 
+async function onLayerExpand(value: string | number | null): Promise<void> {
+  const id = typeof value === 'string' ? value : null
+  if (neuroEditingLayer.value && neuroEditingLayer.value !== id) {
+    await flushNeuroManifestSave()
+  }
+  neuroEditingLayer.value = null
+  if (!id) return
+  const el = findNeuroLayerEl(id)
+  if (!el) return
+  loadElementForm(el)
+  neuroEditingLayer.value = id
+}
+
 function openNeuroDialog(): void {
   const scene = displayedScene.value
   if (!scene) return
+  neuroExpandedLayer.value = null
+  neuroEditingLayer.value = null
   const neuro = scene.neuro
   neuroForm.x = pctValue(neuro?.x ?? 0)
   neuroForm.y = pctValue(neuro?.y ?? 0)
@@ -1959,7 +1972,10 @@ function applyNeuroForm(): void {
 
 async function closeNeuroDialog(): Promise<void> {
   neuroDialog.value = false
+  neuroExpandedLayer.value = null
+  neuroEditingLayer.value = null
   await flushManifestSave()
+  await flushNeuroManifestSave()
 }
 
 // ---------- 源签名 / 隐藏集合 ----------
@@ -2009,7 +2025,10 @@ async function refreshNeuroScenes(): Promise<void> {
 }
 
 // stream 场景变化常伴随 neuro 换场景（intro→normal）：即时补一次内部层
-watch(currentScene, () => void refreshNeuroScenes())
+watch(currentScene, () => {
+  void refreshNeuroScenes()
+  void refreshNeuroManifest()
+})
 
 async function doAction(kind: 'pause' | 'resume' | 'stop'): Promise<void> {
   await st.action(kind)
@@ -2127,6 +2146,7 @@ function startPolling(): void {
   sceneTimer = window.setInterval(() => {
     void st.refreshScenes()
     void refreshNeuroScenes()
+    void refreshNeuroManifest()
     void refreshStreamManifest()
   }, 5000)
 }
@@ -2151,6 +2171,7 @@ onMounted(() => {
   window.addEventListener('message', onCanvasMessage)
   void st.refreshScenes()
   void refreshNeuroScenes()
+  void refreshNeuroManifest(true)
   void refreshStreamManifest(true)
   if (status.reachable.value) startPolling()
 })
@@ -2159,6 +2180,7 @@ onUnmounted(() => {
   window.removeEventListener('message', onCanvasMessage)
   stopPolling()
   discardPendingManifest()
+  discardPendingNeuroManifest()
 })
 </script>
 
