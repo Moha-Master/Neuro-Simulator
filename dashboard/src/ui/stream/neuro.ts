@@ -126,6 +126,22 @@ export class NeuroLayer {
     this.frame.contentWindow?.postMessage({ ns: 'neuro-window', type: 'feed', event }, '*')
   }
 
+  /** 舞台局部布局矩形（px；不含 iframe 内部的 transform 缩放）。
+   *  隐藏 / 无配置 / 未布局时返回 null——编辑层据此判断是否参与命中与吸附。 */
+  getRect (): { x: number, y: number, w: number, h: number } | null {
+    const w = this.wrap.offsetWidth
+    const h = this.wrap.offsetHeight
+    if (w <= 0 || h <= 0 || this.wrap.style.display === 'none') {
+      return null
+    }
+    return { x: this.wrap.offsetLeft, y: this.wrap.offsetTop, w, h }
+  }
+
+  /** 层叠序号（与场景 `neuro.z` 一致；编辑层命中排序用）。 */
+  getZ (): number {
+    return this.config?.z ?? 10
+  }
+
   destroy (): void {
     window.removeEventListener('message', this.onMessage)
     this.observer?.disconnect()

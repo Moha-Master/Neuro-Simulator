@@ -25,8 +25,9 @@ import type { SceneDef } from '../engine/schema'
 
 import type { ChatOverlay } from './chat'
 import { ACTIONS } from '../engine/action'
-import { foreignModuleBase, makeAssetUrl } from '../engine/base'
+import { apiUrl, foreignModuleBase, makeAssetUrl } from '../engine/base'
 import { ElementEngine } from '../engine/elements'
+import { EditLayer } from './edit'
 import { loadFonts } from './assets'
 import { COMPONENTS } from './components'
 import {
@@ -34,6 +35,7 @@ import {
   type FeedEvent,
   type NeuroMirrorEvent,
   type NeuroSettings,
+  type SceneInfo,
   type Snapshot,
   StreamFeed,
 } from './feed'
@@ -74,6 +76,8 @@ export async function bootstrapStream (stage: HTMLElement): Promise<void> {
     console.error('场景清单加载失败，画面无法渲染', error)
     return
   }
+  /** 本地场景缓存：热替换时与刚拉到的清单 diff（顺序与内容都保持服务端原样）。 */
+  let sceneList = scenes
   const sceneMap = new Map(scenes.map(s => [s.id, s]))
   const engine = new ElementEngine(stage, scenes, {
     components: COMPONENTS,
@@ -89,11 +93,26 @@ export async function bootstrapStream (stage: HTMLElement): Promise<void> {
     await engine.setScene(initialScene, { instant: true })
   }
 
-  // 实时管线组件从元素引擎取（starting_soon 也声明了 chat，保证实例先建好）
-  const chat = engine.view<ChatOverlay>('chat')
+  /** chat 元素可能被改成别的组件（结构轨重建）：只有具备聊天管线方法时才当它
+   *  是 ChatOverlay，否则置空（事件仍进历史缓存，改回来时恢复）。 */
+  function chatView (): ChatOverlay | null {
+    const view = engine.view<unknown>('chat')
+    if (!view || typeof (view as Partial<ChatOverlay>).append !== 'function') {
+      return null
+    }
+    return view as ChatOverlay
+  }
+
+  // 实时管线组件从元素引擎取（starting_soon 也声明了 chat，保证实例先建好）。
+  // 结构轨可能重建 chat 实例，所以这里是 `let`，由 rebindChat() 重新抓取。
+  let chat = chatView()
   if (!chat) {
     console.warn('场景缺少 chat 元素，聊天事件将被忽略')
   }
+  /** 聊天历史缓存：实例重建后 `replace()` 恢复（lastSnapshot.chat 是建连时刻的，
+   *  直播中早已过期）。上限与 ChatOverlay 的可见行数一致，避免无限增长。 */
+  const CHAT_HISTORY_MAX = 80
+  let chatHistory: ChatMsg[] = []
 
   const noSource = document.querySelector('#no-source')
   let neuro: NeuroLayer | null = null
@@ -106,11 +125,24 @@ export async function bootstrapStream (stage: HTMLElement): Promise<void> {
   // 字段名与 dashboard 的 OBS 页（pages/stream.vue）以及 neuro 窗口的监听逐字一致：
   //   {ns:"stream-canvas", type:"visibility", hidden: string[]}
   //   {ns:"stream-canvas", type:"volume", value: number, muted: boolean}
-  //   {ns:"stream-canvas", type:"ready"}        ← 本页 → 父页面（挂载完成后一次）
+  //   {ns:"stream-canvas", type:"edit", active: boolean}   ← 编辑模式开关
+  //   {ns:"stream-canvas", type:"select", kind, id}        ← 双向选中（父 → 画布）
+  //   {ns:"stream-canvas", type:"ready"}                   ← 本页 → 父页面（一次）
+  //   {ns:"stream-canvas", type:"select"|"preview"|"commit"} ← 画布 → 父页面
   // 只隐藏不显示；与场景数据取交集（父页面可能残留上一个场景的元素 id）。
+  // 本通道**只接受同源父页面**（OBS 直挂时 parent===window，永不激活）。
   let externalHidden: string[] = []
   let canvasVolume = 1
   let canvasMuted = false
+  /** 编辑层懒创建：只有收到 `edit {active:true}` 且被嵌入时才存在。 */
+  let edit: EditLayer | null = null
+
+  function postCanvas (payload: Record<string, unknown>): void {
+    if (window.parent === window) {
+      return
+    }
+    window.parent.postMessage(payload, window.location.origin)
+  }
 
   function applyExternalHidden (): void {
     const ids = new Set((engine.current?.elements ?? []).map(el => el.id))
@@ -120,15 +152,47 @@ export async function bootstrapStream (stage: HTMLElement): Promise<void> {
     neuro?.setExternalHidden(externalHidden)
   }
 
+  function setEditActive (active: boolean): void {
+    if (!active) {
+      edit?.destroy()
+      edit = null
+      return
+    }
+    if (window.parent === window) {
+      return
+    }
+    if (!edit) {
+      edit = new EditLayer({
+        stage,
+        engine,
+        neuro: () => neuro,
+        post: postCanvas,
+      })
+    }
+  }
+
   window.addEventListener('message', (event: MessageEvent) => {
     // 只认父页面（dashboard/vedal 顶层页）；neuro iframe 自己转发的帧不回头处理。
     if (window.parent === window || event.source !== window.parent) {
       return
     }
     const data = event.data as
-      | { ns?: string, type?: string, hidden?: string[], value?: number, muted?: boolean }
+      | {
+        ns?: string
+        type?: string
+        hidden?: string[]
+        value?: number
+        muted?: boolean
+        active?: boolean
+        kind?: string
+        id?: string
+      }
       | undefined
     if (data?.ns !== 'stream-canvas') {
+      return
+    }
+    // stream-canvas 收紧为同源：父页面都是 vedal 同源页（Studio / 观看页）。
+    if (event.origin !== window.location.origin) {
       return
     }
     if (data.type === 'visibility') {
@@ -138,6 +202,14 @@ export async function bootstrapStream (stage: HTMLElement): Promise<void> {
       canvasVolume = Math.min(1, Math.max(0, Number(data.value ?? 1)))
       canvasMuted = Boolean(data.muted)
       neuro?.setVolume(canvasVolume, canvasMuted)
+    } else if (data.type === 'edit') {
+      setEditActive(Boolean(data.active))
+    } else if (data.type === 'select') {
+      if (data.kind === 'element' || data.kind === 'neuro-window') {
+        edit?.select(data.kind, String(data.id ?? ''))
+      } else {
+        edit?.clear()
+      }
     }
   })
 
@@ -367,6 +439,11 @@ export async function bootstrapStream (stage: HTMLElement): Promise<void> {
       applySceneNeuro()
       // 切场景 = 元素清单变了：外部隐藏集合按新场景重新取交集
       applyExternalHidden()
+      // 场景间 chat 的 content 可能不同 → 实例被重建，重新抓一次引用
+      // （同 id 内容一致时是 no-op，不会重排聊天行）
+      rebindChat()
+      // 编辑层：选中框/拖动预览属于旧场景，必须丢弃
+      edit?.sceneChanged()
     } catch (error) {
       console.warn(`场景切换失败: ${id}`, error)
     }
@@ -379,6 +456,205 @@ export async function bootstrapStream (stage: HTMLElement): Promise<void> {
     }
     for (const [id, payload] of Object.entries(map)) {
       engine.update(id, payload)
+    }
+  }
+
+  // ---------- manifest 热替换双轨（不整页 reload）----------
+
+  /** 聊天历史缓存：与 ChatOverlay 的 id 去重语义一致，按时间顺序保留最近 N 条。 */
+  function rememberChat (msg: ChatMsg): void {
+    chatHistory = chatHistory.filter(m => m.id !== msg.id)
+    chatHistory.push(msg)
+    if (chatHistory.length > CHAT_HISTORY_MAX) {
+      chatHistory = chatHistory.slice(-CHAT_HISTORY_MAX)
+    }
+  }
+
+  function replaceChatHistory (messages: ChatMsg[]): void {
+    chatHistory = messages.slice(-CHAT_HISTORY_MAX)
+  }
+
+  /** content 重建后 `chat` 会指向旧实例（报告 A4 点名的悬空引用）：
+   *  重新从引擎取实例，并用本地历史恢复聊天行。 */
+  function rebindChat (): void {
+    const next = chatView()
+    if (next === chat) {
+      return
+    }
+    chat = next
+    if (!chat) {
+      return
+    }
+    if (chatHistory.length) {
+      chat.replace(chatHistory)
+    } else {
+      chat.clear()
+    }
+  }
+
+  function scenesEqual (a: SceneDef[], b: SceneDef[]): boolean {
+    if (a.length !== b.length) {
+      return false
+    }
+    for (let i = 0; i < a.length; i++) {
+      const left = a[i]
+      const right = b[i]
+      if (!left || !right || left.id !== right.id) {
+        return false
+      }
+      if (JSON.stringify(left) !== JSON.stringify(right)) {
+        return false
+      }
+    }
+    return true
+  }
+
+  /** 结构轨判据：id 增删 / content / script / visible / timeline / duration 变。
+   *  其余（box/z/css/neuro 块/名称/标签）都走布局轨。 */
+  function structureChanged (a: SceneDef, b: SceneDef): boolean {
+    const left = new Map(a.elements.map(e => [e.id, e]))
+    const right = new Map(b.elements.map(e => [e.id, e]))
+    if (left.size !== right.size) {
+      return true
+    }
+    for (const [id, e] of left) {
+      const next = right.get(id)
+      if (!next) {
+        return true
+      }
+      if (JSON.stringify(e.content) !== JSON.stringify(next.content)) {
+        return true
+      }
+      if (JSON.stringify(e.script ?? null) !== JSON.stringify(next.script ?? null)) {
+        return true
+      }
+      if ((e.visible !== false) !== (next.visible !== false)) {
+        return true
+      }
+    }
+    if (JSON.stringify(a.timeline ?? null) !== JSON.stringify(b.timeline ?? null)) {
+      return true
+    }
+    if (JSON.stringify(a.duration ?? null) !== JSON.stringify(b.duration ?? null)) {
+      return true
+    }
+    return false
+  }
+
+  async function fetchSceneStatus (): Promise<SceneInfo | null> {
+    try {
+      const resp = await fetch(apiUrl('stream/status?want=scene'), { cache: 'no-store' })
+      if (!resp.ok) {
+        return null
+      }
+      const data = await resp.json() as {
+        sections?: { scene?: { current?: SceneInfo | null } }
+      }
+      return data.sections?.scene?.current ?? null
+    } catch {
+      return null
+    }
+  }
+
+  function replaceSceneCache (next: SceneDef[]): void {
+    sceneList = next
+    sceneMap.clear()
+    for (const scene of next) {
+      sceneMap.set(scene.id, scene)
+    }
+  }
+
+  /** `manifest_changed` 的热替换入口：拉全量 → 与本地缓存 diff → 布局轨或结构轨。
+   *  只有 diff 本身抛异常才回退整页 reload（fetch 失败保持当前画面）。 */
+  async function applyManifestChange (ev: FeedEvent): Promise<void> {
+    let next: SceneDef[]
+    try {
+      next = await fetchScenes()
+    } catch (error) {
+      console.warn('清单热替换：拉取失败，保持当前画面', error)
+      return
+    }
+    if (scenesEqual(sceneList, next)) {
+      // 幂等：重复收到同版本帧（或别的标签页保存了相同内容）直接 no-op
+      return
+    }
+
+    const curId = engine.current?.id ?? ''
+    const oldScene = curId ? sceneMap.get(curId) : undefined
+    const nextMap = new Map(next.map(s => [s.id, s]))
+    const newScene = curId ? nextMap.get(curId) : undefined
+    const payloadScene = ev.scene as SceneInfo | null | undefined
+
+    try {
+      // 全局删除：任何场景都不再引用的元素先彻底销毁（两条轨都要做；
+      // 只 hide 的话 DOM/video 会一直留着）。
+      const alive = new Set<string>()
+      for (const scene of next) {
+        for (const el of scene.elements) {
+          alive.add(el.id)
+        }
+      }
+      for (const scene of sceneList) {
+        for (const el of scene.elements) {
+          if (!alive.has(el.id)) {
+            engine.remove(el.id)
+          }
+        }
+      }
+
+      if (oldScene && newScene && !structureChanged(oldScene, newScene)) {
+        // 布局轨：不 resetTimeline、不跑脚本、不重建 content
+        const neuroChanged
+          = JSON.stringify(oldScene.neuro ?? null) !== JSON.stringify(newScene.neuro ?? null)
+        engine.replaceScenes(next)
+        replaceSceneCache(next)
+        for (const def of newScene.elements) {
+          engine.applyLayout(def.id, def)
+        }
+        if (neuroChanged) {
+          applySceneNeuro()
+        }
+        edit?.refresh()
+        console.info('清单布局轨已应用', newScene.id)
+        return
+      }
+
+      // 结构轨：整份 defs 替换 + 按新数据重跑当前场景
+      engine.replaceScenes(next)
+      replaceSceneCache(next)
+
+      const target = curId && nextMap.has(curId)
+        ? curId
+        : nextMap.has(SCENE_STARTING_SOON)
+          ? SCENE_STARTING_SOON
+          : next.find(s => s.elements.some(e => e.id === 'chat'))?.id ?? next[0]?.id
+      if (!target) {
+        edit?.refresh()
+        return
+      }
+
+      // elapsed 优先用广播 payload 的权威场景快照；过期/缺失才拉 status
+      let elapsed = payloadScene && payloadScene.id === target
+        ? Number(payloadScene.elapsed ?? 0)
+        : 0
+      let duration = payloadScene && payloadScene.id === target
+        ? Number(payloadScene.duration ?? 0)
+        : 0
+      if (!payloadScene || payloadScene.id !== target) {
+        const fresh = await fetchSceneStatus()
+        if (fresh && fresh.id === target) {
+          elapsed = Number(fresh.elapsed ?? 0)
+          duration = Number(fresh.duration ?? 0)
+        }
+      }
+
+      await setScene(target, { instant: true, elapsed, duration })
+      rebindChat()
+      edit?.refresh()
+      console.info('清单结构轨已应用', target)
+    } catch (error) {
+      console.error('清单热替换失败，回退整页重载', error)
+      window.location.reload()
     }
   }
 
@@ -443,8 +719,10 @@ export async function bootstrapStream (stage: HTMLElement): Promise<void> {
 
     // 聊天层：重连时用 snapshot 的最近记录整体恢复；无场次则清空
     if (snap.chat?.length) {
+      replaceChatHistory(snap.chat)
       chat?.replace(snap.chat)
     } else {
+      replaceChatHistory([])
       chat?.clear()
     }
     applyElements(snap.elements)
@@ -477,6 +755,7 @@ export async function bootstrapStream (stage: HTMLElement): Promise<void> {
 
   // 新场次开始：清掉上一场残留聊天（场景由 start 广播的 scene_set 驱动）
   feed.on('session_begin', () => {
+    replaceChatHistory([])
     chat?.clear()
   })
 
@@ -493,6 +772,7 @@ export async function bootstrapStream (stage: HTMLElement): Promise<void> {
         void setScene(s === 'starting' ? SCENE_ROOM_INTRO : SCENE_ROOM)
       }
     } else if (s === 'offline') {
+      replaceChatHistory([])
       chat?.clear()
       void setScene(SCENE_STARTING_SOON)
     }
@@ -509,11 +789,11 @@ export async function bootstrapStream (stage: HTMLElement): Promise<void> {
     engine.update(String(ev.id ?? ''), ev.payload)
   })
 
-  feed.on('manifest_changed', () => {
-    // 场景清单被改了（dashboard 里编辑过）：本页只在启动时拉一次清单，
-    // 重载页面最省心——也最不容易出现"数据换了、画面没换"的错位。
-    console.info('场景清单已更新，重新加载画面')
-    window.location.reload()
+  feed.on('manifest_changed', (ev: FeedEvent) => {
+    // 场景清单被改了（dashboard 里编辑过）：拉全量清单做 diff，
+    // 布局轨直接应用、结构轨替换 defs + setScene（instant）+ chat 重绑定。
+    // 不再整页 reload——reload 会重载 neuro iframe，导致当前轮语音重播。
+    void applyManifestChange(ev)
   })
 
   feed.on('settings', (ev: FeedEvent) => {
@@ -522,16 +802,19 @@ export async function bootstrapStream (stage: HTMLElement): Promise<void> {
   })
 
   feed.on('session_end', () => {
+    replaceChatHistory([])
     chat?.clear()
     void setScene(SCENE_STARTING_SOON)
   })
 
   feed.on('chat_message', (ev: FeedEvent) => {
+    rememberChat(ev as unknown as ChatMsg)
     chat?.append(ev as unknown as ChatMsg)
   })
 
   // 高亮消息入列：聊天层照样占一条普通行；浮层由 neuro 窗口在真正注入后弹。
   feed.on('highlight_message', (ev: FeedEvent) => {
+    rememberChat(ev as unknown as ChatMsg)
     chat?.append(ev as unknown as ChatMsg)
   })
 
@@ -550,7 +833,9 @@ export async function bootstrapStream (stage: HTMLElement): Promise<void> {
       return neuro
     },
     feed,
-    chat,
+    get chat () {
+      return chat
+    },
     noSource,
     setScene,
     ensureNeuro,
@@ -560,6 +845,9 @@ export async function bootstrapStream (stage: HTMLElement): Promise<void> {
   // 被 OBS 页 / 观看页嵌入时通知父页面：可以补发 visibility/volume 了
   // （父页面在 iframe 装载前就持有状态，早发的消息会丢）。
   if (window.parent !== window) {
-    window.parent.postMessage({ ns: 'stream-canvas', type: 'ready' }, '*')
+    window.parent.postMessage(
+      { ns: 'stream-canvas', type: 'ready' },
+      window.location.origin,
+    )
   }
 }

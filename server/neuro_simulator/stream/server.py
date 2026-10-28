@@ -734,15 +734,27 @@ def create_app() -> FastAPI:
         """清单的元信息：是不是默认值 / 什么时候改的 / 多少字符。"""
         return scene_catalog.manifest_source()
 
+    def manifest_event() -> dict:
+        """画面热替换事件：带清单版本与当前场景快照（elapsed 供结构轨续播）。
+
+        事件名不变（`manifest_changed` 已在 feed 的 EVENT_NAMES 里），只是从
+        "无 payload 的重载信号"升级为可 diff 的数据帧。
+        """
+        lp = _loop()
+        return {
+            "type": "manifest_changed",
+            "updated_at": scene_catalog.manifest_source().get("updated_at"),
+            "scene": lp.scene_snapshot() or None,
+        }
+
     @app.put("/ui/manifest")
     async def ui_manifest_save(payload: ManifestPayload):
-        """保存场景清单（校验 → 落库 → 刷新缓存 → 通知画面重载）。"""
+        """保存场景清单（校验 → 落库 → 刷新缓存 → 通知画面热替换）。"""
         try:
             await scene_catalog.save_manifest(payload.content)
         except SceneError as e:
             raise HTTPException(status_code=400, detail=str(e))
-        # 画面页启动时拉一次清单：改了要让它重新拉（重载页面最省事，也最不容易出偏）
-        app.state.bus.publish({"type": "manifest_changed"})
+        app.state.bus.publish(manifest_event())
         return {"status": "ok", "source": scene_catalog.manifest_source()}
 
     @app.post("/ui/manifest/reset")
@@ -752,7 +764,7 @@ def create_app() -> FastAPI:
             await scene_catalog.reset_manifest()
         except SceneError as e:
             raise HTTPException(status_code=400, detail=str(e))
-        app.state.bus.publish({"type": "manifest_changed"})
+        app.state.bus.publish(manifest_event())
         return {"status": "ok", "source": scene_catalog.manifest_source()}
 
     @app.get("/ui/events")

@@ -123,6 +123,71 @@ export class ElementEngine {
     return [...this.defs.values()]
   }
 
+  /** 热替换整份场景定义（构造后**唯一**的 defs 写入口）。
+   *
+   * 只换数据，不动已挂载的 DOM/实例；当前场景若仍存在，同步 `current` 指向
+   * 新对象，保证调用方随后读到的 `neuro` / `timeline` 是新数据。
+   */
+  replaceScenes (scenes: SceneDef[]): void {
+    this.defs.clear()
+    for (const s of scenes) {
+      this.defs.set(s.id, s)
+    }
+    if (this.current) {
+      const next = this.defs.get(this.current.id)
+      if (next) {
+        this.current = next
+      }
+    }
+  }
+
+  /** 布局轨（热替换）：只更新几何/层级/样式。
+   *
+   * **不** resetTimeline、不跑 enter/exit/move、不重建 content、不改可见性。
+   * 元素未挂载则 no-op（下次 `setScene` 自然带上新 def）。
+   */
+  applyLayout (id: string, def: ElementDef): void {
+    const m = this.mounted.get(id)
+    if (!m) {
+      return
+    }
+    m.def = def
+    m.el.style.zIndex = String(def.z)
+    m.box = def.box
+    this.applyGeometry(m)
+    this.applyCss(m)
+  }
+
+  /** 结构轨：彻底销毁一个元素（从清单删除 / 改名 / 级联清理）。
+   *
+   * dispose 组件实例、取消动画、停掉 video、移除 DOM，并清掉引擎缓存；
+   * 未挂载也清缓存（id 可能还有 state / 外部隐藏标记）。
+   */
+  remove (id: string): void {
+    const m = this.mounted.get(id)
+    this.states.delete(id)
+    this.overrideHidden.delete(id)
+    if (!m) {
+      return
+    }
+    this.mounted.delete(id)
+    this.asView(m)?.dispose?.()
+    for (const anim of m.el.getAnimations()) {
+      anim.cancel()
+    }
+    const videos = Array.from(m.el.querySelectorAll('video'))
+    for (const video of videos) {
+      video.pause()
+      video.removeAttribute('src')
+      video.load()
+    }
+    this.timelineEls.delete(m.el)
+    for (const video of videos) {
+      this.timelineEls.delete(video)
+    }
+    m.el.remove()
+  }
+
   has (id: string): boolean {
     return this.defs.has(id)
   }
@@ -270,10 +335,14 @@ export class ElementEngine {
         this.mount(e)
         m = this.mounted.get(e.id)!
       } else if (!sameContent(m.def.content, e.content)) {
-        // 内容变了（改数据/换组件）→ 重建内部，实例随之换新
+        // 内容变了（改数据/换组件）→ 重建内部，实例随之换新。
+        // 组件可能往根节点上加自己的类（如 wordle 的 `wl`）：重置类名，
+        // 否则从 A 换成 B 再换回来时会残留上一套组件样式。
         this.asView(m)?.dispose?.()
         m.el.replaceChildren()
+        m.el.className = 'ns-el'
         m.view = this.buildContent(m.el, e.content)
+        this.applyHiddenFlag(e.id, m)
         this.replay(m)
       }
       const moved = !sameLayout(m.def, e)

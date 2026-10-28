@@ -114,8 +114,56 @@ body {
   object-fit: contain;
 }
 
-/* ===== no source：neuro 中途掉线时整屏覆盖（chat 在它上面） ===== */
-#no-source {
+/* ===== 编辑覆盖层（仅 Studio 编辑模式；OBS 直挂永不创建） =====
+   覆盖在 stage 内，坐标 = 舞台局部 CSS 像素；z 必须压过所有元素与 #no-source。 */
+.ns-edit-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 2147483000;
+  pointer-events: auto;
+  touch-action: none;
+  cursor: default;
+}
+
+.ns-edit-overlay__box {
+  position: absolute;
+  box-sizing: border-box;
+  border: 1px solid #3b82f6;
+  pointer-events: none;
+}
+
+.ns-edit-overlay__label {
+  position: absolute;
+  left: 0;
+  bottom: 100%;
+  margin-bottom: 2px;
+  padding: 1px 4px;
+  background: #3b82f6;
+  color: #fff;
+  font: 11px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif;
+  white-space: nowrap;
+  pointer-events: none;
+}
+
+.ns-edit-overlay__guide {
+  position: absolute;
+  background: #f43f5e;
+  pointer-events: none;
+}
+
+.ns-edit-overlay__guide--x {
+  top: 0;
+  bottom: 0;
+  width: 1px;
+}
+
+.ns-edit-overlay__guide--y {
+  left: 0;
+  right: 0;
+  height: 1px;
+}
+
+/* ===== no source：neuro 中途掉线时整屏覆盖（chat 在它上面） ===== */#no-source {
   position: absolute;
   inset: 0;
   width: 100%;

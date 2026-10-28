@@ -43,6 +43,16 @@
           allow="autoplay"
           title="Stream canvas"
         />
+        <div v-if="status.reachable.value" class="studio-canvas__toolbar">
+          <v-btn
+            icon="mdi-cursor-move"
+            size="small"
+            variant="flat"
+            :color="editMode ? 'primary' : undefined"
+            :title="editMode ? '退出编辑模式' : '编辑模式：点选 / 拖动 / 边缘吸附'"
+            @click="toggleEditMode"
+          />
+        </div>
       </div>
 
       <!-- dock：五张操作卡，内部滚动，不把页面撑出视口 -->
@@ -847,6 +857,8 @@ const CATEGORIES = [
 
 const canvasFrame = ref<HTMLIFrameElement | null>(null)
 const canvasReady = ref(false)
+/** 编辑模式：只在被 Studio 嵌入的画布里激活；OBS 直挂没有父页面，永不激活。 */
+const editMode = ref(false)
 /** 合成器元素/层的强制隐藏集合（只隐藏，不能强制显示）。
  *  命名空间：场景元素 id、`neuro.window`、`neuro.layer:<id>`（见 ui/stream/main.ts）。 */
 const hiddenIds = ref<string[]>([])
@@ -981,7 +993,8 @@ const muted = ref(localStorage.getItem(AUDIO_MUTED_KEY) === '1')
 const volumePct = ref(Math.round(volume.value * 100))
 
 function postCanvas(payload: Record<string, unknown>): void {
-  canvasFrame.value?.contentWindow?.postMessage(payload, '*')
+  // stream-canvas 通道收紧为同源：Studio 与画布始终同源（vedal 静态托管）。
+  canvasFrame.value?.contentWindow?.postMessage(payload, window.location.origin)
 }
 
 function sendVisibility(): void {
@@ -996,15 +1009,115 @@ function sendVolume(): void {
   postCanvas({ ns: 'stream-canvas', type: 'volume', value: volume.value, muted: muted.value })
 }
 
+function sendEdit(active: boolean): void {
+  if (!canvasReady.value) return
+  postCanvas({ ns: 'stream-canvas', type: 'edit', active })
+}
+
+function toggleEditMode(): void {
+  editMode.value = !editMode.value
+  sendEdit(editMode.value)
+}
+
+/** 切场景 / 删场景 / 重置前先退出编辑模式（画布会丢弃预览与选中）。 */
+function exitCanvasEdit(): void {
+  if (!editMode.value) return
+  editMode.value = false
+  sendEdit(false)
+}
+
 function onCanvasMessage(event: MessageEvent): void {
-  // 只认自己 iframe 的 ready；其余消息（如 neuro 转发的帧）一概不处理
+  // 只认同源、只认自己 iframe（其余消息如 neuro 转发的帧一概不处理）
+  if (event.origin !== window.location.origin) return
   if (event.source !== canvasFrame.value?.contentWindow) return
-  const data = event.data as { ns?: string, type?: string } | undefined
-  if (data?.ns !== 'stream-canvas' || data.type !== 'ready') return
-  canvasReady.value = true
-  // iframe 装载前父页面就持有状态：ready 后补发
-  sendVisibility()
-  sendVolume()
+  const data = event.data as
+    | {
+      ns?: string
+      type?: string
+      kind?: string | null
+      id?: string | null
+      sceneId?: string
+      active?: boolean
+      box?: ManifestBox
+    }
+    | undefined
+  if (data?.ns !== 'stream-canvas') return
+
+  if (data.type === 'ready') {
+    canvasReady.value = true
+    // iframe 装载前父页面就持有状态：ready 后补发
+    sendVisibility()
+    sendVolume()
+    sendEdit(editMode.value)
+    return
+  }
+  if (data.type === 'select') {
+    if (
+      (data.kind === 'element' || data.kind === 'neuro-window')
+      && typeof data.id === 'string'
+      && data.id
+    ) {
+      // 直接赋值（不能再走 selectElement：那会 flush + 回发消息，形成回环）
+      selectedElement.value = { kind: data.kind, id: data.id }
+    } else {
+      selectedElement.value = null
+    }
+    return
+  }
+  if (data.type === 'preview' || data.type === 'commit') {
+    if (!data.box || typeof data.id !== 'string' || !data.id) return
+    if (data.type === 'preview') {
+      applyCanvasPreview(data.kind, data.id, data.box)
+    } else {
+      applyCanvasCommit(data.sceneId, data.kind, data.id, data.box)
+    }
+  }
+}
+
+/** 拖动中间态：只更新打开着的表单显示值，不写 manifest。 */
+function applyCanvasPreview(
+  kind: string | null | undefined,
+  id: string,
+  box: ManifestBox,
+): void {
+  if (elementDialog.value && elementTargetId.value === id && kind === 'element') {
+    elementForm.x = pctValue(box.x ?? 0)
+    elementForm.y = pctValue(box.y ?? 0)
+    if (box.edge?.x || box.edge?.y) elementForm.placement = placementOf(box)
+  }
+  if (neuroDialog.value && !neuroEditingLayer.value && kind === 'neuro-window') {
+    neuroForm.x = pctValue(box.x ?? 0)
+    neuroForm.y = pctValue(box.y ?? 0)
+  }
+}
+
+/** 松手落库：只改本地 manifest 缓存 → 立即 flush（不等 1s 防抖）。 */
+function applyCanvasCommit(
+  sceneId: string | undefined,
+  kind: string | null | undefined,
+  id: string,
+  box: ManifestBox,
+): void {
+  const scene = (sceneId ? sceneById(sceneId) : displayedScene.value) ?? displayedScene.value
+  if (!scene) return
+  if (kind === 'element') {
+    const el = scene.elements?.find((e) => e.id === id)
+    if (!el) return
+    el.box = cloneData(box)
+    selectedElement.value = { kind: 'element', id }
+  } else if (kind === 'neuro-window') {
+    if (!scene.neuro) return
+    scene.neuro.x = Number(box.x ?? scene.neuro.x ?? 0)
+    scene.neuro.y = Number(box.y ?? scene.neuro.y ?? 0)
+    if (box.edge) scene.neuro.edge = cloneData(box.edge)
+    selectedElement.value = { kind: 'neuro-window', id }
+  } else {
+    return
+  }
+  applyCanvasPreview(kind, id, box)
+  queueManifestSave()
+  // 拖拽 commit 必须立刻落盘；防抖只留给表单输入。
+  void flushManifestSave()
 }
 
 function onVolume(): void {
@@ -1093,6 +1206,7 @@ function canMoveScene(delta: number): boolean {
 async function selectSceneRow(id: string): Promise<void> {
   selectedSceneId.value = id
   if (id === displayedSceneId.value) return
+  exitCanvasEdit()
   await flushManifestSave()
   await switchScene(id)
 }
@@ -1193,6 +1307,10 @@ async function selectElement(kind: ElementKind, id: string): Promise<void> {
   await flushManifestSave()
   await flushNeuroManifestSave()
   selectedElement.value = { kind, id }
+  // 双向同步：列表点选 → 画布画选中框（画布的 select 处理只赋值，不回发，避免回环）
+  if (editMode.value) {
+    postCanvas({ ns: 'stream-canvas', type: 'select', kind, id })
+  }
 }
 
 // 切场景 = 上一个场景的选中行作废；未保存改动先落盘。
@@ -1275,12 +1393,28 @@ function queueManifestSave(): void {
 
 /** 立即落盘未保存改动（关闭对话框 / 切换选中行 / 切场景时调用）。 */
 async function flushManifestSave(): Promise<void> {
+  if (!manifestDirty || !streamManifest.value) {
+    if (manifestTimer !== null) {
+      window.clearTimeout(manifestTimer)
+      manifestTimer = null
+    }
+    return
+  }
+  if (manifestSaving) {
+    // 保存中：**不能清掉防抖 timer**，否则这次改动可能永远等不到下一次 flush
+    //（拖拽 commit 连发时尤其明显）。timer 到点会再进来。
+    if (manifestTimer === null) {
+      manifestTimer = window.setTimeout(() => {
+        manifestTimer = null
+        void flushManifestSave()
+      }, 1000)
+    }
+    return
+  }
   if (manifestTimer !== null) {
     window.clearTimeout(manifestTimer)
     manifestTimer = null
   }
-  if (!manifestDirty || !streamManifest.value) return
-  if (manifestSaving) return
   const rev = manifestRev
   const content = stringifyManifest()
   manifestSaving = true
@@ -1498,6 +1632,7 @@ const deleteSceneLabel = ref('')
 async function deleteScene(): Promise<void> {
   const id = selectedSceneId.value
   if (!id || !streamManifest.value) return
+  exitCanvasEdit()
   const idx = sceneIndex(id)
   if (idx < 0 || streamManifest.value.scenes.length <= 1) {
     deleteOpen.value = false
@@ -1529,6 +1664,7 @@ const resetDialog = ref(false)
 
 async function resetManifest(): Promise<void> {
   resetDialog.value = false
+  exitCanvasEdit()
   discardPendingManifest()
   manifestError.value = ''
   try {
@@ -2216,6 +2352,15 @@ onUnmounted(() => {
   height: 100%;
   border: 0;
   background: #000;
+}
+
+.studio-canvas__toolbar {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  z-index: 1;
+  display: flex;
+  gap: 6px;
 }
 
 .studio-dock {
