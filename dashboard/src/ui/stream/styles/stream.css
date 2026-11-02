@@ -63,10 +63,21 @@ body {
   display: none;
 }
 
+/* ===== 文本元素基座（可读默认；字号跟随舞台宽度，元素改尺寸不改字号） ===== */
+.ns-text {
+  color: #fff;
+  font-family: "Segoe UI", "Roboto", "Noto Sans SC", "Helvetica Neue", Arial, sans-serif;
+  font-size: calc(var(--ns-stage-w, 1000px) * 0.03);
+  line-height: 1.35;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  text-shadow: 0 1px 4px rgba(0, 0, 0, 0.8);
+}
+
 /* ===== 聊天覆盖层（Twitch 风格） =====
    规格对齐 jChat/ChatIS 的实际直播配置：Segoe UI、800 字重、白字 + 黑描边、自动滚底。
-   字号 6cqi = 旧 1.5cqi（舞台宽）在 25% 宽聊天层下的等价值，换场景改宽度会等比缩放。
-   描边用 0.11em（1920 下约 3.2px，接近 jChat thick 3px），随元素缩放。 */
+   字号与元素尺寸解耦：跟随舞台宽度（--ns-stage-w × props.font），拖宽/拖高不改字号。
+   描边用 0.11em（1920 下约 3.2px，接近 jChat thick 3px），随字号缩放。 */
 .ns-el[data-component="chat.overlay"] {
   overflow: hidden;
   user-select: none;
@@ -76,9 +87,9 @@ body {
 }
 /* 字号写在子节点上：元素自身就是查询容器，写在它自己身上只会解析到舞台宽度 */
 .chat-lines {
-  /* 场景可通过元素 css 覆盖字号比例：媒体场景的聊天层更宽更矮，
-     等比缩字后仍保持与 25% 宽聊天层相近的绝对字号 */
-  font-size: calc(6cqi * var(--chat-font-scale, 1));
+  /* 字号与元素尺寸解耦：跟随**舞台宽度**（--ns-stage-w 由页面 ResizeObserver 写），
+     元素拖宽/拖高只改变换行与可见行数，字号不变。默认 0.06 ≈ 旧 6cqi × 25% 宽。 */
+  font-size: calc(var(--ns-stage-w, 1000px) * var(--chat-font, 0.06));
   font-weight: 800;
   -webkit-text-stroke: 0.11em #000;
   /* stroke 居中绘制；不先把 fill 画在上层时细字形的白色会被描边吃光 */
@@ -107,7 +118,7 @@ body {
   font-weight: inherit;
   color: #fff;
 }
-/* 表情图片随行内字号缩放（.chat-lines 的 cqi 字号 × 场景的 --chat-font-scale） */
+/* 表情图片随行内字号缩放（.chat-lines 的舞台宽度比例字号） */
 .chat-emote {
   height: 1em;
   vertical-align: -0.15em;
@@ -131,6 +142,28 @@ body {
   border: 1px solid #3b82f6;
   pointer-events: none;
 }
+
+/* 8 个缩放手柄：命中区 10px（>=8px 要求），盖在元素/iframe 上也先命中 */
+.ns-edit-overlay__handle {
+  position: absolute;
+  width: 10px;
+  height: 10px;
+  margin: -5px 0 0 -5px;
+  background: #fff;
+  border: 1px solid #3b82f6;
+  border-radius: 2px;
+  pointer-events: auto;
+  display: none;
+}
+
+.ns-edit-overlay__handle--nw { left: 0; top: 0; cursor: nwse-resize; }
+.ns-edit-overlay__handle--n { left: 50%; top: 0; cursor: ns-resize; }
+.ns-edit-overlay__handle--ne { left: 100%; top: 0; cursor: nesw-resize; }
+.ns-edit-overlay__handle--e { left: 100%; top: 50%; cursor: ew-resize; }
+.ns-edit-overlay__handle--se { left: 100%; top: 100%; cursor: nwse-resize; }
+.ns-edit-overlay__handle--s { left: 50%; top: 100%; cursor: ns-resize; }
+.ns-edit-overlay__handle--sw { left: 0; top: 100%; cursor: nesw-resize; }
+.ns-edit-overlay__handle--w { left: 0; top: 50%; cursor: ew-resize; }
 
 .ns-edit-overlay__label {
   position: absolute;
@@ -161,6 +194,11 @@ body {
   left: 0;
   right: 0;
   height: 1px;
+}
+
+/* ===== 独立聊天窗（chat.frame：/ui/chat/ 的沙箱 iframe，数据由画布转发） ===== */
+.ns-el[data-component="chat.frame"] {
+  overflow: hidden;
 }
 
 /* ===== no source：neuro 中途掉线时整屏覆盖（chat 在它上面） ===== */#no-source {

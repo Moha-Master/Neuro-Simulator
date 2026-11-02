@@ -6,7 +6,7 @@
  * 覆盖。`setEnabled(false)`（intro 场景）会清空队列并忽略后续事件。
  */
 
-import { asset } from './assets'
+import { apiUrl } from '../engine/base'
 
 /** 高亮事件里的一条消息（与 stream 的 ChatMsg 同形，但不依赖它）。 */
 export interface HighlightMessage {
@@ -79,7 +79,7 @@ export class HighlightOverlay {
     }`
 
     this.el.innerHTML = `
-      <img src="${asset(bits ? 'sc_purple.png' : 'sc_pink.png')}" class="sc-background-image" alt="">
+      <img src="${apiUrl(`ui/assets/${bits ? 'sc_purple.png' : 'sc_pink.png'}`)}" class="sc-background-image" alt="">
       <div class="sc-content">
         <div class="sc-user"></div>
         <div class="sc-label">${label}</div>

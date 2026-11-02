@@ -1,0 +1,18 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="dark" />
+    <title>Neuro-Sama Chat</title>
+  </head>
+  <body>
+    <!-- 独立聊天页（dashboard 构建第五入口）：chat.frame 组件的 iframe 内容。
+         数据由画布经 postMessage 转发（ns "stream-chat"），本页不自建 SSE；
+         跑在 sandbox="allow-scripts" 的 iframe 里（opaque origin，拿不到父文档），
+         背景必须透明（叠在合成器画面上）。 -->
+    <div id="chat-root"></div>
+
+    <script type="module" src="/src/ui/chat/entry.ts"></script>
+  </body>
+</html>

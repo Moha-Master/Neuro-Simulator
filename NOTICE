@@ -78,3 +78,16 @@ Data files
 5. Wordle visual / interaction reference
    Project: Neurdle (MIT) — https://github.com/Firecrafters/Neurdle
    Notes:   colour assignment rules and tile flip animation timing.
+
+6. Bundled art assets (project's own artwork, shipped in the Python package)
+   Files:   server/neuro_simulator/stream/assets/images/no_source.webp
+            server/neuro_simulator/stream/assets/images/room_v1_bg_media.webp
+            server/neuro_simulator/stream/assets/images/room_v2_bg.webp
+            server/neuro_simulator/neuro_sama/assets/neurosama.png
+            server/neuro_simulator/neuro_sama/assets/room_v2_bg.webp
+            server/neuro_simulator/neuro_sama/assets/sc_purple.png
+            server/neuro_simulator/neuro_sama/assets/sc_pink.png
+            server/neuro_simulator/neuro_sama/assets/neuro_start.mp4
+   License: GPL-3.0-or-later (project artwork). Distributed with the wheel as
+   module asset templates; first launch copies them into the module work
+   directory, where they can be replaced by user uploads.

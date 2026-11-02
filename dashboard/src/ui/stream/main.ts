@@ -23,9 +23,8 @@
 
 import type { SceneDef } from '../engine/schema'
 
-import type { ChatOverlay } from './chat'
 import { ACTIONS } from '../engine/action'
-import { apiUrl, foreignModuleBase, makeAssetUrl } from '../engine/base'
+import { apiUrl, foreignModuleBase, makeAssetUrl, moduleAssetUrl } from '../engine/base'
 import { ElementEngine } from '../engine/elements'
 import { EditLayer } from './edit'
 import { loadFonts } from './assets'
@@ -69,6 +68,15 @@ function resolveNeuroSettings (settings?: NeuroSettings): {
 export async function bootstrapStream (stage: HTMLElement): Promise<void> {
   await loadFonts()
 
+  // 舞台实时宽度：chat 字号/文本字号按它换算（元素改尺寸不改变字号）。
+  const applyStageWidth = (): void => {
+    stage.style.setProperty('--ns-stage-w', `${stage.clientWidth}px`)
+  }
+  applyStageWidth()
+  if (typeof ResizeObserver !== 'undefined') {
+    new ResizeObserver(applyStageWidth).observe(stage)
+  }
+
   let scenes: SceneDef[]
   try {
     scenes = await fetchScenes()
@@ -82,7 +90,7 @@ export async function bootstrapStream (stage: HTMLElement): Promise<void> {
   const engine = new ElementEngine(stage, scenes, {
     components: COMPONENTS,
     actions: ACTIONS,
-    assetUrl: makeAssetUrl(),
+    assetUrl: makeAssetUrl('stream'),
   })
   // 场景可以删：首帧优先 starting_soon，被删了就挑一个带 chat 的（聊天层实例要建好），
   // 再不行用清单第一项。清单本身保证非空。
@@ -93,20 +101,46 @@ export async function bootstrapStream (stage: HTMLElement): Promise<void> {
     await engine.setScene(initialScene, { instant: true })
   }
 
-  /** chat 元素可能被改成别的组件（结构轨重建）：只有具备聊天管线方法时才当它
-   *  是 ChatOverlay，否则置空（事件仍进历史缓存，改回来时恢复）。 */
-  function chatView (): ChatOverlay | null {
-    const view = engine.view<unknown>('chat')
-    if (!view || typeof (view as Partial<ChatOverlay>).append !== 'function') {
-      return null
-    }
-    return view as ChatOverlay
+  /** 具备聊天管线方法的组件实例（ChatOverlay 与 chat.frame 的 iframe 桥）。 */
+  interface ChatLike {
+    append (msg: ChatMsg): void
+    replace (messages: ChatMsg[]): void
+    clear (): void
   }
 
-  // 实时管线组件从元素引擎取（starting_soon 也声明了 chat，保证实例先建好）。
-  // 结构轨可能重建 chat 实例，所以这里是 `let`，由 rebindChat() 重新抓取。
-  let chat = chatView()
-  if (!chat) {
+  /** 聊天管线广播给**所有**实现方：`chat`（overlay）与用户自加的 chat.frame
+   *  独立聊天窗共用同一条 SSE（连接账：合成器 1 条，iframe 页 0 条）。 */
+  function chatViews (): ChatLike[] {
+    const out: ChatLike[] = []
+    for (const view of engine.views()) {
+      const c = view as Partial<ChatLike>
+      if (typeof c.append === 'function' && typeof c.replace === 'function' && typeof c.clear === 'function') {
+        out.push(view as ChatLike)
+      }
+    }
+    return out
+  }
+
+  function broadcastChat (
+    action: 'append' | 'replace' | 'clear',
+    payload?: ChatMsg | ChatMsg[],
+  ): void {
+    for (const view of chatViews()) {
+      try {
+        if (action === 'append') {
+          view.append(payload as ChatMsg)
+        } else if (action === 'replace') {
+          view.replace((payload as ChatMsg[]) ?? [])
+        } else {
+          view.clear()
+        }
+      } catch (error) {
+        console.warn('聊天窗更新失败', error)
+      }
+    }
+  }
+
+  if (!engine.view<unknown>('chat')) {
     console.warn('场景缺少 chat 元素，聊天事件将被忽略')
   }
   /** 聊天历史缓存：实例重建后 `replace()` 恢复（lastSnapshot.chat 是建连时刻的，
@@ -115,6 +149,9 @@ export async function bootstrapStream (stage: HTMLElement): Promise<void> {
   let chatHistory: ChatMsg[] = []
 
   const noSource = document.querySelector('#no-source')
+  if (noSource) {
+    ;(noSource as HTMLImageElement).src = moduleAssetUrl('no_source.webp')
+  }
   let neuro: NeuroLayer | null = null
   let streamState = 'offline'
   let neuroHealthy = true
@@ -439,9 +476,9 @@ export async function bootstrapStream (stage: HTMLElement): Promise<void> {
       applySceneNeuro()
       // 切场景 = 元素清单变了：外部隐藏集合按新场景重新取交集
       applyExternalHidden()
-      // 场景间 chat 的 content 可能不同 → 实例被重建，重新抓一次引用
-      // （同 id 内容一致时是 no-op，不会重排聊天行）
-      rebindChat()
+      // 场景间 chat 的 content 可能不同 → 实例被重建，广播一次本地历史恢复
+      // （同 id 内容一致时实例未变，replace 重放等价 no-op 观感）
+      broadcastChat('replace', chatHistory)
       // 编辑层：选中框/拖动预览属于旧场景，必须丢弃
       edit?.sceneChanged()
     } catch (error) {
@@ -474,21 +511,12 @@ export async function bootstrapStream (stage: HTMLElement): Promise<void> {
     chatHistory = messages.slice(-CHAT_HISTORY_MAX)
   }
 
-  /** content 重建后 `chat` 会指向旧实例（报告 A4 点名的悬空引用）：
-   *  重新从引擎取实例，并用本地历史恢复聊天行。 */
+  /** content 重建/新聊天窗挂载后，用本地历史恢复聊天行（广播给全部聊天窗）。 */
   function rebindChat (): void {
-    const next = chatView()
-    if (next === chat) {
-      return
-    }
-    chat = next
-    if (!chat) {
-      return
-    }
     if (chatHistory.length) {
-      chat.replace(chatHistory)
+      broadcastChat('replace', chatHistory)
     } else {
-      chat.clear()
+      broadcastChat('clear')
     }
   }
 
@@ -720,10 +748,10 @@ export async function bootstrapStream (stage: HTMLElement): Promise<void> {
     // 聊天层：重连时用 snapshot 的最近记录整体恢复；无场次则清空
     if (snap.chat?.length) {
       replaceChatHistory(snap.chat)
-      chat?.replace(snap.chat)
+      broadcastChat('replace', snap.chat)
     } else {
       replaceChatHistory([])
-      chat?.clear()
+      broadcastChat('clear')
     }
     applyElements(snap.elements)
 
@@ -756,7 +784,7 @@ export async function bootstrapStream (stage: HTMLElement): Promise<void> {
   // 新场次开始：清掉上一场残留聊天（场景由 start 广播的 scene_set 驱动）
   feed.on('session_begin', () => {
     replaceChatHistory([])
-    chat?.clear()
+    broadcastChat('clear')
   })
 
   feed.on('state', (ev: FeedEvent) => {
@@ -773,7 +801,7 @@ export async function bootstrapStream (stage: HTMLElement): Promise<void> {
       }
     } else if (s === 'offline') {
       replaceChatHistory([])
-      chat?.clear()
+      broadcastChat('clear')
       void setScene(SCENE_STARTING_SOON)
     }
   })
@@ -803,19 +831,19 @@ export async function bootstrapStream (stage: HTMLElement): Promise<void> {
 
   feed.on('session_end', () => {
     replaceChatHistory([])
-    chat?.clear()
+    broadcastChat('clear')
     void setScene(SCENE_STARTING_SOON)
   })
 
   feed.on('chat_message', (ev: FeedEvent) => {
     rememberChat(ev as unknown as ChatMsg)
-    chat?.append(ev as unknown as ChatMsg)
+    broadcastChat('append', ev as unknown as ChatMsg)
   })
 
   // 高亮消息入列：聊天层照样占一条普通行；浮层由 neuro 窗口在真正注入后弹。
   feed.on('highlight_message', (ev: FeedEvent) => {
     rememberChat(ev as unknown as ChatMsg)
-    chat?.append(ev as unknown as ChatMsg)
+    broadcastChat('append', ev as unknown as ChatMsg)
   })
 
   // neuro 的两条总线由 stream 后端聚合后原样转发：iframe 只吃这一条通道
@@ -834,7 +862,13 @@ export async function bootstrapStream (stage: HTMLElement): Promise<void> {
     },
     feed,
     get chat () {
-      return chat
+      return chatViews()[0] ?? null
+    },
+    get chatViews () {
+      return chatViews()
+    },
+    get edit () {
+      return edit
     },
     noSource,
     setScene,

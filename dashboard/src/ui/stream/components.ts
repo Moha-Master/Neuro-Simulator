@@ -12,12 +12,15 @@
 
 import type { Box } from '../engine/schema'
 import type { ComponentFactory } from '../engine/types'
+import { ChatFrame } from './chat-frame'
 import { ChatOverlay } from './chat'
 import { ChessBoardView } from './chess'
 import { WordleGameView } from './wordle'
 
 export const COMPONENTS: Record<string, ComponentFactory> = {
   'chat.overlay': (el, props) => new ChatOverlay(el, props),
+  /** 用户可自由摆放的聊天窗第二形态：独立页 /ui/chat/ 的沙箱 iframe + 转发。 */
+  'chat.frame': (el, props, stage) => new ChatFrame(el, props, stage),
   'wordle.game': el => new WordleGameView(el),
   'chess.board': el => new ChessBoardView(el),
 }

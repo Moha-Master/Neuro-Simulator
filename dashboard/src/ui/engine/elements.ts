@@ -28,6 +28,7 @@ import type {
   SceneDef,
   SceneTimeline,
   Script,
+  TextFont,
   TimelineStep,
 } from './schema'
 import type { AssetUrl, ComponentFactory, ComponentInstance, ElementView } from './types'
@@ -200,6 +201,17 @@ export class ElementEngine {
   /** 组件实例（main.ts 用它驱动字幕的实时管线） */
   view<T>(id: string): T | null {
     return (this.mounted.get(id)?.view ?? null) as T | null
+  }
+
+  /** 全部已挂载的组件实例（聊天窗这类"一页多实例"的实时管线广播用）。 */
+  views (): ComponentInstance[] {
+    const out: ComponentInstance[] = []
+    for (const m of this.mounted.values()) {
+      if (m.view) {
+        out.push(m.view)
+      }
+    }
+    return out
   }
 
   visible (id: string): boolean {
@@ -653,7 +665,11 @@ export class ElementEngine {
       case 'image': {
         const img = document.createElement('img')
         img.alt = ''
-        img.src = this.deps.assetUrl(content.src, 'image')
+        const url = this.deps.assetUrl(content.src, 'image')
+        // 资产寻址拒绝外链时返回空串：不加载（console.warn 已由寻址层发出）
+        if (url) {
+          img.src = url
+        }
         if (el.style.height !== 'auto' && el.style.height !== '') {
           img.style.width = '100%'
           img.style.height = '100%'
@@ -673,7 +689,10 @@ export class ElementEngine {
         if (content.autoplay) {
           v.autoplay = true
         }
-        v.src = this.deps.assetUrl(content.src, 'video')
+        const url = this.deps.assetUrl(content.src, 'video')
+        if (url) {
+          v.src = url
+        }
         v.style.width = '100%'
         v.style.height = '100%'
         v.style.objectFit = 'contain'
@@ -684,7 +703,33 @@ export class ElementEngine {
         const t = document.createElement('div')
         t.className = `ns-text${content.class ? ` ${content.class}` : ''}`
         t.textContent = content.text
+        this.applyTextFont(t, content.font)
         el.append(t)
+        return null
+      }
+      case 'iframe': {
+        const frame = document.createElement('iframe')
+        const url = this.deps.assetUrl(content.src, 'iframe')
+        if (url) {
+          frame.src = url
+        }
+        frame.loading = 'eager'
+        frame.title = content.title ?? ''
+        if (content.allow) {
+          frame.setAttribute('allow', content.allow)
+        }
+        // 沙箱默认 allow-scripts；allow-same-origin 让沙箱页读到父文档（__ns / 配置
+        // API），校验层已 400，这里兜底剥掉并告警。
+        const sandbox = content.sandbox ?? 'allow-scripts'
+        if (sandbox.includes('allow-same-origin')) {
+          console.warn(`[iframe] sandbox 拒绝 allow-same-origin（元素安全兜底）: ${content.src}`)
+        } else {
+          frame.setAttribute('sandbox', sandbox)
+        }
+        frame.style.width = '100%'
+        frame.style.height = '100%'
+        frame.style.border = '0'
+        el.append(frame)
         return null
       }
       case 'component': {
@@ -698,6 +743,29 @@ export class ElementEngine {
         el.dataset.component = content.name
         return factory(el, content.props ?? {}, this.stage)
       }
+    }
+  }
+
+  /** text.font 结构化排版：字号按**舞台宽度**比例（--ns-stage-w 由页面维护），
+   *  元素改尺寸不改字号（与 chat 同一机制，cqi 会随元素宽缩放所以不能用）。 */
+  private applyTextFont (target: HTMLElement, font: TextFont | undefined): void {
+    if (!font) {
+      return
+    }
+    if (font.family) {
+      target.style.fontFamily = font.family
+    }
+    if (font.size !== undefined && Number.isFinite(font.size) && font.size > 0) {
+      target.style.fontSize = `calc(var(--ns-stage-w, 1000px) * ${Number(font.size)})`
+    }
+    if (font.weight !== undefined) {
+      target.style.fontWeight = String(font.weight)
+    }
+    if (font.color) {
+      target.style.color = font.color
+    }
+    if (font.align) {
+      target.style.textAlign = font.align
     }
   }
 

@@ -322,11 +322,9 @@
             "kind": "component",
             "name": "chat.overlay",
             "props": {
-              "direction": "top"
+              "direction": "top",
+              "font": 0.0126
             }
-          },
-          "css": {
-            "--chat-font-scale": "0.58"
           }
         }
       ],

@@ -104,23 +104,132 @@ export function applyDrag (
   return next
 }
 
-/** 缩放：**第 3 期实现**。
+export interface ResizeOptions {
+  /** 最小布局尺寸（CSS 像素），防止拖成 0 或负值。 */
+  minPx?: number
+  /** 像素空间等比锁：`aspect = 起始宽 / 起始高`（两者都是屏幕像素）。 */
+  ratio?: boolean
+}
+
+/** 缩放：8 方向手柄，**拖手柄即把锚点规范化为左上**。
  *
- * 计划（设计定稿第 3 期）：拖手柄开始时把锚点规范化为左上并冻结实测 w/h；
- * 比例锁在像素空间换算（`aspect = (w*W)/(h*H)`），不能直接用 w/h 比例；
- * 结束后按 `edge` 逆变换回写 x/y。本批只保留签名，避免出现半成品缩放。
+ * - 起点用 `boxToRect(box, W, H, measured)`：`edge` 的右/下锚按实测 rect 换算成
+ *   left/top；`w/h` 为 auto 时用调用方传入的 offset 尺寸**冻结**成比例值。
+ * - 结果总是 `{x,y,w,h}`，不再带 `edge`（规范化后的语义就是左上锚）。
+ * - 比例锁必须在**像素空间**换算：`aspect = 起始 w / 起始 h`（都是 px），
+ *   不能用 `box.w / box.h`（宽按舞台宽、高按舞台高，单位不同）。
  */
 export function applyResize (
-  _box: Box,
-  _handle: ResizeHandle,
-  _dxPx: number,
-  _dyPx: number,
-  _stageW: number,
-  _stageH: number,
-  _measured?: MeasuredSize,
+  box: Box,
+  handle: ResizeHandle,
+  dxPx: number,
+  dyPx: number,
+  stageW: number,
+  stageH: number,
+  measured?: MeasuredSize,
+  opts: ResizeOptions = {},
 ): Box {
-  // TODO(第 3 期): 实现八向缩放 + edge 规范化 + 像素空间比例锁。
-  throw new Error('applyResize 尚未实现（第 3 期）')
+  const start = boxToRect(box, stageW, stageH, measured)
+  const minPx = Math.max(1, opts.minPx ?? 8)
+  if (stageW <= 0 || stageH <= 0) {
+    return { ...box }
+  }
+
+  const west = handle.includes('w')
+  const east = handle.includes('e')
+  const north = handle.includes('n')
+  const south = handle.includes('s')
+
+  // 起始边（像素）
+  let left = start.x
+  let top = start.y
+  let right = start.x + start.w
+  let bottom = start.y + start.h
+
+  if (west) {
+    left = start.x + dxPx
+  }
+  if (east) {
+    right = start.x + start.w + dxPx
+  }
+  if (north) {
+    top = start.y + dyPx
+  }
+  if (south) {
+    bottom = start.y + start.h + dyPx
+  }
+
+  // 先按最小尺寸夹住被拖的边，避免负宽高
+  if (right - left < minPx) {
+    if (west) {
+      left = right - minPx
+    } else {
+      right = left + minPx
+    }
+  }
+  if (bottom - top < minPx) {
+    if (north) {
+      top = bottom - minPx
+    } else {
+      bottom = top + minPx
+    }
+  }
+
+  let w = right - left
+  let h = bottom - top
+
+  if (opts.ratio && start.w > 0 && start.h > 0) {
+    const aspect = start.w / start.h
+    const corner = (west || east) && (north || south)
+    if (corner) {
+      // 角手柄：取"变化更明显"的那个轴作为驱动，避免斜拖时抖动
+      const widthDriven = Math.abs(dxPx) >= Math.abs(dyPx) * aspect
+      if (widthDriven) {
+        w = Math.max(minPx, w)
+        h = w / aspect
+      } else {
+        h = Math.max(minPx, h)
+        w = h * aspect
+      }
+    } else if (west || east) {
+      // 只拖左右边：高度跟随宽度（锚在起始上边）
+      w = Math.max(minPx, w)
+      h = w / aspect
+    } else {
+      // 只拖上下边：宽度跟随高度（锚在起始左边）
+      h = Math.max(minPx, h)
+      w = h * aspect
+    }
+    // 根据被拖的方向重新贴边
+    if (west) {
+      left = right - w
+    } else {
+      right = left + w
+    }
+    if (north) {
+      top = bottom - h
+    } else {
+      bottom = top + h
+    }
+  }
+
+  const next: Box = {
+    x: round4(left / stageW),
+    y: round4(top / stageH),
+    w: round4(w / stageW),
+    h: round4(h / stageH),
+  }
+  // 缩放后锚点已是左上：保留视觉变换，但删除 edge
+  if (box.scale !== undefined) {
+    next.scale = box.scale
+  }
+  if (box.rotate !== undefined) {
+    next.rotate = box.rotate
+  }
+  if (box.opacity !== undefined) {
+    next.opacity = box.opacity
+  }
+  return next
 }
 
 /** 吸附目标集：舞台的左/中/右、上/中/下 + 其它可见元素的边/中线。

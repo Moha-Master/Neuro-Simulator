@@ -34,12 +34,13 @@ from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from .. import log_kit, scene_kit
+from .. import asset_kit, log_kit, scene_kit
 from ..broadcaster import EventBroadcaster
 from ..config import get_config, module_url
 from ..persona import PersonaError
 from ..scene_kit import SceneError
 from ..templates import TemplateError
+from . import assets as module_assets
 from . import scenes as scene_catalog
 from . import settings as stream_settings
 from . import status as stream_status_projection
@@ -208,6 +209,9 @@ def create_app() -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         cfg = get_config()
+        # 场景素材：包内 assets/ 是模板，复制到工作目录后**只从工作目录读**
+        # （用户上传/换图不用动 site-packages；GET/POST /ui/assets 走这里）。
+        app.state.assets = module_assets.deploy_assets(cfg.WORKDIR / "stream")
         storage = Storage(cfg.WORKDIR / "stream" / "data.db")
         await storage.init()
         persona = ChatbotPersonaStore(storage)
@@ -265,6 +269,9 @@ def create_app() -> FastAPI:
         await storage.close()
 
     app = FastAPI(title="stream", lifespan=lifespan)
+
+    # ---------- 模块资产（/ui/assets：上传/URL 导入落盘 + 取回；显式路由） ----------
+    asset_kit.register_asset_routes(app, lambda: app.state.assets)
 
     def _loop() -> StreamLoop:
         return app.state.loop

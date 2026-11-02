@@ -38,9 +38,23 @@ export type Content
   = | { kind: 'color', color: string }
     | { kind: 'image', src: string, fit?: 'cover' | 'contain' | 'fill' }
     | { kind: 'video', src: string, muted?: boolean, loop?: boolean, autoplay?: boolean }
-    | { kind: 'text', text: string, class?: string }
+    | { kind: 'text', text: string, class?: string, font?: TextFont }
   /** name 查 COMPONENTS 注册表；props 透传给组件工厂 */
     | { kind: 'component', name: string, props?: Record<string, unknown> }
+  /** 网页元素（OBS 浏览器源语义）：src = 模块资产相对名（html/ 下上传的单文件）
+   *  或 http(s) 外链（活页面直连，接受 X-Frame-Options 失败=空白）。
+   *  sandbox 默认 "allow-scripts"；**绝不**与 allow-same-origin 同时给
+   *  （校验层 400，引擎层兜底拒绝）。 */
+    | { kind: 'iframe', src: string, sandbox?: string, allow?: string, title?: string }
+
+/** 文本排版（结构化；size 是**舞台宽度比例**——与 chat 字号同一机制，改元素尺寸不改字号）。 */
+export interface TextFont {
+  family?: string
+  size?: number
+  weight?: number | string
+  color?: string
+  align?: 'left' | 'center' | 'right'
+}
 
 /** 脚本：命名动作（查 ACTIONS）或几何/透明度补间。缺省 = 瞬时。 */
 export type Script
@@ -99,6 +113,8 @@ export interface ElementDef {
   /** 少量样式覆盖（filter / mix-blend-mode 等），键为 CSS 属性名 */
   css?: Record<string, string>
   script?: { enter?: Script, exit?: Script, move?: Script }
+  /** 缩放约束覆盖（不填 = 组件/内容类型的默认值）：free | ratio | width | none */
+  resize?: 'free' | 'ratio' | 'width' | 'none'
 }
 
 /** neuro 窗口层（iframe）的场景配置：整窗只有 translate+scale，不进入内部。

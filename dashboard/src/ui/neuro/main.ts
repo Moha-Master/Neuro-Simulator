@@ -102,7 +102,7 @@ export async function bootstrapNeuro (stage: HTMLElement): Promise<void> {
   const engine = new ElementEngine(stage, manifest.scenes, {
     components: COMPONENTS,
     actions: ACTIONS,
-    assetUrl: makeAssetUrl(),
+    assetUrl: makeAssetUrl('neuro'),
   })
   // 首帧先按数据落到 default_scene；SSE 的 snapshot 一到就用后端的权威状态纠正。
   const defaultScene = manifest.default_scene ?? manifest.scenes[0]?.id

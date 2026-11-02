@@ -1,0 +1,18 @@
+/* 独立聊天页覆盖 stream.css 的黑底：它叠在合成器画面上，必须透明。 */
+
+html,
+body {
+  background: transparent;
+}
+
+#chat-root {
+  position: fixed;
+  inset: 0;
+  overflow: hidden;
+  color: #fff;
+  font-family: "Segoe UI", "Roboto", "Noto Sans SC", "Helvetica Neue", Arial, sans-serif;
+}
+
+#chat-root * {
+  pointer-events: none;
+}

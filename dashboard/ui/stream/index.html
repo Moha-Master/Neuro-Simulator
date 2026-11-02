@@ -19,7 +19,9 @@
       data-module-base="/manage/stream/"
       data-neuro-module-base="/manage/neuro_sama/"
     >
-      <img id="no-source" class="hidden" src="/no_source.webp" alt="" />
+      <!-- no_source 的 src 由 main.ts 按模块资产 URL 设置（#no-source 属后端素材，
+           不再依赖 public/ 的硬编码根路径）。 -->
+      <img id="no-source" class="hidden" alt="" />
     </div>
 
     <script type="module" src="/src/ui/stream/entry.ts"></script>

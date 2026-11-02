@@ -35,7 +35,7 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from openai import AsyncOpenAI
 from pydantic import BaseModel, Field
 
-from .. import log_kit, scene_kit, state_kit
+from .. import asset_kit, log_kit, scene_kit, state_kit
 from ..broadcaster import EventBroadcaster
 from ..config import get_config
 from . import tts, ui_media
@@ -950,6 +950,12 @@ def create_app() -> FastAPI:
         await storage.close()
 
     app = FastAPI(title="neuro-sama", lifespan=lifespan)
+
+    # ---------- 模块资产（/ui/assets：与 stream 同形状；目录复用 ui_media 的工作目录） ----------
+    def _asset_store() -> asset_kit.AssetStore:
+        return asset_kit.AssetStore(ui_media.package_assets_dir(), ui_media.media_dir())
+
+    asset_kit.register_asset_routes(app, _asset_store)
 
     # ---------- 进程日志（内存 = 活体；磁盘历史见 vedal） ----------
 

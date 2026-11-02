@@ -65,10 +65,23 @@ export class ChatOverlay {
   private direction: 'top' | 'bottom'
   /** name → 已拼好模块基址的同源 URL */
   private emoteIndex = new Map<string, string>()
+  /** 表情索引端点（默认本页所属模块；独立聊天页由画布经 settings 转发 stream 的） */
+  private emotesBase: string | null
 
   constructor (el: HTMLElement, props?: Record<string, unknown>) {
     this.el = el
     this.direction = props?.direction === 'top' ? 'top' : 'bottom'
+    // 字号 = 舞台宽度 × font（独立设置项；元素改宽高不改字号）
+    const font = Number(props?.font)
+    if (Number.isFinite(font) && font > 0) {
+      el.style.setProperty('--chat-font', String(font))
+    }
+    if (typeof props?.color === 'string' && props.color.trim()) {
+      el.style.setProperty('color', props.color.trim())
+    }
+    this.emotesBase = typeof props?.emotesUrl === 'string' && props.emotesUrl
+      ? props.emotesUrl
+      : null
     this.lines = document.createElement('div')
     this.lines.className = 'chat-lines'
     el.append(this.lines)
@@ -77,14 +90,15 @@ export class ChatOverlay {
 
   private async loadEmotes (): Promise<void> {
     try {
-      const response = await fetch(apiUrl('emotes'))
+      const endpoint = this.emotesBase ?? apiUrl('emotes')
+      const response = await fetch(endpoint, { cache: 'no-store' })
       if (!response.ok) {
         throw new Error(`HTTP ${response.status}`)
       }
       const data = (await response.json()) as EmotesResponse
       const index = new Map<string, string>()
       for (const emote of data.emotes) {
-        index.set(emote.name, apiUrl(emote.url.replace(/^\/+/, '')))
+        index.set(emote.name, this.emoteUrl(emote.url.replace(/^\/+/, '')))
       }
       this.emoteIndex = index
       // 索引到达后把已有行从纯文本重渲染成图片（snapshot 可能先到）
@@ -93,6 +107,14 @@ export class ChatOverlay {
       // 失败静默：聊天仍然可用，只是表情保持纯文本
       console.warn('[chat] 表情索引不可用，按纯文本渲染:', error)
     }
+  }
+
+  /** 表情图片地址：默认相对本页模块基址；独立聊天页用画布转发的 stream 端点拼。 */
+  private emoteUrl (path: string): string {
+    if (!this.emotesBase) {
+      return apiUrl(path)
+    }
+    return new URL(path, this.emotesBase).href
   }
 
   clear (): void {

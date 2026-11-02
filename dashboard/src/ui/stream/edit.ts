@@ -11,13 +11,16 @@
 
 import type { Box } from '../engine/schema'
 import type { ElementEngine } from '../engine/elements'
-import type { Rect, SnapGuide, SnapTarget } from '../engine/geometry'
-import { applyDrag, boxToRect, computeSnap, snapTargets } from '../engine/geometry'
+import type { MeasuredSize, Rect, ResizeHandle, SnapGuide, SnapTarget } from '../engine/geometry'
+import { applyDrag, applyResize, boxToRect, computeSnap, SNAP_TOL_PX, snapTargets } from '../engine/geometry'
+import type { ResizeConstraint } from './resize'
+import { resolveResize } from './resize'
 import type { NeuroLayer } from './neuro'
 
 const DRAG_THRESHOLD_PX = 2
 const PREVIEW_INTERVAL_MS = 50
 const PRIMARY = '#3b82f6'
+const HANDLES: ResizeHandle[] = ['nw', 'n', 'ne', 'e', 'se', 's', 'sw', 'w']
 
 interface Candidate {
   kind: 'element' | 'neuro-window'
@@ -25,13 +28,21 @@ interface Candidate {
   z: number
   /** 视觉 AABB（含 scale/rotate；平移与 transform 互不冲突） */
   rect: Rect
+  /** 布局 rect（不含 transform）：缩放的起点与吸附都用它 */
+  layout: Rect
   /** 数据里的 box（拖拽结果据此回写；neuro 窗口由场景 neuro 块构造） */
   box: Box
+  /** 实测尺寸：`w/h` 为 auto 时缩放的冻结来源 */
+  measured: MeasuredSize
+  /** 生效的缩放约束（元素覆盖 > 组件默认）。 */
+  resize: ResizeConstraint
 }
 
 interface DragState {
   candidate: Candidate
   sceneId: string
+  mode: 'move' | 'resize'
+  handle: ResizeHandle | null
   startX: number
   startY: number
   lastX: number
@@ -64,6 +75,8 @@ export class EditLayer {
   private labelEl: HTMLElement
   private guideX: HTMLElement
   private guideY: HTMLElement
+  private handles = new Map<ResizeHandle, HTMLElement>()
+  private selectedConstraint: ResizeConstraint = 'free'
 
   private selected: { kind: Candidate['kind'], id: string } | null = null
   private drag: DragState | null = null
@@ -90,6 +103,14 @@ export class EditLayer {
     this.labelEl = document.createElement('div')
     this.labelEl.className = 'ns-edit-overlay__label'
     this.boxEl.append(this.labelEl)
+
+    for (const handle of HANDLES) {
+      const el = document.createElement('div')
+      el.className = `ns-edit-overlay__handle ns-edit-overlay__handle--${handle}`
+      el.dataset.handle = handle
+      this.handles.set(handle, el)
+      this.boxEl.append(el)
+    }
 
     this.guideX = document.createElement('div')
     this.guideX.className = 'ns-edit-overlay__guide ns-edit-overlay__guide--x'
@@ -139,6 +160,7 @@ export class EditLayer {
       return
     }
     this.selected = { kind: hit.kind, id: hit.id }
+    this.selectedConstraint = hit.resize
     this.showBox(hit.rect)
   }
 
@@ -164,6 +186,7 @@ export class EditLayer {
       this.clear()
       return
     }
+    this.selectedConstraint = hit.resize
     this.showBox(hit.rect)
   }
 
@@ -177,6 +200,9 @@ export class EditLayer {
   clear (): void {
     this.selected = null
     this.boxEl.style.display = 'none'
+    for (const el of this.handles.values()) {
+      el.style.display = 'none'
+    }
     this.showGuides([])
   }
 
@@ -199,16 +225,17 @@ export class EditLayer {
       if (!el || !this.engine.visible(def.id)) {
         continue
       }
-      const layout = boxToRect(def.box, W, H, {
-        w: el.offsetWidth,
-        h: el.offsetHeight,
-      })
+      const measured = { w: el.offsetWidth, h: el.offsetHeight }
+      const layout = boxToRect(def.box, W, H, measured)
       out.push({
         kind: 'element',
         id: def.id,
         z: def.z ?? 0,
         rect: visualRect(layout, def.box),
+        layout,
         box: def.box,
+        measured,
+        resize: resolveResize(def),
       })
     }
     const layer = this.neuro()
@@ -220,6 +247,7 @@ export class EditLayer {
         id: 'neuro.window',
         z: layer.getZ(),
         rect: neuroRect,
+        layout: neuroRect,
         // 窗口是 16:9，h = w（与 neuro.ts 的 applyBox 一致）
         box: {
           x: cfg.x,
@@ -228,6 +256,9 @@ export class EditLayer {
           h: cfg.w,
           ...(cfg.edge ? { edge: { ...cfg.edge } } : {}),
         },
+        measured: { w: neuroRect.w, h: neuroRect.h },
+        // 窗口没有独立的 h 语义：只允许拖左右边改 w
+        resize: 'width',
       })
     }
     // 顶部 = 最上层 → z 降序；同 z 保持场景声明顺序
@@ -241,6 +272,20 @@ export class EditLayer {
       return
     }
     const point = this.localPoint(ev)
+    const handleEl = (ev.target as HTMLElement | null)?.closest<HTMLElement>('[data-handle]')
+    const handle = handleEl?.dataset.handle as ResizeHandle | undefined
+
+    // 手柄命中：对当前选中元素开始缩放（不能走 contains —— 手柄正好在边框上）
+    if (handle && this.selected) {
+      const candidate = this.candidates().find(
+        c => c.kind === this.selected?.kind && c.id === this.selected?.id,
+      )
+      if (candidate && candidate.resize !== 'none') {
+        this.beginDrag(candidate, point, ev, 'resize', handle)
+        return
+      }
+    }
+
     const hit = this.candidates().find(c => contains(c.rect, point))
     if (!hit) {
       this.clear()
@@ -249,17 +294,29 @@ export class EditLayer {
     }
 
     this.selected = { kind: hit.kind, id: hit.id }
+    this.selectedConstraint = hit.resize
     this.showBox(hit.rect)
     this.postSelect(hit.kind, hit.id)
+    this.beginDrag(hit, point, ev, 'move', null)
+  }
 
+  private beginDrag (
+    candidate: Candidate,
+    point: { x: number, y: number },
+    ev: PointerEvent,
+    mode: DragState['mode'],
+    handle: ResizeHandle | null,
+  ): void {
     const W = this.stage.clientWidth
     const H = this.stage.clientHeight
     const others = this.candidates()
-      .filter(c => !(c.kind === hit.kind && c.id === hit.id))
+      .filter(c => !(c.kind === candidate.kind && c.id === candidate.id))
       .map(c => c.rect)
     this.drag = {
-      candidate: hit,
+      candidate,
       sceneId: this.engine.current?.id ?? '',
+      mode,
+      handle,
       startX: point.x,
       startY: point.y,
       lastX: point.x,
@@ -387,6 +444,10 @@ export class EditLayer {
   private renderDrag (drag: DragState): void {
     const W = this.stage.clientWidth
     const H = this.stage.clientHeight
+    if (drag.mode === 'resize' && drag.handle) {
+      this.renderResize(drag, W, H)
+      return
+    }
     const rawDx = drag.lastX - drag.startX
     const rawDy = drag.lastY - drag.startY
     const moving: Rect = {
@@ -407,10 +468,106 @@ export class EditLayer {
     drag.dy = dy
     this.showBox({ ...drag.candidate.rect, x: moving.x + (dx - rawDx), y: moving.y + (dy - rawDy) })
     this.showGuides(guides)
-    this.preview(drag, W, H)
+    this.preview(
+      drag,
+      applyDrag(drag.candidate.box, drag.dx, drag.dy, W, H),
+    )
   }
 
-  private preview (drag: DragState, W: number, H: number): void {
+  private renderResize (drag: DragState, W: number, H: number): void {
+    if (!drag.handle) {
+      return
+    }
+    const rawDx = drag.lastX - drag.startX
+    const rawDy = drag.lastY - drag.startY
+    let dx = rawDx
+    let dy = rawDy
+    let guides: SnapGuide[] = []
+    // 等比锁定时不做单边吸附：只吸一个轴会破坏比例，视觉上像"拽歪"。
+    if (!this.altKey && drag.candidate.resize !== 'ratio') {
+      const unsnapped = this.resizeBox(drag, rawDx, rawDy, W, H)
+      const snap = this.computeResizeSnap(boxToRect(unsnapped, W, H), drag.handle, drag.targets)
+      dx += snap.dx
+      dy += snap.dy
+      guides = snap.guides
+    }
+    drag.dx = dx
+    drag.dy = dy
+    const box = this.resizeBox(drag, dx, dy, W, H)
+    this.showBox(boxToRect(box, W, H))
+    this.showGuides(guides)
+    this.preview(drag, box)
+  }
+
+  /** 只对**被拖的边/角**做吸附（报告 A5）。 */
+  private computeResizeSnap (
+    rect: Rect,
+    handle: ResizeHandle,
+    targets: SnapTarget[],
+  ): { dx: number, dy: number, guides: SnapGuide[] } {
+    const picks: { axis: 'x' | 'y', pos: number }[] = []
+    if (handle.includes('w')) {
+      picks.push({ axis: 'x', pos: rect.x })
+    }
+    if (handle.includes('e')) {
+      picks.push({ axis: 'x', pos: rect.x + rect.w })
+    }
+    if (handle.includes('n')) {
+      picks.push({ axis: 'y', pos: rect.y })
+    }
+    if (handle.includes('s')) {
+      picks.push({ axis: 'y', pos: rect.y + rect.h })
+    }
+    let bestX: { delta: number, pos: number, dist: number } | null = null
+    let bestY: { delta: number, pos: number, dist: number } | null = null
+    for (const target of targets) {
+      for (const pick of picks) {
+        if (pick.axis !== target.axis) {
+          continue
+        }
+        const delta = target.posPx - pick.pos
+        const dist = Math.abs(delta)
+        if (dist > SNAP_TOL_PX) {
+          continue
+        }
+        const best = target.axis === 'x' ? bestX : bestY
+        if (!best || dist < best.dist) {
+          const next = { delta, pos: target.posPx, dist }
+          if (target.axis === 'x') {
+            bestX = next
+          } else {
+            bestY = next
+          }
+        }
+      }
+    }
+    const guides: SnapGuide[] = []
+    if (bestX) {
+      guides.push({ axis: 'x', posPx: bestX.pos })
+    }
+    if (bestY) {
+      guides.push({ axis: 'y', posPx: bestY.pos })
+    }
+    return { dx: bestX?.delta ?? 0, dy: bestY?.delta ?? 0, guides }
+  }
+
+  private resizeBox (drag: DragState, dx: number, dy: number, W: number, H: number): Box {
+    if (!drag.handle) {
+      return drag.candidate.box
+    }
+    return applyResize(
+      drag.candidate.box,
+      drag.handle,
+      dx,
+      dy,
+      W,
+      H,
+      drag.candidate.measured,
+      { ratio: drag.candidate.resize === 'ratio' },
+    )
+  }
+
+  private preview (drag: DragState, box: Box): void {
     const now = performance.now()
     if (now - drag.lastPreview < PREVIEW_INTERVAL_MS) {
       return
@@ -422,11 +579,20 @@ export class EditLayer {
       sceneId: drag.sceneId,
       kind: drag.candidate.kind,
       id: drag.candidate.id,
-      box: applyDrag(drag.candidate.box, drag.dx, drag.dy, W, H),
+      box,
     })
   }
 
   private committedBox (drag: DragState): Box {
+    if (drag.mode === 'resize') {
+      return this.resizeBox(
+        drag,
+        drag.dx,
+        drag.dy,
+        this.stage.clientWidth,
+        this.stage.clientHeight,
+      )
+    }
     return applyDrag(
       drag.candidate.box,
       drag.dx,
@@ -448,6 +614,10 @@ export class EditLayer {
     this.labelEl.style.color = '#fff'
     this.boxEl.style.borderColor = PRIMARY
     this.labelEl.style.background = PRIMARY
+    const allowed = allowedHandles(this.selectedConstraint)
+    for (const [handle, el] of this.handles) {
+      el.style.display = allowed.includes(handle) ? 'block' : 'none'
+    }
   }
 
   private showGuides (guides: SnapGuide[]): void {
@@ -484,6 +654,20 @@ function contains (rect: Rect, point: { x: number, y: number }): boolean {
     && point.y >= rect.y
     && point.y <= rect.y + rect.h
   )
+}
+
+/** 约束 → 可见手柄（ratio 只给角，width 只给左右边，none 不给）。 */
+function allowedHandles (constraint: ResizeConstraint): ResizeHandle[] {
+  if (constraint === 'none') {
+    return []
+  }
+  if (constraint === 'width') {
+    return ['e', 'w']
+  }
+  if (constraint === 'ratio') {
+    return ['nw', 'ne', 'se', 'sw']
+  }
+  return HANDLES
 }
 
 /** scale/rotate 后的轴对齐包围盒（围绕元素中心；transform-origin 默认 50% 50%）。 */

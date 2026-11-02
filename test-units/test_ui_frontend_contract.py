@@ -35,6 +35,7 @@ PUBLIC = DASH / "public"
 STREAM_MANIFEST = ROOT / "server/neuro_simulator/stream/defaults/scenes.json"
 NEURO_MANIFEST = ROOT / "server/neuro_simulator/neuro_sama/defaults/neuro_scenes.json"
 NEURO_MEDIA = ROOT / "server/neuro_simulator/neuro_sama/assets"
+STREAM_PACKAGE_ASSETS = ROOT / "server/neuro_simulator/stream/assets"
 STREAM_SERVER = ROOT / "server/neuro_simulator/stream/server.py"
 NEURO_SERVER = ROOT / "server/neuro_simulator/neuro_sama/server.py"
 
@@ -51,6 +52,16 @@ def _components_of(manifest: dict) -> set[str]:
             if content.get("kind") == "component" and content.get("name"):
                 names.add(content["name"])
     return names
+
+
+def _asset_exists(src: str, manifest_path: Path) -> bool:
+    """裸名素材按模块解析（stream: stream/assets[/images/]；neuro: neuro_sama/assets）。"""
+    candidates = (
+        [STREAM_PACKAGE_ASSETS / src, STREAM_PACKAGE_ASSETS / "images" / src]
+        if manifest_path == STREAM_MANIFEST
+        else [NEURO_MEDIA / src]
+    )
+    return any(p.is_file() for p in candidates)
 
 
 def _registered(ui_dir: Path) -> set[str]:
@@ -167,7 +178,9 @@ class TestSingleFrontend(unittest.TestCase):
         self.assertIn("'highlight'", feed)
 
     def test_scene_assets_exist(self):
-        """场景引用的素材必须真的在：图片在前端 public/，视频在模块的 media 目录。"""
+        """场景引用的素材必须真的在：素材归**模块资产**（第 5 期起），
+        stream 在 `stream/assets/`（images/ 放内置图），neuro 在 `neuro_sama/assets/`；
+        `dashboard/public/` 里保留的同名文件只是 deprecated 兜底，不作断言依据。"""
         for manifest_path in (STREAM_MANIFEST, NEURO_MANIFEST):
             for scene in _manifest(manifest_path).get("scenes") or []:
                 for el in scene.get("elements") or []:
@@ -175,13 +188,27 @@ class TestSingleFrontend(unittest.TestCase):
                     kind, src = content.get("kind"), content.get("src")
                     if kind == "image":
                         self.assertTrue(
-                            (PUBLIC / src).is_file(), f"缺前端素材: {src}（{manifest_path.name}）"
+                            _asset_exists(src, manifest_path),
+                            f"缺模块资产: {src}（{manifest_path.name}）",
                         )
                     elif kind == "video":
                         self.assertTrue(
                             (NEURO_MEDIA / src).is_file(),
                             f"缺模块媒体: {src}（后端要探测它的时长，必须在模块包里）",
                         )
+
+    def test_module_asset_routes_and_templates(self):
+        """两个模块都有 /ui/assets 三条显式路由 + 包内资产模板（不许 mount /ui）。"""
+        for server in (STREAM_SERVER, NEURO_SERVER):
+            src = server.read_text(encoding="utf-8")
+            self.assertIn("register_asset_routes", src, f"{server.name} 缺 /ui/assets 路由")
+        self.assertTrue(STREAM_PACKAGE_ASSETS.is_dir(), "stream 包内资产模板缺失")
+        self.assertTrue(
+            (STREAM_PACKAGE_ASSETS / "images" / "no_source.webp").is_file(),
+            "stream 内置图应在 images/ 子目录",
+        )
+        for name in ("neurosama.png", "sc_purple.png", "sc_pink.png", "room_v2_bg.webp"):
+            self.assertTrue((NEURO_MEDIA / name).is_file(), f"neuro 包内缺 {name}")
 
     def test_modules_no_longer_serve_static_pages(self):
         """neuro 的 /ui 只剩 API；stream 额外用 StaticFiles 挂自托管观看页 /view。"""

@@ -34,7 +34,8 @@ logger = logging.getLogger(__name__)
 LOOP_WINDOW_S = 2.0
 LOOP_MAX_CHANGES = 10
 
-CONTENT_KINDS = {"color", "image", "video", "text", "component"}
+CONTENT_KINDS = {"color", "image", "video", "text", "component", "iframe"}
+RESIZE_CONSTRAINTS = {"free", "ratio", "width", "none"}
 EDGE_X = {"left", "right"}
 EDGE_Y = {"top", "bottom"}
 
@@ -216,6 +217,16 @@ def check_content(content: Any, where: str) -> None:
         raise SceneError(f"{where}: content.{kind} 需要 src")
     if kind == "component" and not str(content.get("name") or "").strip():
         raise SceneError(f"{where}: content.component 需要 name")
+    if kind == "iframe":
+        if not str(content.get("src") or "").strip():
+            raise SceneError(f"{where}: content.iframe 需要 src")
+        for key in ("sandbox", "allow", "title"):
+            if content.get(key) is not None and not isinstance(content[key], str):
+                raise SceneError(f"{where}: content.{key} 必须是字符串")
+        sandbox = content.get("sandbox")
+        if isinstance(sandbox, str) and "allow-same-origin" in sandbox:
+            # 沙箱 iframe 拿到同源就能读父文档 __ns / fetch 配置 API——协议层面拒绝
+            raise SceneError(f"{where}: iframe sandbox 不允许 allow-same-origin")
 
 
 def check_elements(elements: Any, scene_id: str) -> List[str]:
@@ -243,6 +254,11 @@ def check_elements(elements: Any, scene_id: str) -> List[str]:
         check_content(element.get("content"), where)
         if num(element.get("z")) is None:
             raise SceneError(f"{where}: z 必填（数字）")
+        resize = element.get("resize")
+        if resize is not None and resize not in RESIZE_CONSTRAINTS:
+            raise SceneError(
+                f"{where}: resize 只能是 {sorted(RESIZE_CONSTRAINTS)}（不填 = 组件默认）"
+            )
     return seen
 
 

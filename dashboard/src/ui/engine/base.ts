@@ -65,12 +65,42 @@ export function foreignModuleBase (attr: string, fallback: string): string {
   return base.endsWith('/') ? base : `${base}/`
 }
 
-/** 模块媒体（开场视频等由后端持有的文件）。 */
+/** 模块媒体（neuro 开场视频：后端要探测它的时长，文件归 ui/media）。 */
 export function mediaUrl (name: string): string {
   return apiUrl(`ui/media/${name.replace(/^\.?\//, '')}`)
 }
 
-/** 引擎的资产寻址：**视频归模块**（后端要探测它的时长），图片/其它归前端。 */
-export function makeAssetUrl (): AssetUrl {
-  return (src, kind) => (kind === 'video' ? mediaUrl(src) : rootAsset(src))
+/** 模块资产（图片/视频/html 上传与内置素材；第 5 期起的统一寻址）。 */
+export function moduleAssetUrl (name: string): string {
+  return apiUrl(`ui/assets/${name.replace(/^\.?\//, '')}`)
+}
+
+/** 引擎的资产寻址（**按页面归属**区分模块，设计定稿 §5）：
+ *
+ * - `module: 'stream'`（合成器页）→ 图片/视频/html 全走本模块 `ui/assets`；
+ *   `module: 'neuro'`（neuro 窗口页）→ 图片走 `ui/assets`，**视频保持
+ *   `ui/media`**（开场视频有 mtime/轨道探测依赖，链路不动）。
+ * - 外链 http(s)：素材类**渲染期拒绝**（console.warn + 不加载）——外链素材只允许
+ *   经 `POST /ui/assets` 的 URL 导入转存后以本地名引用（"全部后端中转"原则）；
+ *   唯一例外是 iframe kind 的 `src`（语义 = OBS 浏览器源，活页面直连，见第 6 期）。
+ * - 以 `/`、`./`、`../` 开头的路径 = 前端构建产物（public/），保持 rootAsset。
+ */
+export function makeAssetUrl (module: 'stream' | 'neuro' = 'stream'): AssetUrl {
+  return (src, kind) => {
+    const clean = src.trim()
+    if (/^https?:\/\//i.test(clean)) {
+      if (kind === 'iframe') {
+        return clean
+      }
+      console.warn(`[assets] 外链素材已停用，请用 URL 导入转存后引用: ${clean}`)
+      return ''
+    }
+    if (clean.startsWith('/') || clean.startsWith('./') || clean.startsWith('../')) {
+      return rootAsset(clean)
+    }
+    if (module === 'neuro' && kind === 'video') {
+      return mediaUrl(clean)
+    }
+    return moduleAssetUrl(clean)
+  }
 }

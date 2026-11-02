@@ -94,16 +94,18 @@ export default defineConfig({
   define: { 'process.env': {} },
   build: {
     rollupOptions: {
-      // 三个入口 = 三个独立文档（同一构建、同一 origin）：
+      // 四个入口 = 四个独立文档（同一构建、同一 origin）：
       //   index.html        dashboard 主应用（Vue SPA）
       //   ui/stream/        直播合成器（OBS 浏览器源指向它）
       //   ui/neuro/         neuro 窗口（被合成器 iframe 捕获）
+      //   ui/chat/          独立聊天页（chat.frame 组件的 iframe 内容）
       // 画面页是**独立文档**而不是 Vue 路由：OBS 要干净画布，neuro 窗口要透明
       // 背景 + 恒定 dark 色系——都容不下 dashboard 的 chrome 与 Vuetify reset。
       input: {
         main: fileURLToPath(new URL('index.html', import.meta.url)),
         stream: fileURLToPath(new URL('ui/stream/index.html', import.meta.url)),
         neuro: fileURLToPath(new URL('ui/neuro/index.html', import.meta.url)),
+        chat: fileURLToPath(new URL('ui/chat/index.html', import.meta.url)),
       },
     },
   },

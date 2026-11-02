@@ -214,15 +214,22 @@
               icon="mdi-plus"
               size="x-small"
               variant="text"
-              title="新增元素（即将推出）"
-              disabled
+              title="新增元素（图片 / 视频 / 文本）"
+              @click="openCreateElement"
             />
             <v-btn
               icon="mdi-delete"
               size="x-small"
               variant="text"
-              title="删除元素（即将推出）"
-              disabled
+              :title="
+                elementDeleteProtected
+                  ? 'chat / game_wordle / game_chess 被代码引用，不能删除'
+                  : selectedElement?.kind === 'element'
+                    ? '删除所选元素（引用它的 timeline 步骤一并删除）'
+                    : '先在列表中单击选中一个元素'
+              "
+              :disabled="selectedElement?.kind !== 'element' || elementDeleteProtected"
+              @click="requestDeleteElement"
             />
             <v-btn
               icon="mdi-cog"
@@ -445,6 +452,96 @@
           <v-spacer />
           <v-btn variant="text" @click="deleteOpen = false">取消</v-btn>
           <v-btn color="error" variant="tonal" @click="deleteScene">删除</v-btn>
+        </v-card-actions>
+      </v-card>
+    </v-dialog>
+
+    <!-- 新增元素（image / video / text；component 由代码管理、不提供） -->
+    <v-dialog v-model="elementCreateOpen" max-width="520">
+      <v-card>
+        <v-card-title>新增元素</v-card-title>
+        <v-card-text>
+          <v-text-field
+            v-model="elementCreateForm.id"
+            label="元素 id（必填）"
+            placeholder="my_overlay"
+            variant="outlined"
+            density="compact"
+            class="mb-2"
+            :error-messages="elementCreateIdError ? [elementCreateIdError] : []"
+          />
+          <v-text-field
+            v-model="elementCreateForm.name"
+            label="名称（列表显示，可空）"
+            variant="outlined"
+            density="compact"
+            class="mb-2"
+          />
+          <v-select
+            v-model="elementCreateForm.kind"
+            :items="ELEMENT_CREATE_KINDS"
+            label="类型"
+            variant="outlined"
+            density="compact"
+            class="mb-2"
+          />
+          <v-text-field
+            v-if="
+              elementCreateForm.kind !== 'text' &&
+                elementCreateForm.kind !== 'chat.frame'
+            "
+            v-model="elementCreateForm.src"
+            :label="
+              elementCreateForm.kind === 'iframe'
+                ? '网页地址（src，必填）'
+                : '素材地址（src，必填）'
+            "
+            :placeholder="elementCreateForm.kind === 'iframe' ? 'page.html 或 https://…' : 'my_image.webp'"
+            variant="outlined"
+            density="compact"
+            class="mb-2"
+          />
+          <v-text-field
+            v-if="elementCreateForm.kind === 'text'"
+            v-model="elementCreateForm.text"
+            label="文本内容（必填）"
+            variant="outlined"
+            density="compact"
+            class="mb-2"
+          />
+          <div class="text-caption text-disabled">
+            创建后加入当前场景：舞台居中、宽 30%、层级置顶，带淡入进场骨架（设置对话框可改）。
+          </div>
+        </v-card-text>
+        <v-card-actions>
+          <v-spacer />
+          <v-btn variant="text" @click="elementCreateOpen = false">取消</v-btn>
+          <v-btn color="primary" :disabled="!canCreateElement" @click="createElement">创建</v-btn>
+        </v-card-actions>
+      </v-card>
+    </v-dialog>
+
+    <!-- 删除元素确认（含 timeline 级联提示） -->
+    <v-dialog
+      :model-value="elementDeleteOpen"
+      max-width="480"
+      @update:model-value="elementDeleteOpen = false"
+    >
+      <v-card>
+        <v-card-title>删除元素</v-card-title>
+        <v-card-text>
+          确定删除「{{ elementDeleteId }}」？
+          <template v-if="elementDeleteStepCount > 0">
+            当前场景 timeline 有 {{ elementDeleteStepCount }} 个步骤引用它，将一并删除。
+          </template>
+          <div class="text-caption text-disabled mt-2">
+            只从当前场景移除；误删可用右上角重置恢复默认清单。
+          </div>
+        </v-card-text>
+        <v-card-actions>
+          <v-spacer />
+          <v-btn variant="text" @click="elementDeleteOpen = false">取消</v-btn>
+          <v-btn color="error" variant="tonal" @click="deleteElement">删除</v-btn>
         </v-card-actions>
       </v-card>
     </v-dialog>
@@ -891,6 +988,7 @@ interface ManifestElement {
   content?: ManifestContent
   script?: Record<string, unknown>
   css?: Record<string, string>
+  resize?: string
 }
 
 interface ManifestNeuro {
@@ -1083,11 +1181,14 @@ function applyCanvasPreview(
   if (elementDialog.value && elementTargetId.value === id && kind === 'element') {
     elementForm.x = pctValue(box.x ?? 0)
     elementForm.y = pctValue(box.y ?? 0)
+    if (box.w != null) elementForm.w = pctValue(box.w)
+    if (box.h != null) elementForm.h = pctValue(box.h)
     if (box.edge?.x || box.edge?.y) elementForm.placement = placementOf(box)
   }
   if (neuroDialog.value && !neuroEditingLayer.value && kind === 'neuro-window') {
     neuroForm.x = pctValue(box.x ?? 0)
     neuroForm.y = pctValue(box.y ?? 0)
+    if (box.w != null) neuroForm.w = pctValue(box.w)
   }
 }
 
@@ -1109,6 +1210,8 @@ function applyCanvasCommit(
     if (!scene.neuro) return
     scene.neuro.x = Number(box.x ?? scene.neuro.x ?? 0)
     scene.neuro.y = Number(box.y ?? scene.neuro.y ?? 0)
+    // 窗口只有 w 语义（16:9 整窗，高度随宽度）；h 不落库
+    if (box.w != null) scene.neuro.w = Number(box.w)
     if (box.edge) scene.neuro.edge = cloneData(box.edge)
     selectedElement.value = { kind: 'neuro-window', id }
   } else {
@@ -1823,6 +1926,16 @@ const elementForm = reactive<ElementFormState>({
   name: '',
   props: '',
   script: '',
+  resize: '',
+  sandbox: '',
+  title: '',
+  videoMuted: true,
+  videoLoop: false,
+  fontFamily: '',
+  fontSize: '',
+  fontWeight: '',
+  fontColor: '',
+  fontAlign: '',
 })
 
 function pctValue(value: number | undefined, digits = 2): string {
@@ -1869,6 +1982,19 @@ function loadElementForm(el: ManifestElement): void {
     ? JSON.stringify(content.props, null, 2)
     : ''
   elementForm.script = el.script ? JSON.stringify(el.script, null, 2) : ''
+  elementForm.resize = el.resize ?? ''
+  const iframe = content as { sandbox?: string, title?: string }
+  elementForm.sandbox = String(iframe.sandbox ?? '')
+  elementForm.title = String(iframe.title ?? '')
+  const video = content as { muted?: boolean, loop?: boolean }
+  elementForm.videoMuted = video.muted !== false
+  elementForm.videoLoop = Boolean(video.loop)
+  const font = (content as { font?: Record<string, unknown> }).font
+  elementForm.fontFamily = String(font?.family ?? '')
+  elementForm.fontSize = font?.size == null ? '' : String(font.size)
+  elementForm.fontWeight = font?.weight == null ? '' : String(font.weight)
+  elementForm.fontColor = String(font?.color ?? '')
+  elementForm.fontAlign = String(font?.align ?? '')
   scriptError.value = ''
   propsError.value = ''
 }
@@ -1908,16 +2034,31 @@ function buildContent(el: ManifestElement): ManifestContent | null {
     return {
       kind,
       src: elementForm.src.trim(),
-      ...(base.muted ? { muted: true } : {}),
-      ...(base.loop ? { loop: true } : {}),
+      muted: elementForm.videoMuted,
+      loop: elementForm.videoLoop,
       ...(base.autoplay ? { autoplay: true } : {}),
     }
   }
   if (kind === 'text') {
+    const font: Record<string, unknown> = {}
+    if (elementForm.fontFamily.trim()) font.family = elementForm.fontFamily.trim()
+    if (elementForm.fontSize.trim()) font.size = Number(elementForm.fontSize)
+    if (elementForm.fontWeight.trim()) font.weight = Number(elementForm.fontWeight)
+    if (elementForm.fontColor.trim()) font.color = elementForm.fontColor.trim()
+    if (elementForm.fontAlign.trim()) font.align = elementForm.fontAlign.trim()
     return {
       kind,
       text: elementForm.text,
       ...(base.class ? { class: base.class } : {}),
+      ...(Object.keys(font).length ? { font } : {}),
+    }
+  }
+  if (kind === 'iframe') {
+    return {
+      kind,
+      src: elementForm.src.trim(),
+      ...(elementForm.sandbox.trim() ? { sandbox: elementForm.sandbox.trim() } : {}),
+      ...(elementForm.title.trim() ? { title: elementForm.title.trim() } : {}),
     }
   }
   const parsed = parseJsonField(elementForm.props, 'props')
@@ -1993,6 +2134,8 @@ function applyElementForm(): void {
   const z = Number(elementForm.z)
   el.z = Number.isFinite(z) ? z : 0
   el.visible = elementForm.visible
+  if (elementForm.resize) el.resize = elementForm.resize
+  else delete el.resize
 
   if (elementForm.kind !== 'component') propsError.value = ''
   const content = buildContent(el)
@@ -2029,6 +2172,126 @@ async function closeElementDialog(): Promise<void> {
   elementDialog.value = false
   await flushManifestSave()
   await flushNeuroManifestSave()
+}
+
+// ---------- 元素增删（只作用于当前画面场景；neuro 内部层不做增删） ----------
+
+/** 代码硬引用的元素 id：删了功能静默死（字幕/游戏管线按 id 取实例），禁止删除。 */
+const PROTECTED_ELEMENT_IDS = new Set(['chat', 'game_wordle', 'game_chess'])
+
+const ELEMENT_CREATE_KINDS = [
+  { title: '图片（image）', value: 'image' },
+  { title: '视频（video）', value: 'video' },
+  { title: '文本（text）', value: 'text' },
+  { title: '网页（iframe，html 资产或外链）', value: 'iframe' },
+  { title: '聊天窗（chat.frame，独立聊天页）', value: 'chat.frame' },
+]
+
+const elementCreateOpen = ref(false)
+const elementCreateForm = reactive({
+  id: '',
+  name: '',
+  kind: 'image',
+  src: '',
+  text: '',
+})
+
+const elementCreateIdError = computed(() => {
+  const id = elementCreateForm.id.trim()
+  if (!id) return '必填'
+  if (!/^[a-z0-9_-]+$/.test(id)) return '只能用小写字母 / 数字 / _ / -'
+  for (const scene of streamManifest.value?.scenes ?? []) {
+    if ((scene.elements ?? []).some((e) => e.id === id)) {
+      return `id 已被使用（场景 ${scene.id}）`
+    }
+  }
+  return ''
+})
+
+const canCreateElement = computed(() => {
+  if (elementCreateIdError.value) return false
+  if (elementCreateForm.kind === 'chat.frame') return true
+  if (elementCreateForm.kind === 'text') return elementCreateForm.text.trim().length > 0
+  return elementCreateForm.src.trim().length > 0
+})
+
+const elementDeleteOpen = ref(false)
+const elementDeleteId = computed(() =>
+  selectedElement.value?.kind === 'element' ? selectedElement.value.id : '',
+)
+const elementDeleteProtected = computed(() => PROTECTED_ELEMENT_IDS.has(elementDeleteId.value))
+/** 当前场景 timeline 里引用该元素的步骤数（级联删除；confirm 里展示）。 */
+const elementDeleteStepCount = computed(() => {
+  const id = elementDeleteId.value
+  if (!id) return 0
+  const steps = (displayedScene.value?.timeline as { steps?: Array<{ element?: string }> } | undefined)
+    ?.steps
+  return (steps ?? []).filter((s) => s.element === id).length
+})
+
+function openCreateElement(): void {
+  elementCreateForm.id = ''
+  elementCreateForm.name = ''
+  elementCreateForm.kind = 'image'
+  elementCreateForm.src = ''
+  elementCreateForm.text = ''
+  elementCreateOpen.value = true
+}
+
+function createElement(): void {
+  const scene = displayedScene.value
+  if (!scene || !canCreateElement.value) return
+  const id = elementCreateForm.id.trim()
+  const content: ManifestContent =
+    elementCreateForm.kind === 'text'
+      ? { kind: 'text', text: elementCreateForm.text }
+      : elementCreateForm.kind === 'chat.frame'
+        ? { kind: 'component', name: 'chat.frame', props: {} }
+        : elementCreateForm.kind === 'iframe'
+          ? { kind: 'iframe', src: elementCreateForm.src.trim() }
+          : { kind: elementCreateForm.kind as 'image' | 'video', src: elementCreateForm.src.trim() }
+  const maxZ = Math.max(0, ...(scene.elements ?? []).map((e) => Number(e.z ?? 0)))
+  const el: ManifestElement = {
+    id,
+    name: elementCreateForm.name.trim() || id,
+    content,
+    // 舞台居中：w=30%，h 留 auto（按素材/内容比例）；z 置顶。
+    box: { x: 0.35, y: 0.4, w: 0.3 },
+    z: maxZ + 1,
+    // 常用骨架：淡入进场（对话框里可继续改成补间/动作）。
+    script: { enter: { tween: { opacity: 1 }, duration: 0.6 } },
+  }
+  scene.elements = [...(scene.elements ?? []), el]
+  elementCreateOpen.value = false
+  selectedElement.value = { kind: 'element', id }
+  queueManifestSave()
+}
+
+function requestDeleteElement(): void {
+  if (!selectedElement.value || elementDeleteProtected.value) return
+  elementDeleteOpen.value = true
+}
+
+async function deleteElement(): Promise<void> {
+  const id = elementDeleteId.value
+  const scene = displayedScene.value
+  elementDeleteOpen.value = false
+  if (!id || !scene || PROTECTED_ELEMENT_IDS.has(id)) return
+  scene.elements = (scene.elements ?? []).filter((e) => e.id !== id)
+  // 级联清理：timeline 里引用该元素的步骤一并删除（引擎对未挂载目标只会告警）。
+  const timeline = scene.timeline as { steps?: Array<Record<string, unknown>> } | undefined
+  if (timeline && Array.isArray(timeline.steps)) {
+    const steps = timeline.steps.filter((s) => s.element !== id)
+    if (steps.length) {
+      scene.timeline = { ...timeline, steps }
+    } else {
+      delete scene.timeline
+    }
+  }
+  if (selectedElement.value?.kind === 'element' && selectedElement.value.id === id) {
+    selectedElement.value = null
+  }
+  await queueManifestSave()
 }
 
 // ---------- neuro 窗口对话框（窗口摆放 + 内部层内容） ----------
