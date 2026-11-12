@@ -340,9 +340,17 @@
               <v-text-field
                 v-model="svcDraft.id" label="Service ID（引用键）" variant="outlined" density="compact"
                 :disabled="!!svcEditing" :rules="[idRule]"
+                :hint="svcEditing ? '' : '由 Display name 自动生成，可手动修改'"
+                :persistent-hint="!svcEditing"
+                @update:model-value="svcIdAuto = !String($event ?? '').trim()"
               />
             </v-col>
-            <v-col cols="12" sm="6"><v-text-field v-model="svcDraft.display_name" label="Display name" variant="outlined" density="compact" /></v-col>
+            <v-col cols="12" sm="6">
+              <v-text-field
+                v-model="svcDraft.display_name" label="Display name" variant="outlined" density="compact"
+                @update:model-value="onDisplayNameInput"
+              />
+            </v-col>
             <template v-if="svcKind === 'llm'">
               <v-col cols="12"><v-text-field v-model="svcDraft.api_base_url" label="API base URL（如 https://api.example.com/v1）" variant="outlined" density="compact" /></v-col>
               <v-col cols="12" sm="7">
@@ -366,7 +374,30 @@
               <v-col cols="12" sm="6">
                 <v-select v-model="svcDraft.type" :items="['azure_tts']" label="Type" variant="outlined" density="compact" />
               </v-col>
-              <v-col cols="12" sm="6"><v-text-field v-model="svcDraft.azure_tts_region" label="Azure region（如 eastus）" variant="outlined" density="compact" /></v-col>
+              <v-col cols="12" sm="6">
+                <v-select
+                  v-if="!regionCustom"
+                  :model-value="svcDraft.azure_tts_region || null"
+                  :items="regionItems"
+                  item-title="title"
+                  item-value="value"
+                  label="Azure region"
+                  variant="outlined"
+                  density="compact"
+                  @update:model-value="onRegionSelect"
+                />
+                <v-text-field
+                  v-else
+                  v-model="svcDraft.azure_tts_region"
+                  label="Azure region（自定义）"
+                  placeholder="如 southeastasia"
+                  variant="outlined"
+                  density="compact"
+                  append-icon="mdi-format-list-bulleted"
+                  title="返回常用列表"
+                  @click:append="regionCustom = false"
+                />
+              </v-col>
               <v-col cols="12">
                 <v-text-field
                   v-model="svcDraft.azure_tts_key" label="Azure subscription key" variant="outlined" density="compact"
@@ -379,6 +410,28 @@
           </v-row>
         </v-card-text>
         <v-card-actions>
+          <template v-if="svcKind === 'tts'">
+            <v-btn
+              variant="tonal"
+              prepend-icon="mdi-volume-high"
+              :loading="svcTesting"
+              :disabled="!svcDraft.azure_tts_region?.trim() || !svcDraft.azure_tts_key?.trim()"
+              title="用当前 region/key 合成一句固定话术并试听（不保存、不写配置）"
+              @click="testTts"
+            >
+              测试
+            </v-btn>
+            <span
+              v-if="svcTestResult"
+              class="text-caption"
+              :class="svcTestResult.ok ? 'text-success' : 'text-error'"
+              :title="svcTestResult.detail || ''"
+            >
+              {{ svcTestResult.ok
+                ? `合成成功（${svcTestResult.duration_ms} ms），已播放试听`
+                : (svcTestResult.detail || '失败').slice(0, 80) }}
+            </span>
+          </template>
           <v-spacer />
           <v-btn variant="text" @click="svcDialog = false">取消</v-btn>
           <v-btn color="primary" variant="flat" @click="commitService">确定</v-btn>
@@ -475,8 +528,98 @@ const delTarget = ref<{ kind: ServiceKind; id: string; refs: string[] } | null>(
 const extraRaw = ref<Record<string, string>>({})
 const extraErrors = ref<Record<string, string>>({})
 
+// ---------- azure TTS region 与凭据自检 ----------
+
+/** 常用 Azure Speech region（列表外的一律走"自定义"）。 */
+const AZURE_REGIONS = [
+  'eastasia', 'southeastasia', 'centralus', 'eastus', 'eastus2', 'northcentralus',
+  'southcentralus', 'westus2', 'westus3', 'northeurope', 'westeurope', 'uksouth',
+  'francecentral', 'germanywestcentral', 'swedencentral', 'japaneast', 'koreacentral',
+  'australiaeast', 'canadacentral', 'brazilsouth',
+]
+const regionItems = [
+  ...AZURE_REGIONS.map((r) => ({ title: r, value: r })),
+  { title: '自定义…', value: '__custom__' },
+]
+const regionCustom = ref(false)
+
+const onRegionSelect = (v: unknown) => {
+  if (!svcDraft.value) return
+  if (v === '__custom__') {
+    regionCustom.value = true
+    return
+  }
+  svcDraft.value.azure_tts_region = String(v ?? '')
+}
+
+const svcTesting = ref(false)
+const svcTestResult = ref<{ ok: boolean; detail?: string; duration_ms?: number } | null>(null)
+
+/** 用表单当前值（未保存也行）打 vedal 自检端点，成功则直接试听。 */
+const testTts = async () => {
+  const d = svcDraft.value
+  if (!d) return
+  svcTesting.value = true
+  svcTestResult.value = null
+  try {
+    const res = await api<{
+      ok: boolean
+      detail?: string
+      duration_ms?: number
+      audio?: string
+      mime?: string
+    }>('/manage/tts/test', {
+      method: 'POST',
+      body: JSON.stringify({ region: d.azure_tts_region, key: d.azure_tts_key }),
+    })
+    svcTestResult.value = res
+    if (res.ok && res.audio) {
+      new Audio(`data:${res.mime ?? 'audio/mpeg'};base64,${res.audio}`).play().catch(() => {
+        /* 自动播放被拦截：结果文案仍显示成功 */
+      })
+    }
+  } catch (err) {
+    svcTestResult.value = { ok: false, detail: errText(err) }
+  } finally {
+    svcTesting.value = false
+  }
+}
+
 const idRule = (v: string) =>
-  /^[A-Za-z0-9_-]{1,64}$/.test(v || '') || '仅允许字母/数字/-/_（1-64 位）'
+  /^[A-Za-z0-9_.-]{1,64}$/.test(v || '') || '仅允许字母/数字/./-/_（1-64 位）'
+
+/** Display Name → Service ID：统一小写，空格与除 `.` 外的符号转连字符。 */
+const slugify = (name: string): string => {
+  const s = name
+    .toLowerCase()
+    .trim()
+    .replace(/[^\w.-]+/g, '-')
+    .replace(/-{2,}/g, '-')
+    .replace(/^[-.]+|[-.]+$/g, '')
+    .slice(0, 64)
+  return s || 'service'
+}
+
+/** 与同注册表已有 id 撞车时追加 -2/-3…（自动生成只发生在新增模式）。 */
+const uniqueSlug = (slug: string, kind: ServiceKind): string => {
+  const reg = kind === 'llm'
+    ? cfg.value?.server.llm_services ?? {}
+    : cfg.value?.server.tts_services ?? {}
+  if (!reg[slug]) return slug
+  for (let n = 2; ; n++) {
+    const cand = `${slug}-${n}`.slice(0, 64)
+    if (!reg[cand]) return cand
+  }
+}
+
+/** 新增模式下 id 跟随 Display Name 自动生成；用户手动编辑过 id 就停止跟随。 */
+const svcIdAuto = ref(false)
+
+const onDisplayNameInput = (v: unknown) => {
+  if (!svcIdAuto.value || svcEditing.value || !svcDraft.value) return
+  const name = String(v ?? '')
+  svcDraft.value.id = name.trim() ? uniqueSlug(slugify(name), svcKind.value) : ''
+}
 
 // ---------- 加载 ----------
 const normalize = (doc: Record<string, any>) => {
@@ -656,7 +799,13 @@ const shortUrl = (u?: string) => {
 const openServiceDialog = (kind: ServiceKind, id: string | null) => {
   svcKind.value = kind
   svcEditing.value = id
+  svcIdAuto.value = id === null
+  svcTestResult.value = null
   const e = id ? (kind === 'llm' ? cfg.value!.server.llm_services[id] : cfg.value!.server.tts_services[id]) : {}
+  // 编辑已有条目时 region 不在常用列表 → 自动进自定义模式显示真实值
+  regionCustom.value = Boolean(
+    kind === 'tts' && e.azure_tts_region && !AZURE_REGIONS.includes(String(e.azure_tts_region)),
+  )
   svcDraft.value = {
     id: id || '',
     display_name: e.display_name || '',
@@ -677,8 +826,11 @@ const openServiceDialog = (kind: ServiceKind, id: string | null) => {
 const commitService = () => {
   const d = svcDraft.value
   if (!d || !cfg.value) return
-  if (!idRule(d.id)) {
-    msg.value = 'Service ID 不合法：' + idRule(d.id)
+  // idRule 是 Vuetify 风格：通过=true，失败=错误字符串（truthy！）。
+  // 必须用 !== true 判断，`!idRule(...)` 会让任何非法 id（含空串）直接落库。
+  const idCheck = idRule(d.id)
+  if (idCheck !== true) {
+    msg.value = 'Service ID 不合法：' + idCheck
     msgType.value = 'error'
     return
   }

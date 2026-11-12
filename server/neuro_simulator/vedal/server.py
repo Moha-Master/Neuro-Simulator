@@ -6,6 +6,7 @@
 - GET  /manage/config             取 config.json 结构化内容 + 服务反查表
 - PUT  /manage/config             提交结构化 config -> 悬空引用清理 -> 校验 -> 写盘 -> 按变动 schema 热重载
 - POST /manage/config/reload-all  向所有模块和 vedal 自身执行 reload
+- POST /manage/tts/test           azure TTS 凭据自检（固定话术合成一句，不读不写配置）
 - GET  /manage/modules            各模块状态（url/可达性/PID/是否由 vedal 托管）
 - POST /manage/module_run/<module_name>    以子进程方式启动模块（python -m neuro_simulator.<module>.main --dir <workdir>）
 - POST /manage/module_stop/<module_name>   停止模块（托管进程直接发信号；外部实例经 <workdir>/<module>.pid 定位）
@@ -30,9 +31,11 @@ vedal 不再重定向子进程输出（否则每行双写）。代价是：进�
 """
 
 import asyncio
+import base64
 import importlib.util
 import json
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -223,6 +226,13 @@ DISK_READ_MAX_BYTES = 2 * 1024 * 1024
 # 状态机投影的读超时：模块的 provider 是同步无 I/O 的，2s 足够；这是聚合层的
 # 观测纪律，不进 config（改它没有业务含义，只会让 dashboard 更慢）。
 STATE_TIMEOUT_S = 2.0
+
+# TTS 凭据自检（POST /manage/tts/test）：文本固定，端点不是自由合成入口。
+TTS_TEST_TEXT = "Someone tell Vedal there is a problem with my AI."
+TTS_TEST_TIMEOUT_S = 15.0
+# region 拼进 host `{region}.tts.speech.microsoft.com`：只许小写字母/数字/连字符，
+# 挡掉 `.`、`/`、`@` 一类主机劫持。
+_AZURE_REGION_RE = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*")
 
 # 各模块状态投影的路径由模块自己定（neuro 是 /status，stream 是 /stream/status），
 # 这里只做"按约定拼 URL"的小表；未来模块默认按 /status 处理。
@@ -478,6 +488,70 @@ def create_app() -> FastAPI:
         reloads = await _reload_modules(targets)
         print(f"[vedal] reload-all: {reloads}", flush=True)
         return {"status": "ok", "reloads": reloads}
+
+    # ---------- TTS 服务凭据自检 ----------
+
+    @app.post("/manage/tts/test")
+    async def manage_tts_test(request: Request):
+        """用传入的 azure 凭据合成一句固定话术，验证 region/key（不读不写配置）。
+
+        直接打 Azure Speech 官方 REST API：无 SDK 依赖、不要求 neuro 模块在跑；
+        文本固定在服务端——这是凭据自检，不是自由合成端点。音色/音高与
+        neuro_sama/tts.py 的实配一致（en-US-AshleyNeural ×1.25），试听即真实效果。
+        region 严格校验格式：它会被拼进 host（`{region}.tts.speech.microsoft.com`），
+        含 `.`/`/`/`@` 的值可以劫持目标主机，正则白名单是唯一正确挡法。
+        """
+        payload = await request.json()
+        region = str(payload.get("region") or "").strip().lower()
+        key = str(payload.get("key") or "").strip()
+        if not _AZURE_REGION_RE.fullmatch(region):
+            raise HTTPException(
+                status_code=400,
+                detail="region 格式无效（示例：eastasia、southeastasia、westus2）",
+            )
+        if not key:
+            raise HTTPException(status_code=400, detail="key 不能为空")
+        ssml = (
+            '<speak version="1.0" xmlns="http://www.w3.org/2001/10/synthesis" xml:lang="en-US">'
+            '<voice name="en-US-AshleyNeural">'
+            f'<prosody pitch="+25%">{TTS_TEST_TEXT}</prosody>'
+            "</voice></speak>"
+        )
+        url = f"https://{region}.tts.speech.microsoft.com/cognitiveservices/v1"
+        started = time.monotonic()
+        try:
+            async with httpx.AsyncClient(timeout=TTS_TEST_TIMEOUT_S) as client:
+                resp = await client.post(
+                    url,
+                    content=ssml.encode("utf-8"),
+                    headers={
+                        "Ocp-Apim-Subscription-Key": key,
+                        "Content-Type": "application/ssml+xml",
+                        "X-Microsoft-OutputFormat": "audio-16khz-32kbitrate-mono-mp3",
+                        "User-Agent": "neuro-simulator-vedal",
+                    },
+                )
+        except httpx.HTTPError as e:
+            return {
+                "ok": False,
+                "detail": f"{type(e).__name__}: {e or '无法连接（region 名可能不存在）'}",
+                "duration_ms": int((time.monotonic() - started) * 1000),
+            }
+        duration_ms = int((time.monotonic() - started) * 1000)
+        if resp.status_code != 200:
+            return {
+                "ok": False,
+                "status": resp.status_code,
+                "detail": f"HTTP {resp.status_code}: {(resp.text or '').strip()[:180] or '(空响应体)'}",
+                "duration_ms": duration_ms,
+            }
+        return {
+            "ok": True,
+            "duration_ms": duration_ms,
+            "bytes": len(resp.content),
+            "mime": "audio/mpeg",
+            "audio": base64.b64encode(resp.content).decode(),
+        }
 
     # ---------- /manage：模块生命周期 + 状态 ----------
     # 注意：必须注册在通用代理 /manage/{module}/{path:path} 之前
