@@ -130,7 +130,8 @@ export interface StreamMetadata {
 export interface AudienceStatus {
   /** TwitchTracker 平均观众；拿不到时为 null（不编造数字） */
   viewers: number | null
-  viewers_source: string
+  /** 针眼投影（/public/stream_view）在分区缺席时可能为 null */
+  viewers_source: string | null
   updated_at: string | null
   error: string | null
 }

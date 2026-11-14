@@ -1,12 +1,13 @@
 import { ref } from 'vue'
 import { ApiError, api, describeError } from '@/api'
-import type { QueueMessage, SceneSummary, SessionRow } from '@/types/stream'
-import type { StreamStatus } from '@/types/status'
+import type { QueueMessage, SceneSummary, SessionRow, ViewerStatus } from '@/types/stream'
 
 const MODULE = 'stream'
 
 export function useStream() {
-  const status = ref<StreamStatus | null>(null)
+  // 匿名观看页只读针眼投影（vedal /public/stream_view）；
+  // 全量 /stream/status 属管理面，启用鉴权后在锁内。
+  const status = ref<ViewerStatus | null>(null)
   const sessions = ref<SessionRow[]>([])
   const error = ref('')
   const busy = ref(false)
@@ -20,7 +21,7 @@ export function useStream() {
 
   async function refreshStatus() {
     try {
-      status.value = await api<StreamStatus>(`/manage/${MODULE}/stream/status`)
+      status.value = await api<ViewerStatus>('/public/stream_view')
     } catch (e) {
       error.value = describeError(e)
     }

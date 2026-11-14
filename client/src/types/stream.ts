@@ -66,3 +66,27 @@ export interface SceneSummary {
   highlight_messages: boolean
   elements: SceneElement[]
 }
+
+/** vedal `GET /public/stream_view` 的匿名针眼投影：观看页真正消费的字段。
+ *  全量 `/stream/status`（last_error / neuro_link.url / conversation_id /
+ *  chatbot 配置）属锁内管理面；形状由 test_vedal_auth 契约钉死。 */
+export interface ViewerStatus {
+  /** loop.state：offline / starting / live / paused */
+  state: string
+  /** metadata.live——对外是否在播的唯一判据（record 恒 false） */
+  live: boolean
+  title: string | null
+  category: string | null
+  tags: string[]
+  /** 是否存在本场（不再暴露 session/conversation 原始 id） */
+  has_session: boolean
+  /** 开场时刻（persisted 且未 offline 时非空，服务端已判好） */
+  started_at: string | null
+  audience: {
+    viewers: number | null
+    viewers_source: string | null
+    updated_at: string | null
+    /** 投影里恒 null：错误文本留在锁内的全量 status */
+    error: string | null
+  }
+}

@@ -14,6 +14,7 @@
 - GET  /emotes · GET /emotes/images/{name} · POST /emotes/refresh  表情清单/本地图片/手动刷新
 - /manage/chatbot/persona*：chatbot 的 prompt 模板 + core memory（人工编辑，存 stream DB）
 - /manage/templates*：stream 拼给 neuro / chatbot 的 user message 模板（人工编辑 + 预览）
+- /manage/emote-categories：chatbot 表情大类清单（单行 JSON 文档；GET/PUT/reset）
 - GET  /ui/events（SSE）：snapshot（含最近聊天 + 元素状态 + neuro 基线） +
   循环/控制/聊天事件 + 转发自 neuro 的 `neuro` 事件（内容/状态两条总线的聚合）
 - GET  /view：观看前端（client/ 构建产物，经 vedal 为 /manage/stream/view/）；
@@ -45,6 +46,7 @@ from . import scenes as scene_catalog
 from . import settings as stream_settings
 from . import status as stream_status_projection
 from .audience import AudienceTracker
+from .emote_categories import CategoryError, CategoryStore
 from .emotes import EmoteStore, RefreshBusy
 from .games import GameError
 from .loop import StreamConflict, StreamLoop
@@ -108,6 +110,12 @@ class MetadataPayload(BaseModel):
 
 class PromptPayload(BaseModel):
     content: str
+
+
+class EmoteCategoriesPayload(BaseModel):
+    """表情大类文档（JSON 文本或已解析对象；服务端校验后落库）。"""
+
+    content: Any
 
 
 class ManifestPayload(BaseModel):
@@ -225,7 +233,21 @@ def create_app() -> FastAPI:
         await scene_store.load()
         scene_catalog.set_store(scene_store)
         bus = EventBroadcaster()
+        # 表情大类：DB 权威，包内烘焙产物只做首次播种。加载失败只降级
+        # （chatbot 表情轮静默放弃、manage 页看到空清单），绝不阻断启动。
+        emote_categories = CategoryStore(
+            storage, Path(__file__).parent / "defaults" / "emote_categories.json"
+        )
+        try:
+            await emote_categories.load()
+        except Exception as e:
+            logger.warning(
+                "表情大类加载失败（chatbot 表情轮降级）: %s: %s",
+                type(e).__name__,
+                e,
+            )
         loop = StreamLoop(storage, bus, persona, templates)
+        loop.chatbot.emote_categories = emote_categories
         # 模板渲染结果变化时 bump chatbot 分区（template_error 在 State 页可见）
         templates.on_render_result = lambda: loop._touch("chatbot")
         app.state.storage = storage
@@ -233,6 +255,7 @@ def create_app() -> FastAPI:
         app.state.loop = loop
         app.state.persona = persona
         app.state.templates = templates
+        app.state.emote_categories = emote_categories
         # 进程重启后的遗留场次兜底：进行中记录标记为 offline
         stale = await storage.get_active_session()
         if stale:
@@ -724,6 +747,37 @@ def create_app() -> FastAPI:
             return templates.preview(name, vars, payload.content)
         except TemplateError as e:
             raise HTTPException(status_code=e.status, detail=e.message) from e
+
+    # ---------- /manage：chatbot 表情大类（单行 JSON 文档） ----------
+
+    @app.get("/manage/emote-categories")
+    async def manage_emote_categories():
+        """概览：大类 id/label/desc/成员数/前 N 成员 + 总成员数。"""
+        store: CategoryStore = app.state.emote_categories
+        return store.overview()
+
+    @app.put("/manage/emote-categories")
+    async def manage_save_emote_categories(payload: EmoteCategoriesPayload):
+        store: CategoryStore = app.state.emote_categories
+        try:
+            result = await store.save(payload.content)
+        except CategoryError as e:
+            raise HTTPException(status_code=400, detail=e.message) from e
+        print(
+            f"[stream] emote categories saved ({len(store.categories)} categories)",
+            flush=True,
+        )
+        return result
+
+    @app.post("/manage/emote-categories/reset")
+    async def manage_reset_emote_categories():
+        store: CategoryStore = app.state.emote_categories
+        try:
+            result = await store.reset()
+        except CategoryError as e:
+            raise HTTPException(status_code=400, detail=e.message) from e
+        print("[stream] emote categories reset to default", flush=True)
+        return result
 
     # ---------- /ui 画面事件通道 ----------
 

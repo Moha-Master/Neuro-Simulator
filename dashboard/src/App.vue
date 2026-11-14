@@ -150,17 +150,78 @@
         <router-view />
       </v-container>
     </v-main>
+
+    <!-- 单 key 认证：任一受保护 API 返回 401 → 此 Vedal 已启用 auth_key。
+         登录成功后只写会话 cookie（key 不落 localStorage），随后整页重载。 -->
+    <v-dialog :model-value="connectionStore.authRequired" persistent max-width="440">
+      <v-card title="此 Vedal 已启用鉴权">
+        <v-card-text>
+          <p class="text-body-2 mb-4">
+            请输入 <code>vedal.auth_key</code>。登录成功后会话 cookie 会自动随所有请求
+            （含 EventSource）发送。
+          </p>
+          <v-text-field
+            v-model="loginKey"
+            label="Auth key"
+            type="password"
+            variant="outlined"
+            density="compact"
+            autofocus
+            @keyup.enter="submitLogin"
+          />
+          <v-alert
+            v-if="loginError"
+            type="error"
+            variant="tonal"
+            density="compact"
+            class="mt-2"
+          >
+            {{ loginError }}
+          </v-alert>
+        </v-card-text>
+        <v-card-actions>
+          <v-spacer />
+          <v-btn
+            color="primary"
+            :loading="loginBusy"
+            :disabled="!loginKey"
+            @click="submitLogin"
+          >
+            登录
+          </v-btn>
+        </v-card-actions>
+      </v-card>
+    </v-dialog>
   </v-app>
 </template>
 
 <script lang="ts" setup>
 import { ref, onMounted, watch } from 'vue'
 import { useRoute } from 'vue-router'
-import { useConnectionStore } from '@/stores/connection'
+import { api, useConnectionStore } from '@/stores/connection'
 
 const drawer = ref(false)
 const route = useRoute()
 const connectionStore = useConnectionStore()
+
+// ---------- 单 key 认证登录遮罩 ----------
+const loginKey = ref('')
+const loginBusy = ref(false)
+const loginError = ref('')
+
+async function submitLogin() {
+  if (!loginKey.value) return
+  loginBusy.value = true
+  loginError.value = ''
+  try {
+    await api('/login', { method: 'POST', body: JSON.stringify({ key: loginKey.value }) })
+    // key 不写 localStorage：cookie 就是会话。重载让页面从已认证状态重新拉数据。
+    window.location.reload()
+  } catch {
+    loginError.value = 'key 不正确或登录失败，请重试'
+    loginBusy.value = false
+  }
+}
 
 // Check vedal health on app initialization (dashboard only talks to vedal)
 onMounted(() => {

@@ -5,7 +5,9 @@
  * 直连 stream 的 `/view/` 时这些路径不可达，页面会退化为 ModuleOffline /
  * describeError 提示（不额外做路径探测）。
  *
- * 路径常量与 dashboard 保持一致：`/manage/stream/...`、`/manage/modules`。
+ * 路径常量与 dashboard 保持一致：`/manage/stream/...`；匿名针眼是
+ * `/public/modules_status`（模块可达性）与 `/public/stream_view`（本场字段），
+ * 启用 `vedal.auth_key` 后其余 `/manage/*` 需要登录（观看页因此只读）。
  */
 
 export class ApiError extends Error {

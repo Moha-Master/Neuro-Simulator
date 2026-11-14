@@ -48,9 +48,25 @@ function neuroPageUrl (): string {
   return new URL('../neuro/', window.location.href).href
 }
 
-/** neuro 模块的健康检查地址（经 vedal 代理的同源路径）。 */
+/** vedal 的匿名模块针眼：只有 `name -> bool`，不含 /health 里的工具清单/模型名。
+ *  合成器是公网 OBS 页面，启用鉴权后不能读 /manage/neuro_sama/health。 */
+function publicModulesStatusUrl (): string {
+  return '/public/modules_status'
+}
+
+/** 兼容入口：显式 `data-neuro-health-url` 时按旧语义探测（任何 2xx = 健康）。 */
+function explicitHealthUrl (): string {
+  const el = document.querySelector('[data-neuro-health-url]')
+  return el?.getAttribute('data-neuro-health-url') || ''
+}
+
+/** neuro 模块的 API 基址（/manage/neuro_sama/ 或直挂时的 /）。 */
+function neuroModuleBase (): string {
+  return foreignModuleBase('data-neuro-module-base', '/manage/neuro_sama/')
+}
+
 function neuroHealthUrl (): string {
-  return `${foreignModuleBase('data-neuro-module-base', '/manage/neuro_sama/')}health`
+  return explicitHealthUrl() || publicModulesStatusUrl()
 }
 
 function resolveNeuroSettings (settings?: NeuroSettings): {
@@ -265,8 +281,37 @@ export async function bootstrapStream (stage: HTMLElement): Promise<void> {
     state: Record<string, unknown>
   } = { turn: null, state: {} }
 
+  /** 终态轮次的过期门控：Σ 各句 duration + 10s 后不再作为重放基线。
+   *  与后端 `NeuroMirror.TERMINAL_REPLAY_GRACE_S` 及 neuro `UiState.TURN_GRACE_S`
+   *  语义对齐——否则下播/挂机后 iframe 重载会把最后一轮字幕整句重播。 */
+  const TERMINAL_REPLAY_GRACE_MS = 10_000
+
+  /** 可以重放的 turn：终态超期视同 null；`terminalAt` 只是本地标记，不发给 iframe。 */
+  function replayTurn (): Record<string, unknown> | null {
+    const turn = neuroBaseline.turn
+    if (!turn) {
+      return null
+    }
+    if (turn.active !== true) {
+      const terminalAt = typeof turn.terminalAt === 'number' ? turn.terminalAt : Date.now()
+      const speech = Array.isArray(turn.speech)
+        ? turn.speech as Array<Record<string, unknown>>
+        : []
+      const total = speech.reduce((sum, seg) => sum + (Number(seg.duration) || 0), 0)
+      if (Date.now() - terminalAt > total * 1000 + TERMINAL_REPLAY_GRACE_MS) {
+        return null
+      }
+    }
+    const out = { ...turn }
+    delete out.terminalAt
+    return out
+  }
+
   function resetNeuroBaseline (snap: Snapshot | null): void {
-    neuroBaseline.turn = (snap?.neuro?.turn as Record<string, unknown> | null) ?? null
+    const turn = (snap?.neuro?.turn as Record<string, unknown> | null) ?? null
+    // 首帧自带终态（下播后重连）同样参与过期门控
+    neuroBaseline.turn
+      = turn && turn.active !== true ? { ...turn, terminalAt: Date.now() } : turn
     neuroBaseline.state = { ...(snap?.neuro?.state ?? {}) }
   }
 
@@ -288,7 +333,10 @@ export async function bootstrapStream (stage: HTMLElement): Promise<void> {
       return
     }
     if (e.event === 'snapshot') {
-      neuroBaseline.turn = (data.turn as Record<string, unknown> | null) ?? null
+      const turn = (data.turn as Record<string, unknown> | null) ?? null
+      // 首帧自带终态同样参与门控；active 的轮次不带 terminalAt
+      neuroBaseline.turn
+        = turn && turn.active !== true ? { ...turn, terminalAt: Date.now() } : turn
       return
     }
     if (e.event === 'start') {
@@ -309,12 +357,15 @@ export async function bootstrapStream (stage: HTMLElement): Promise<void> {
       // mirror 不知道前端播放进度；重放时从 0 开始（与后端缓存一致）
       seg.consumed = 0
       speech.push(seg)
-      neuroBaseline.turn = { ...turn, speech }
+      const next: Record<string, unknown> = { ...turn, speech }
+      // 终态后又有新句（续播）：这一轮不再是"已结束待过期"的基线
+      delete next.terminalAt
+      neuroBaseline.turn = next
       return
     }
     if (e.event === 'done' || e.event === 'cancelled' || e.event === 'error') {
       if (neuroBaseline.turn) {
-        neuroBaseline.turn = { ...neuroBaseline.turn, active: false }
+        neuroBaseline.turn = { ...neuroBaseline.turn, active: false, terminalAt: Date.now() }
       }
     }
   }
@@ -354,10 +405,7 @@ export async function bootstrapStream (stage: HTMLElement): Promise<void> {
    *  的 elapsed；拿不到才退回缓存（维持旧行为）。
    */
   function neuroSceneStatusUrl (): string {
-    if (!healthUrl) {
-      return ''
-    }
-    return healthUrl.replace(/\/health(?:\?.*)?$/, '/status?want=scene,layers')
+    return `${neuroModuleBase()}status?want=scene,layers`
   }
 
   async function freshSections (): Promise<{
@@ -404,7 +452,7 @@ export async function bootstrapStream (stage: HTMLElement): Promise<void> {
     neuro.forward({
       plane: 'content',
       event: 'snapshot',
-      data: { turn: neuroBaseline.turn },
+      data: { turn: replayTurn() },
     })
     const state = { ...neuroBaseline.state }
     const fresh = await freshSections()
@@ -703,7 +751,17 @@ export async function bootstrapStream (stage: HTMLElement): Promise<void> {
     let ok = false
     try {
       const r = await fetch(healthUrl, { cache: 'no-store', signal: ctrl.signal })
-      ok = r.ok
+      if (r.ok) {
+        // 默认端点 /public/modules_status：只认 modules.neuro_sama 布尔；
+        // 兼容 data-neuro-health-url 的旧语义（2xx 即健康）。
+        const data = (await r.json().catch(() => null)) as {
+          modules?: Record<string, unknown>
+        } | null
+        const modules = data?.modules
+        ok = modules && typeof modules === 'object'
+          ? modules.neuro_sama === true
+          : true
+      }
     } catch {
       ok = false
     } finally {

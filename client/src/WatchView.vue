@@ -97,43 +97,39 @@ const state = computed(
   // 轮询拿到的是**进程级**生命周期，比 iframe 转发的 chatState 更可靠：
   // 下播会卸载播放器 iframe，而重新开播的 session_begin 又只能由 iframe 转发，
   // 若这里让 chatState 优先就会永久停在 offline（iframe 永远不再挂载）。
-  () => streamStatus.value?.sections.loop.current?.state || chatState.value || 'offline',
+  () => streamStatus.value?.state || chatState.value || 'offline',
 )
 
 /** 对外是否在播：唯一判据 = `metadata.live`（有场次且非 record）。
  *  正常开播 starting 起就为 true——观众要能看开场；record 全程 false，
  *  观看页因此完全离线（离线面板、无聊天栏）。 */
-const isLive = computed(() => Boolean(streamStatus.value?.sections.metadata.current?.live))
+const isLive = computed(() => Boolean(streamStatus.value?.live))
 /** 频道信息条：非 live（record/待机）不显示 LIVE 徽标与直播详情。 */
 const channelState = computed(() => (isLive.value ? state.value : 'offline'))
 
 const title = computed(
-  () => chatMetadata.value.title || streamStatus.value?.sections.metadata.current?.title || '',
+  () => chatMetadata.value.title || streamStatus.value?.title || '',
 )
 const category = computed(
   () =>
     chatMetadata.value.category ||
-    streamStatus.value?.sections.metadata.current?.category ||
+    streamStatus.value?.category ||
     'Just Chatting',
 )
 const tags = computed(() =>
   chatMetadata.value.tags.length
     ? chatMetadata.value.tags
-    : (streamStatus.value?.sections.metadata.current?.tags ?? []),
+    : (streamStatus.value?.tags ?? []),
 )
 
-const audience = computed(() => streamStatus.value?.sections.audience.current ?? null)
+const audience = computed(() => streamStatus.value?.audience ?? null)
 
-const startedAt = computed(() => {
-  const persisted = streamStatus.value?.sections.loop.current?.persisted
-  if (!persisted || persisted.state === 'offline') return null
-  return persisted.started_at
-})
+/** 开场时刻：/public/stream_view 投影已在服务端判过"persisted 但 offline → null"。 */
+const startedAt = computed(() => streamStatus.value?.started_at ?? null)
 
 const chatActive = computed(
   () =>
-    chatSessionActive.value ||
-    (Boolean(streamStatus.value?.sections.loop.current?.session_id) && isLive.value),
+    chatSessionActive.value || (Boolean(streamStatus.value?.has_session) && isLive.value),
 )
 
 // 折叠状态与 Twitch 一样持久化

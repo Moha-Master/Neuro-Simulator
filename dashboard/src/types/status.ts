@@ -154,6 +154,8 @@ export interface ChatbotRuntime {
   discarded: number
   /** 最近一次丢弃（reason + preview），成功批次不清空 */
   last_discard: { at: string; reason: string; preview: string } | null
+  /** chatbot 表情大类：大类数与成员总数（同步读缓存） */
+  emotes: { categories: number; members: number }
   /** 消息模板最近一次实况渲染失败（成功即清除） */
   template_error: TemplateErrorStatus | null
 }

@@ -2,9 +2,11 @@
 
 外部依赖全部收敛到后端刷新：
 - 三个匿名 global 清单：7TV / BTTV / FFZ；
+- vedal987 的 7TV 用户集（频道表情本体，匿名可读）；
 - 7TV GraphQL 搜索：频道专属表情（`vedal*` / `neuro*` / `evil*`）在 7TV 有
   精确大小写同名镜像，匿名可搜可下；
-- Twitch 原生订阅表情必须 OAuth，**故意不做**（不写绕认证代码）。
+- Twitch 原生订阅表情需要 OAuth **且** Hype Train 表情不在任何 API 里，本期不做
+  （原生源待后续；Hype Train 的三枚由人工投放进 `custom/`）。
 
 工作目录权威（与 neuro 开场视频同款做法）：图片落
 `<workdir>/stream/emotes/{manifest.json,images/,custom/}`。`custom/` 是人工投放的
@@ -37,6 +39,9 @@ RETRY_COUNT = 3
 USER_AGENT = "neuro-simulator/0.1 (local streaming simulator)"
 
 SEVEN_TV_GLOBAL = "https://7tv.io/v3/emote-sets/global"
+# vedal987 的 Twitch user id（不是 login "neuro"——那是另一个同名主播）。
+TWITCH_CHANNEL_ID = "85498365"
+SEVEN_TV_CHANNEL = f"https://7tv.io/v3/users/twitch/{TWITCH_CHANNEL_ID}"
 SEVEN_TV_GQL = "https://7tv.io/v3/gql"
 BTTV_GLOBAL = "https://api.betterttv.net/3/cached/emotes/global"
 FFZ_GLOBAL = "https://api.frankerfacez.com/v1/set/global"
@@ -46,7 +51,8 @@ SEVEN_TV_SEARCH_QUERY = (
     "items{ id name host{ url files{ name } } } } }"
 )
 
-SOURCE_ORDER = ("7tv_global", "bttv_global", "ffz_global", "7tv_search")
+# 合并优先级（先到先得）：custom > channel > global > search。
+SOURCE_ORDER = ("7tv_channel", "7tv_global", "bttv_global", "ffz_global", "7tv_search")
 GLOBAL_SOURCES = (
     ("7tv_global", SEVEN_TV_GLOBAL),
     ("bttv_global", BTTV_GLOBAL),
@@ -383,11 +389,40 @@ class EmoteStore:
         errors: list[str] = []
         failed_sources: set[str] = set()
 
+        def record_failure(source: str, exc: Exception) -> None:
+            failed_sources.add(source)
+            previous = old_sources.get(source)
+            if isinstance(previous, dict):
+                current = dict(previous)
+            else:
+                current = {"count": 0, "fetched_at": None}
+            current["error"] = f"{type(exc).__name__}: {exc}"
+            sources[source] = current
+            errors.append(f"{source}: {current['error']}")
+            logger.warning("表情源 %s 刷新失败: %s", source, current["error"])
+
         async with httpx.AsyncClient(
             timeout=REQUEST_TIMEOUT_S,
             headers={"User-Agent": USER_AGENT},
             follow_redirects=True,
         ) as client:
+            # 频道表情本体优先于 global：同名时保留 vedal987 自己的那份。
+            try:
+                payload = await self._get_json(client, SEVEN_TV_CHANNEL)
+                emote_set = (
+                    payload.get("emote_set") if isinstance(payload, dict) else None
+                )
+                parsed = _parse_seven_tv(emote_set, "7tv_channel")
+                sources["7tv_channel"] = {
+                    "count": len(parsed),
+                    "fetched_at": _local_iso(),
+                    "error": None,
+                }
+                for name, candidate in parsed.items():
+                    fresh.setdefault(name, candidate)
+            except Exception as e:
+                record_failure("7tv_channel", e)
+
             for source, url in GLOBAL_SOURCES:
                 try:
                     payload = await self._get_json(client, url)
@@ -404,16 +439,7 @@ class EmoteStore:
                     for name, candidate in parsed.items():
                         fresh.setdefault(name, candidate)
                 except Exception as e:
-                    failed_sources.add(source)
-                    previous = old_sources.get(source)
-                    if isinstance(previous, dict):
-                        current = dict(previous)
-                    else:
-                        current = {"count": 0, "fetched_at": None}
-                    current["error"] = f"{type(e).__name__}: {e}"
-                    sources[source] = current
-                    errors.append(f"{source}: {current['error']}")
-                    logger.warning("表情源 %s 刷新失败: %s", source, current["error"])
+                    record_failure(source, e)
 
             missing: list[str] = []
             search_error: Optional[str] = None

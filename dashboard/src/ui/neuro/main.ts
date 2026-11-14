@@ -65,8 +65,12 @@ const AUDIO_MUTED_KEY = 'ns.audio.muted'
 
 function readStoredVolume (): number {
   try {
-    const raw = Number(localStorage.getItem(AUDIO_VOLUME_KEY))
-    return Number.isFinite(raw) ? Math.min(1, Math.max(0, raw)) : 1
+    const raw = localStorage.getItem(AUDIO_VOLUME_KEY)
+    // 键不存在时 getItem 返回 null，Number(null)===0 会绕过下面的兜底：
+    // 必须先判断原始字符串，缺省/空串都按 1（未调过音量的默认）。
+    if (raw === null || raw === '') return 1
+    const value = Number(raw)
+    return Number.isFinite(value) ? Math.min(1, Math.max(0, value)) : 1
   } catch {
     return 1
   }

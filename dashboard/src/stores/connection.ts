@@ -1,4 +1,5 @@
 import { defineStore } from 'pinia'
+import pinia from '@/stores'
 
 export interface ModuleHealth {
   url: string | null
@@ -16,12 +17,18 @@ export const useConnectionStore = defineStore('connection', {
     modules: {} as Record<string, ModuleHealth>,
     lastCheckAt: null as string | null,
     error: '',
+    /** vedal 已启用 auth_key：任一 API 返回 401 时置真，App.vue 弹出登录遮罩。 */
+    authRequired: false,
   }),
 
   actions: {
     async checkHealth() {
       try {
         const resp = await fetch('/health', { headers: { Accept: 'application/json' } })
+        if (resp.status === 401) {
+          this.authRequired = true
+          throw new Error('HTTP 401')
+        }
         if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
         const data = await resp.json()
         this.isVedalConnected = data.status === 'ok'
@@ -74,6 +81,10 @@ export async function api<T = any>(path: string, options: RequestInit = {}): Pro
     data = text
   }
   if (!resp.ok) {
+    // 单 key 认证：任意受保护端点返回 401 → 置全局标志，App.vue 弹登录遮罩。
+    if (resp.status === 401) {
+      useConnectionStore(pinia).authRequired = true
+    }
     const detail =
       data && typeof data === 'object' && 'detail' in data
         ? JSON.stringify((data as Record<string, any>).detail)

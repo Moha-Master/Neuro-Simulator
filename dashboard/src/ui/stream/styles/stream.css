@@ -88,8 +88,10 @@ body {
 /* 字号写在子节点上：元素自身就是查询容器，写在它自己身上只会解析到舞台宽度 */
 .chat-lines {
   /* 字号与元素尺寸解耦：跟随**舞台宽度**（--ns-stage-w 由页面 ResizeObserver 写），
-     元素拖宽/拖高只改变换行与可见行数，字号不变。默认 0.06 ≈ 旧 6cqi × 25% 宽。 */
-  font-size: calc(var(--ns-stage-w, 1000px) * var(--chat-font, 0.06));
+     元素拖宽/拖高只改变换行与可见行数，字号不变。
+     默认 0.015 = 旧 6cqi（元素宽 6%）× 默认 chat 盒宽 25% 舞台——期 6 迁移时误把
+     0.06 直接当舞台比例写死，字号放大了 4 倍，此处为回归修正。 */
+  font-size: calc(var(--ns-stage-w, 1000px) * var(--chat-font, 0.015));
   font-weight: 800;
   -webkit-text-stroke: 0.11em #000;
   /* stroke 居中绘制；不先把 fill 画在上层时细字形的白色会被描边吃光 */

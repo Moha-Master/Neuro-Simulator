@@ -89,6 +89,14 @@ CREATE TABLE IF NOT EXISTS scenes (
     content    TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
+
+-- emote_categories：chatbot 表情大类（整份 JSON 文档，单行 name='categories'）；
+-- 包内 defaults/emote_categories.json 是烘焙产物/播种模板，DB 里的才是权威
+CREATE TABLE IF NOT EXISTS emote_categories (
+    name       TEXT PRIMARY KEY,
+    content    TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
 """
 
 
@@ -448,6 +456,31 @@ class Storage:
     async def upsert_scene(self, content: str, name: str = "scenes") -> None:
         await self.db.execute(
             "INSERT INTO scenes (name, content, updated_at) VALUES (?, ?, ?) "
+            "ON CONFLICT(name) DO UPDATE SET content=excluded.content, "
+            "updated_at=excluded.updated_at",
+            (name, content, _now()),
+        )
+        await self.db.commit()
+
+    # ---------- 表情大类：DB 里的那份才是权威 ----------
+
+    async def get_emote_categories(
+        self, name: str = "categories"
+    ) -> Optional[dict[str, Any]]:
+        cur = await self.db.execute(
+            "SELECT name, content, updated_at FROM emote_categories WHERE name=?",
+            (name,),
+        )
+        row = await cur.fetchone()
+        if row is None:
+            return None
+        return {"name": row[0], "content": row[1], "updated_at": row[2]}
+
+    async def upsert_emote_categories(
+        self, content: str, name: str = "categories"
+    ) -> None:
+        await self.db.execute(
+            "INSERT INTO emote_categories (name, content, updated_at) VALUES (?, ?, ?) "
             "ON CONFLICT(name) DO UPDATE SET content=excluded.content, "
             "updated_at=excluded.updated_at",
             (name, content, _now()),

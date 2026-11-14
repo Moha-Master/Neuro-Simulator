@@ -278,6 +278,22 @@
                           <v-select v-model="cfg.vedal.log_level" :items="logLevels" label="Log level" variant="outlined" density="compact" />
                           <div class="text-caption text-medium-emphasis">debug 时才显示 uvicorn 的 HTTP 请求日志</div>
                         </v-col>
+                        <v-col cols="12" sm="8">
+                          <v-text-field
+                            v-model="cfg.vedal.auth_key"
+                            label="Auth key（空 = 关闭鉴权）"
+                            :type="showAuthKey ? 'text' : 'password'"
+                            :append-icon="showAuthKey ? 'mdi-eye-off' : 'mdi-eye'"
+                            @click:append="showAuthKey = !showAuthKey"
+                            variant="outlined"
+                            density="compact"
+                            hint="空 = 关闭鉴权；保存即生效；轮换后旧 key 与旧会话立即失效（在线 SSE 除外）"
+                            persistent-hint
+                          />
+                        </v-col>
+                        <v-col cols="12" sm="4" class="d-flex align-start">
+                          <v-btn variant="tonal" prepend-icon="mdi-key-plus" @click="genAuthKey">生成</v-btn>
+                        </v-col>
                       </v-row>
                       <div class="text-caption text-medium-emphasis mt-2">
                         vedal 是 dashboard 与 OBS 的唯一入口（模块代理 / 静态托管均经此转发）。
@@ -516,6 +532,16 @@ const tab = ref('services')
 const busy = ref(false)
 const msg = ref('')
 const msgType = ref<'success' | 'error' | 'warning' | 'info'>('info')
+/** Vedal auth_key 的明文/掩码切换（仿 Services 的 api_key）。 */
+const showAuthKey = ref(false)
+
+/** 生成 32 字节随机 key（hex）——不引入额外依赖，浏览器 crypto 即可。 */
+function genAuthKey(): void {
+  if (!cfg.value) return
+  const bytes = new Uint8Array(32)
+  crypto.getRandomValues(bytes)
+  cfg.value.vedal.auth_key = Array.from(bytes, b => b.toString(16).padStart(2, '0')).join('')
+}
 
 const svcDialog = ref(false)
 const svcKind = ref<ServiceKind>('llm')
@@ -682,6 +708,7 @@ const normalize = (doc: Record<string, any>) => {
   doc.vedal.port = doc.vedal.port ?? 8100
   doc.vedal.external_url = doc.vedal.external_url ?? ''
   doc.vedal.log_level = doc.vedal.log_level ?? 'info'
+  doc.vedal.auth_key = doc.vedal.auth_key ?? ''
 }
 
 const loadConfig = async () => {

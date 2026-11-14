@@ -12,9 +12,12 @@ from unittest.mock import patch
 
 from neuro_simulator.stream.chatbot import (
     _CHAT_TOOL,
+    _EMOTE_TOOL,
     _HISTORY_BATCHES,
+    EMOTE_CANON,
     ChatbotManager,
 )
+from neuro_simulator.stream.emote_categories import CategoryStore
 from neuro_simulator.stream.persona import ChatbotPersonaStore, build_template_store
 from neuro_simulator.stream.settings import ChatbotSettings, ChessSettings, StreamSettings
 from neuro_simulator.stream.storage import Storage
@@ -32,6 +35,30 @@ def _tool_message(lines: list[str], content: str = ""):
     return SimpleNamespace(
         choices=[SimpleNamespace(message=SimpleNamespace(content=content, tool_calls=[call]))]
     )
+
+
+def _emote_message(items: list[dict], content: str = ""):
+    """造一个 send_emote_messages 响应（items = {category, count}）。"""
+    call = SimpleNamespace(
+        id="call_emote",
+        function=SimpleNamespace(
+            name=_EMOTE_TOOL,
+            arguments=json.dumps({"messages": items}),
+        ),
+    )
+    return SimpleNamespace(
+        choices=[SimpleNamespace(message=SimpleNamespace(content=content, tool_calls=[call]))]
+    )
+
+
+class _FixedRandom:
+    """测试用确定性 rng：random() 恒为 value（0.0 = 表情轮，0.99 = 文本轮）。"""
+
+    def __init__(self, value: float) -> None:
+        self.value = value
+
+    def random(self) -> float:
+        return self.value
 
 
 def _settings(**chatbot_overrides) -> StreamSettings:
@@ -160,6 +187,8 @@ class TestChatbot(unittest.IsolatedAsyncioTestCase):
 
     def _manager(self, queue_row: int, fake: _FakeLLM, settings: StreamSettings):
         mgr = ChatbotManager(self.storage, self.persona, self.templates)
+        # 默认强制文本轮：这些用例验证的是既有文本路径，mode lottery 另有专测。
+        mgr._rng = _FixedRandom(0.99)
 
         async def _client_for(cb):
             return fake.as_client()
@@ -176,8 +205,12 @@ class TestChatbot(unittest.IsolatedAsyncioTestCase):
         )
         return mgr
 
-    def _bare_manager(self, fake: _FakeLLM | None = None) -> ChatbotManager:
-        mgr = ChatbotManager(self.storage, self.persona, self.templates)
+    def _bare_manager(self, fake: _FakeLLM | None = None, emote_categories=None) -> ChatbotManager:
+        mgr = ChatbotManager(
+            self.storage, self.persona, self.templates,
+            emote_categories=emote_categories,
+        )
+        mgr._rng = _FixedRandom(0.99)
         if fake is not None:
             async def _client_for(cb):
                 return fake.as_client()
@@ -186,10 +219,17 @@ class TestChatbot(unittest.IsolatedAsyncioTestCase):
         return mgr
 
     async def _run_once(
-        self, fake: _FakeLLM, settings: StreamSettings, queue_row: int
+        self,
+        fake: _FakeLLM,
+        settings: StreamSettings,
+        queue_row: int,
+        *,
+        emote_categories=None,
+        rng_value: float = 0.99,
     ) -> ChatbotManager:
         """直接跑一轮生成（不启动调度器，避免测试与定时器赛跑）。"""
-        mgr = self._bare_manager(fake)
+        mgr = self._bare_manager(fake, emote_categories=emote_categories)
+        mgr._rng = _FixedRandom(rng_value)
         mgr._queue_row = queue_row
         mgr._metadata = lambda: ("T", "C")
 
@@ -202,6 +242,36 @@ class TestChatbot(unittest.IsolatedAsyncioTestCase):
         mgr._append_messages = _append
         await mgr._generate_once(settings.chatbot)
         return mgr
+
+    async def _category_store(self, doc: dict | None = None) -> CategoryStore:
+        """写一份包内默认 JSON，装一个会播种进测试库的 CategoryStore。"""
+        doc = doc or {
+            "version": 1,
+            "categories": [
+                {
+                    "id": "single",
+                    "label": "Single",
+                    "desc": "one emote only",
+                    "emotes": [{"name": "om", "weight": 1}],
+                    "templates": [],
+                },
+                {
+                    "id": "pair",
+                    "label": "Pair",
+                    "desc": "two emotes",
+                    "emotes": [
+                        {"name": "om", "weight": 100},
+                        {"name": "Pog", "weight": 1},
+                    ],
+                    "templates": [],
+                },
+            ],
+        }
+        path = Path(self.tmpdir.name) / "emote_categories.json"
+        path.write_text(json.dumps(doc), encoding="utf-8")
+        store = CategoryStore(self.storage, path)
+        await store.load()
+        return store
 
     async def _drain(self, mgr: ChatbotManager, fake: _FakeLLM, seconds: float):
         """跑一段时间（按调度间隔轮询，避免依赖精确计时）。"""
@@ -629,6 +699,136 @@ class TestChatbot(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(mgr._tool_choice_index, 2, "工具档位是进程级缓存")
         finally:
             mgr.stop_session()
+
+    # ---------- 表情轮（mode lottery / 服务端采样 / 去重豁免） ----------
+
+    async def test_mode_lottery_emote_round_uses_dynamic_tool_schema(self):
+        queue_row, _ = await self.storage.create_queue("q")
+        store = await self._category_store()
+        fake = _ScriptedLLM([_emote_message([{"category": "single", "count": 2}])])
+        await self._run_once(
+            fake, _settings(count=5), queue_row,
+            emote_categories=store, rng_value=0.0,
+        )
+
+        tool = fake.last_kwargs["tools"][0]
+        self.assertEqual(tool["function"]["name"], _EMOTE_TOOL)
+        messages = tool["function"]["parameters"]["properties"]["messages"]
+        item = messages["items"]
+        self.assertEqual(item["properties"]["category"]["enum"], ["single", "pair"])
+        self.assertEqual(item["properties"]["count"]["minimum"], 1)
+        self.assertEqual(item["properties"]["count"]["maximum"], 8)
+        self.assertIn("one emote only", tool["function"]["description"])
+        self.assertIn("Emote output contract", fake.last_messages[0]["content"])
+
+        rows = await self.storage.list_messages(queue_row)
+        self.assertEqual([m["content"] for m in rows], ["om om"])
+
+    async def test_mode_lottery_text_round_keeps_text_tool(self):
+        queue_row, _ = await self.storage.create_queue("q")
+        store = await self._category_store()
+        fake = _ScriptedLLM([_tool_message(["plain text"])])
+        await self._run_once(
+            fake, _settings(), queue_row,
+            emote_categories=store, rng_value=0.99,
+        )
+        self.assertEqual(fake.last_kwargs["tools"][0]["function"]["name"], _CHAT_TOOL)
+        self.assertIn("Chat output contract", fake.last_messages[0]["content"])
+        rows = await self.storage.list_messages(queue_row)
+        self.assertEqual([m["content"] for m in rows], ["plain text"])
+
+    async def test_emote_round_parses_clamps_and_drops_unknown_categories(self):
+        queue_row, _ = await self.storage.create_queue("q")
+        store = await self._category_store()
+        fake = _ScriptedLLM([
+            _emote_message([
+                {"category": "single", "count": 3},
+                {"category": "ghost", "count": 1},
+                {"category": "single", "count": 99},
+                {"category": "single", "count": 0},
+            ])
+        ])
+        mgr = await self._run_once(
+            fake, _settings(), queue_row,
+            emote_categories=store, rng_value=0.0,
+        )
+        rows = await self.storage.list_messages(queue_row)
+        self.assertEqual(
+            [m["content"] for m in rows],
+            ["om om om", " ".join(["om"] * 8), "om"],
+        )
+        # 未知 category 只丢 item，不记整轮 discard
+        self.assertEqual(mgr.discarded, 0)
+
+    async def test_emote_rows_are_exempt_from_global_dedup(self):
+        """两批完全相同的表情行都要入列（真实 chat 连发同表情是常态）。"""
+        queue_row, _ = await self.storage.create_queue("q")
+        store = await self._category_store()
+        fake = _ScriptedLLM([
+            _emote_message([{"category": "single", "count": 1}]),
+            _emote_message([{"category": "single", "count": 1}]),
+        ])
+        mgr = self._bare_manager(fake, emote_categories=store)
+        mgr._rng = _FixedRandom(0.0)
+        mgr._queue_row = queue_row
+        mgr._metadata = lambda: ("T", "C")
+
+        async def _append(fresh):
+            ids = []
+            for username, content in fresh:
+                ids.append(await self.storage.append_message(queue_row, username, content))
+            return ids
+
+        mgr._append_messages = _append
+        await mgr._generate_once(_settings().chatbot)
+        await mgr._generate_once(_settings().chatbot)
+
+        rows = await self.storage.list_messages(queue_row)
+        self.assertEqual([m["content"] for m in rows], ["om", "om"])
+
+    async def test_emote_rows_only_dedupe_adjacent_duplicates_in_batch(self):
+        queue_row, _ = await self.storage.create_queue("q")
+        store = await self._category_store()
+        fake = _ScriptedLLM([
+            _emote_message([
+                {"category": "single", "count": 1},
+                {"category": "single", "count": 1},
+                {"category": "single", "count": 2},
+            ])
+        ])
+        await self._run_once(
+            fake, _settings(), queue_row,
+            emote_categories=store, rng_value=0.0,
+        )
+        rows = await self.storage.list_messages(queue_row)
+        self.assertEqual([m["content"] for m in rows], ["om", "om om"])
+
+    async def test_emote_store_unavailable_discards_round(self):
+        queue_row, _ = await self.storage.create_queue("q")
+        fake = _ScriptedLLM([_emote_message([{"category": "single", "count": 1}])])
+        mgr = await self._run_once(
+            fake, _settings(), queue_row, emote_categories=None, rng_value=0.0
+        )
+        self.assertEqual(await self.storage.list_messages(queue_row), [])
+        self.assertEqual(mgr.discarded, 1)
+        self.assertEqual(mgr.last_discard["reason"], "emote_unavailable")
+        self.assertEqual(fake.calls, 0, "store 未就绪时不应浪费一次请求")
+
+    async def test_category_store_merges_members_into_emote_canon(self):
+        doc = {
+            "version": 1,
+            "categories": [
+                {
+                    "id": "novel",
+                    "label": "Novel",
+                    "desc": "novel emote",
+                    "emotes": [{"name": "brandNewCased", "weight": 1}],
+                    "templates": [],
+                }
+            ],
+        }
+        await self._category_store(doc)
+        self.assertEqual(EMOTE_CANON["brandnewcased"], "brandNewCased")
 
     # ---------- 人设 / 模板接线 ----------
 

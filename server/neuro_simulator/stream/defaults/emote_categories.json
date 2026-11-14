@@ -1,0 +1,462 @@
+{
+  "version": 1,
+  "generated_from": "usage.json (26 VOD / 1.97M msgs)；权重源 by_tag.neuro_solo; weights: usage.json emotes[*].by_tag.neuro_solo",
+  "categories": [
+    {
+      "id": "funny_moment",
+      "label": "Funny Moment",
+      "desc": "Use when something actually funny just happened: a joke landed, Neuro said something absurd, a moment is memeable. This is the everyday laugh bucket.",
+      "emotes": [
+        {
+          "name": "om",
+          "weight": 7292
+        },
+        {
+          "name": "LULE",
+          "weight": 6477
+        },
+        {
+          "name": "LOL",
+          "weight": 2031
+        },
+        {
+          "name": "MEGALUL",
+          "weight": 707
+        }
+      ],
+      "templates": []
+    },
+    {
+      "id": "welcoming",
+      "label": "Welcoming",
+      "desc": "Use when the stream or segment just started, someone new arrives, the scene switched, or chat is greeting the streamer. Celebratory hype emotes also fit a fresh start.",
+      "emotes": [
+        {
+          "name": "Pog",
+          "weight": 3979
+        },
+        {
+          "name": "xdx",
+          "weight": 1759
+        },
+        {
+          "name": "vedalEvilCheer",
+          "weight": 452
+        },
+        {
+          "name": "vedalCheer",
+          "weight": 3600
+        },
+        {
+          "name": "vedalWave",
+          "weight": 3116
+        },
+        {
+          "name": "<3",
+          "weight": 2146
+        },
+        {
+          "name": "meow",
+          "weight": 2239
+        },
+        {
+          "name": "EvilJAM",
+          "weight": 164
+        },
+        {
+          "name": "NeuroJAM",
+          "weight": 1686
+        },
+        {
+          "name": "ENURU",
+          "weight": 21
+        },
+        {
+          "name": "vedalNURU",
+          "weight": 841
+        },
+        {
+          "name": "ShouldiCelebrate",
+          "weight": 278
+        },
+        {
+          "name": "vedalEvilWave",
+          "weight": 56
+        },
+        {
+          "name": "neuroWave",
+          "weight": 487
+        },
+        {
+          "name": "Erm",
+          "weight": 301
+        }
+      ],
+      "templates": []
+    },
+    {
+      "id": "gonna_fail",
+      "label": "Gonna Fail",
+      "desc": "Use when the streamer is about to fail, is confidently wrong, or has just failed: doom is coming, respect the fall. Also the funeral-emote bucket for a wiped run.",
+      "emotes": [
+        {
+          "name": "om",
+          "weight": 7292
+        },
+        {
+          "name": "o7",
+          "weight": 3321
+        },
+        {
+          "name": "ICANT",
+          "weight": 665
+        },
+        {
+          "name": "NOOO",
+          "weight": 1120
+        },
+        {
+          "name": "RIPBOZO",
+          "weight": 820
+        }
+      ],
+      "templates": []
+    },
+    {
+      "id": "epic_moment",
+      "label": "Epic Moment",
+      "desc": "Use when something genuinely impressive or cinematic just happened: a clutch play, a great song, a peak moment worth cheering loud.",
+      "emotes": [
+        {
+          "name": "Clap",
+          "weight": 5031
+        },
+        {
+          "name": "CINEMA",
+          "weight": 1515
+        },
+        {
+          "name": "HOLY",
+          "weight": 4178
+        },
+        {
+          "name": "vedalEvilCheer",
+          "weight": 452
+        },
+        {
+          "name": "vedalCheer",
+          "weight": 3600
+        },
+        {
+          "name": "BOOM",
+          "weight": 810
+        },
+        {
+          "name": "GIGAVEDAL",
+          "weight": 33
+        },
+        {
+          "name": "GIGAEVIL",
+          "weight": 72
+        },
+        {
+          "name": "GIGANEURO",
+          "weight": 1529
+        },
+        {
+          "name": "MOLY",
+          "weight": 205
+        }
+      ],
+      "templates": []
+    },
+    {
+      "id": "sad_moment",
+      "label": "Sad Moment",
+      "desc": "Use when something sad or melancholic happens, or when chat is sympathizing with the streamer.",
+      "emotes": [
+        {
+          "name": "Aware",
+          "weight": 3070
+        },
+        {
+          "name": "Sadge",
+          "weight": 304
+        }
+      ],
+      "templates": []
+    },
+    {
+      "id": "mentioned_neuro",
+      "label": "Mentioned Neuro",
+      "desc": "Use when the current streamer is NOT Neuro (e.g. Evil or Vedal is streaming) but Neuro was just mentioned or brought up.",
+      "emotes": [
+        {
+          "name": "neuroSoCute",
+          "weight": 7442
+        },
+        {
+          "name": "nwero",
+          "weight": 2142
+        },
+        {
+          "name": "NeuroJAM",
+          "weight": 1686
+        },
+        {
+          "name": "ShouldiCelebrate",
+          "weight": 278
+        },
+        {
+          "name": "newero",
+          "weight": 324
+        }
+      ],
+      "templates": []
+    },
+    {
+      "id": "mentioned_evil",
+      "label": "Mentioned Evil",
+      "desc": "Use when the current streamer is NOT Evil (e.g. Neuro or Vedal is streaming) but Evil was just mentioned or brought up.",
+      "emotes": [
+        {
+          "name": "evilSoCute",
+          "weight": 994
+        },
+        {
+          "name": "eliv",
+          "weight": 1424
+        },
+        {
+          "name": "EvilJAM",
+          "weight": 164
+        },
+        {
+          "name": "deliv",
+          "weight": 139
+        },
+        {
+          "name": "newliv",
+          "weight": 96
+        },
+        {
+          "name": "cleliv",
+          "weight": 1
+        },
+        {
+          "name": "cybeliv",
+          "weight": 7
+        },
+        {
+          "name": "weliv",
+          "weight": 6
+        }
+      ],
+      "templates": []
+    },
+    {
+      "id": "unexpected_moment",
+      "label": "Unexpected Moment",
+      "desc": "Use when something surprising, confusing or out of nowhere just happened. Broader than epic: shock and bewilderment, not necessarily good.",
+      "emotes": [
+        {
+          "name": "om",
+          "weight": 7292
+        },
+        {
+          "name": "HOLY",
+          "weight": 4178
+        },
+        {
+          "name": "WHAT",
+          "weight": 3084
+        },
+        {
+          "name": "huh",
+          "weight": 1173
+        },
+        {
+          "name": "ICANT",
+          "weight": 665
+        },
+        {
+          "name": "sus",
+          "weight": 1052
+        },
+        {
+          "name": "MOLY",
+          "weight": 205
+        },
+        {
+          "name": "evilWhat",
+          "weight": 16
+        }
+      ],
+      "templates": []
+    },
+    {
+      "id": "mentioned_vedal",
+      "label": "Mentioned Vedal",
+      "desc": "Use when the current streamer is NOT Vedal (the AI girls are streaming) but Vedal was just mentioned or brought up.",
+      "emotes": [
+        {
+          "name": "vedPls",
+          "weight": 1812
+        },
+        {
+          "name": "vedal",
+          "weight": 1045
+        },
+        {
+          "name": "Tutel",
+          "weight": 359
+        },
+        {
+          "name": "Corpa",
+          "weight": 590
+        }
+      ],
+      "templates": []
+    },
+    {
+      "id": "lewd_moment",
+      "label": "LEWD Moment",
+      "desc": "Use when something mildly risqué, suggestive or cringe-sexy appears. Twitch-safe teasing only.",
+      "emotes": [
+        {
+          "name": "WHAT",
+          "weight": 3084
+        },
+        {
+          "name": "uuh",
+          "weight": 1747
+        },
+        {
+          "name": "evilFlooshed",
+          "weight": 1721
+        },
+        {
+          "name": "sus",
+          "weight": 1052
+        },
+        {
+          "name": "Erm",
+          "weight": 301
+        },
+        {
+          "name": "monkaTOS",
+          "weight": 65
+        },
+        {
+          "name": "vedalFiltered",
+          "weight": 393
+        },
+        {
+          "name": "vedalErm",
+          "weight": 23
+        }
+      ],
+      "templates": []
+    },
+    {
+      "id": "gonna_win",
+      "label": "Gonna Win",
+      "desc": "Use when the streamer is winning or about to win: victory is near, it was easy, chat is hyping the win.",
+      "emotes": [
+        {
+          "name": "Clap",
+          "weight": 5031
+        },
+        {
+          "name": "vedalEvilCheer",
+          "weight": 452
+        },
+        {
+          "name": "vedalCheer",
+          "weight": 3600
+        },
+        {
+          "name": "Sure",
+          "weight": 1284
+        },
+        {
+          "name": "EZ",
+          "weight": 1955
+        },
+        {
+          "name": "SAVED",
+          "weight": 829
+        },
+        {
+          "name": "LETSGO",
+          "weight": 597
+        }
+      ],
+      "templates": []
+    },
+    {
+      "id": "typical_moment",
+      "label": "Typical Moment",
+      "desc": "Use when something predictably on-brand happens: Neuro being Neuro, a recurring gag or a known habit repeating right on schedule.",
+      "emotes": [
+        {
+          "name": "mhm",
+          "weight": 6908
+        },
+        {
+          "name": "SMH",
+          "weight": 1601
+        },
+        {
+          "name": "classic",
+          "weight": 1701
+        }
+      ],
+      "templates": []
+    },
+    {
+      "id": "horror_moment",
+      "label": "Horror Moment",
+      "desc": "Use when scary or intensely chaotic content appears: horror games, jump scares, unhinged high-pressure moments.",
+      "emotes": [
+        {
+          "name": "MONKA",
+          "weight": 2384
+        },
+        {
+          "name": "NAHH",
+          "weight": 849
+        },
+        {
+          "name": "monkaOMEGA",
+          "weight": 856
+        }
+      ],
+      "templates": []
+    },
+    {
+      "id": "mentioned_dogs",
+      "label": "Mentioned Dogs",
+      "desc": "Use when dogs appear on screen or are just mentioned.",
+      "emotes": [
+        {
+          "name": "cerbr",
+          "weight": 720
+        }
+      ],
+      "templates": []
+    },
+    {
+      "id": "mentioned_cats",
+      "label": "Mentioned Cats",
+      "desc": "Use when cats appear on screen or are just mentioned.",
+      "emotes": [
+        {
+          "name": "miin",
+          "weight": 587
+        }
+      ],
+      "templates": []
+    }
+  ]
+}

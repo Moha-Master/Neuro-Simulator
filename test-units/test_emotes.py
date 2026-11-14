@@ -18,6 +18,7 @@ from neuro_simulator.stream.chatbot import EMOTE_CANON
 from neuro_simulator.stream.emotes import EmoteStore
 
 SEVEN = emotes_module.SEVEN_TV_GLOBAL
+CHANNEL = emotes_module.SEVEN_TV_CHANNEL
 BTTV = emotes_module.BTTV_GLOBAL
 FFZ = emotes_module.FFZ_GLOBAL
 GQL = emotes_module.SEVEN_TV_GQL
@@ -42,6 +43,7 @@ class _FakeNet:
     def __init__(self) -> None:
         self.globals = {
             SEVEN: {"emotes": []},
+            CHANNEL: {"emote_set": {"emotes": []}},
             BTTV: [],
             FFZ: {"sets": {}},
         }

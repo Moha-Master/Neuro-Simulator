@@ -1,7 +1,11 @@
 """vedal 服务端：托管 dashboard + /manage 管理接口 + /health。
 
 与 dashboard 的通信协议（同域 HTTP，dashboard 由本模块静态托管）：
-- GET  /health                    健康检查（dashboard 只检查 vedal；vedal 顺带探测各模块）
+- POST /login                     一次性 key 换会话 cookie（公开；失败按来源 IP 限流）
+- POST /logout                    清除会话 cookie（受保护：需已认证）
+- GET  /public/modules_status     匿名模块存活针眼：只有 name -> bool（无 url/pid/error）
+- GET  /public/stream_view        匿名观看页针眼：只投影 live/标题/观众数等消费字段
+- GET  /health                    健康检查（**锁内**：payload 含各模块 url，属侦察面）
 - GET  /manage/state              各模块状态机投影的全景聚合（并发扇出，原样透传）
 - GET  /manage/config             取 config.json 结构化内容 + 服务反查表
 - PUT  /manage/config             提交结构化 config -> 悬空引用清理 -> 校验 -> 写盘 -> 按变动 schema 热重载
@@ -36,6 +40,7 @@ import importlib.util
 import json
 import os
 import re
+import secrets
 import signal
 import subprocess
 import sys
@@ -48,7 +53,7 @@ from typing import Any, Optional
 
 import httpx
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import Response, StreamingResponse
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.staticfiles import StaticFiles
 
@@ -92,6 +97,16 @@ async def _is_reachable(url: Optional[str]) -> bool:
             return r.status_code == 200
     except httpx.HTTPError:
         return False
+
+
+async def _module_reachable(name: str) -> bool:
+    """模块可达性：`/manage/modules` 与匿名 `/public/modules_status` 共用的判定。
+
+    vedal 自身不发起 HTTP 探测（会递归），能响应即视为可达。
+    """
+    if name == "vedal":
+        return True
+    return await _is_reachable(module_url(name))
 
 
 def _log_tail(module_name: str, pid: int) -> str:
@@ -241,9 +256,169 @@ _MODULE_STATUS_PATHS = {
     "stream": "/stream/status",
 }
 
+# ---------- 单 key 认证（vedal 是唯一信任边界） ----------
+#
+# 一把钥匙装在 vedal：config `vedal.auth_key`（默认 ""）。空串 = 鉴权整体关闭，
+# 行为与旧版逐字一致；非空 = 启用。key 是不透明字符串，比较一律
+# secrets.compare_digest（避免时序侧信道）。
+
+AUTH_COOKIE = "ns_auth"
+AUTH_COOKIE_MAX_AGE = 30 * 24 * 3600  # 30 天；浏览器会话 cookie 的上限
+LOGIN_RATE_LIMIT = 10  # 每 IP 每窗口允许的失败次数
+LOGIN_RATE_WINDOW_S = 60.0  # 令牌桶窗口：10 次 / 60s
+_LOGIN_RATE_PER_S = LOGIN_RATE_LIMIT / LOGIN_RATE_WINDOW_S
+
+# 匿名可访问的 GET 路径。末尾 `*` = 路径前缀，其余 = 精确路径。
+# **白名单纪律**：新增公开 GET 必须在这里显式加一行并写明消费方，同时在
+# test-units/test_vedal_auth.py 的白名单断言里加同一条。悄悄多一条公开 GET
+# 就是悄悄扩大公网暴露面——不要靠"反正没人用"来推断。
+PUBLIC_GET_PATHS: tuple[str, ...] = (
+    # —— dashboard / 画面页静态壳（无秘密；数据接口都在 /manage/*） ——
+    "/",  # dashboard SPA 入口
+    "/index.html",  # 同上的显式入口
+    "/assets/*",  # Vite 构建的哈希资源（dashboard + 三个 ui 入口的 JS/CSS）
+    "/favicon.ico",
+    "/banner.jpeg",  # client 观看页离线面板背景
+    "/avatar.webp",  # client 观看页频道头像（TwitchChannelInfo）
+    "/fonts/*",  # 合成器 / neuro 窗口 / client 的字体（各自 loadFonts）
+    "/twitch/*",  # client 观看页 Twitch 图标与订阅 badge
+    "/ui/*",  # 合成器 /ui/stream/、neuro 窗口 /ui/neuro/、聊天页 /ui/chat/
+    # —— 匿名状态针眼 ——
+    "/public/modules_status",  # 只暴露模块名 -> bool；见该端点注释
+    "/public/stream_view",  # 观看页字段投影（live/标题/观众数…）；替代全量 /stream/status 公开
+    # —— client 观看页（公网观众 + OBS 直载） ——
+    "/manage/stream/view/*",  # 观看页 HTML 及其相对资源
+    "/manage/stream/queue/messages",  # 观看页聊天增量补齐（弹幕内容=广播数据本身，与 /ui/events snapshot.chat 同源同性质）
+    # —— 合成器（OBS / 观看页 iframe 的画面平面） ——
+    "/manage/stream/ui/events",  # 合成器 SSE
+    "/manage/stream/ui/manifest",  # 合成器渲染数据（场景/元素）
+    "/manage/stream/ui/assets/*",  # 合成器素材（背景/立绘/no_source/上传图）
+    "/manage/stream/emotes",  # 表情索引（chat 层 / client 聊天栏）
+    "/manage/stream/emotes/images/*",  # 表情图片
+    # —— neuro 窗口（被合成器 iframe 捕获，也可单独打开） ——
+    "/manage/neuro_sama/ui/manifest",  # 窗口渲染数据（场景/元素）
+    "/manage/neuro_sama/ui/assets/*",  # 窗口素材（立绘/高亮图）
+    "/manage/neuro_sama/ui/media/*",  # 开场视频（后端要探测时长，文件归 ui/media）
+    "/manage/neuro_sama/chat/events",  # 内容总线（含音频；音频 = 广播内容本身）
+    "/manage/neuro_sama/state/events",  # 状态总线（场景/字幕/层显隐）
+)
+
+# 失败限流桶：{ip: (tokens, updated_monotonic)}。
+# **重启清零可接受**：这是防在线爆破的软防线，不是持久审计；进程重启后攻击者
+# 最多重新获得一个窗口，代价可忽略。
+_login_buckets: dict[str, tuple[float, float]] = {}
+
+# FastAPI 自带的文档/OpenAPI 路由不是 SPA 页面：启用鉴权时一并锁内
+# （`/openapi.json` 是整个 API 面的侦察地图）。
+_NON_SPA_GET_PATHS = frozenset(
+    {"/openapi.json", "/docs", "/redoc", "/docs/oauth2-redirect"}
+)
+
 
 def _local_iso() -> str:
     return datetime.now().astimezone().isoformat(timespec="seconds")
+
+
+def _configured_auth_key() -> str:
+    """当前启用的 auth_key；未配置 / 配置未初始化 / 类型不对都视为关闭。"""
+    try:
+        cfg = get_config()
+    except RuntimeError:
+        return ""
+    data = getattr(cfg, "data", None)
+    if not isinstance(data, dict):
+        return ""
+    ns = data.get("vedal")
+    if not isinstance(ns, dict):
+        return ""
+    value = ns.get("auth_key")
+    return value if isinstance(value, str) else ""
+
+
+def _is_public_path(method: str, path: str) -> bool:
+    """匿名可访问判定（默认全保护，公开必须显式）。
+
+    `/manage/*` 与 `/health` 之外是 dashboard SPA / 静态壳 / 公开针眼——它们没有
+    秘密，且必须匿名可载入，登录遮罩才有机会出现（否则连输入 key 的页面都进不去）。
+    `/health` 例外：payload 含各模块 url，属侦察面，移入锁内。
+    """
+    if path == "/login":
+        return True
+    if method != "GET":
+        return False
+    if (
+        path != "/health"
+        and path not in _NON_SPA_GET_PATHS
+        and not (path == "/manage" or path.startswith("/manage/"))
+    ):
+        return True
+    for entry in PUBLIC_GET_PATHS:
+        if entry.endswith("*"):
+            if path.startswith(entry[:-1]):
+                return True
+        elif path == entry or path == f"{entry}/":
+            return True
+    return False
+
+
+def _client_ip(request: Request) -> str:
+    """来源 IP：X-Forwarded-For 第一段（前置反代写入），否则 TCP peer。"""
+    forwarded = request.headers.get("x-forwarded-for", "")
+    first = forwarded.split(",", 1)[0].strip()
+    if first:
+        return first
+    client = request.client
+    return client.host if client and client.host else "unknown"
+
+
+def _login_attempt_allowed(ip: str) -> bool:
+    """按 IP 的令牌桶：返回 False = 已超限（本次失败不再计数）。"""
+    now = time.monotonic()
+    tokens, updated = _login_buckets.get(ip, (float(LOGIN_RATE_LIMIT), now))
+    tokens = min(
+        float(LOGIN_RATE_LIMIT),
+        tokens + max(0.0, now - updated) * _LOGIN_RATE_PER_S,
+    )
+    if tokens < 1.0:
+        _login_buckets[ip] = (tokens, now)
+        return False
+    _login_buckets[ip] = (tokens - 1.0, now)
+    return True
+
+
+def _reset_login_rate_limits() -> None:
+    """清空限流桶（测试用；生产不需要）。"""
+    _login_buckets.clear()
+
+
+def _forwarded_https(request: Request) -> bool:
+    """前置 nginx 终结 TLS：X-Forwarded-Proto 首段是 https 时 cookie 加 Secure。"""
+    proto = request.headers.get("x-forwarded-proto", "")
+    return proto.split(",", 1)[0].strip().lower() == "https"
+
+
+def _bearer_token(request: Request) -> str:
+    scheme, _, token = request.headers.get("authorization", "").partition(" ")
+    return token.strip() if scheme.lower() == "bearer" else ""
+
+
+def _secret_equal(given: str, expected: str) -> bool:
+    """`compare_digest` 的 str 版本只接受 ASCII；key 是无格式约束的不透明字符串，
+    先按 UTF-8 编成 bytes，避免非 ASCII 口令直接 500。"""
+    return secrets.compare_digest(given.encode("utf-8"), expected.encode("utf-8"))
+
+
+def _credential_ok(request: Request, key: str) -> bool:
+    """Bearer 或会话 cookie 任一匹配即可（两者都是不透明 key）。"""
+    bearer = _bearer_token(request)
+    if bearer and _secret_equal(bearer, key):
+        return True
+    cookie = request.cookies.get(AUTH_COOKIE, "")
+    return bool(cookie) and _secret_equal(cookie, key)
+
+
+def _unauthorized(detail: str = "unauthorized", status_code: int = 401) -> JSONResponse:
+    return JSONResponse({"detail": detail}, status_code=status_code)
 
 
 async def _fetch_module_state(
@@ -352,7 +527,27 @@ def create_app() -> FastAPI:
 
     app = FastAPI(title="vedal", lifespan=lifespan)
 
-    # ---------- 健康检查 ----------
+    # ---------- 单 key 认证中间件（路由之前；静态托管也在保护范围内） ----------
+    #
+    # 默认全保护，公开路径由 `_is_public_path` 的显式清单决定。key 为空 = 整条
+    # 中间件短路成 `call_next`，与未引入鉴权时的行为逐字一致。
+    # 已建立的 SSE 连接**不在每个事件上重新校验**：key 轮换后旧连接可继续，
+    # 直到客户端重新建连（文档已写明这一延迟）。
+
+    @app.middleware("http")
+    async def auth_middleware(request: Request, call_next):
+        key = _configured_auth_key()
+        if not key or _is_public_path(request.method, request.url.path):
+            return await call_next(request)
+        if _credential_ok(request, key):
+            return await call_next(request)
+        # Bearer 错 key 也要计入来源 IP 的爆破限流；没有凭证的 401 不计数
+        # （否则一个只读探测就能把合法用户的桶耗光）。
+        if _bearer_token(request) and not _login_attempt_allowed(_client_ip(request)):
+            return _unauthorized("too many failed attempts", 429)
+        return _unauthorized()
+
+    # ---------- 健康检查（锁内：payload 含各模块 url） ----------
 
     @app.get("/health")
     async def health():
@@ -365,6 +560,97 @@ def create_app() -> FastAPI:
             url = module_url(name)
             modules[name] = {"url": url, "reachable": await _is_reachable(url)}
         return {"status": "ok", "module": "vedal", "modules": modules}
+
+    # ---------- 单 key 认证：登录 / 登出 / 匿名状态针眼 ----------
+
+    @app.post("/login")
+    async def login(request: Request):
+        """用 key 换一个会话 cookie（浏览器所有请求含 EventSource 都会自动携带）。
+
+        - 鉴权未启用（auth_key 为空）：公开端点，但没有可换的东西，直接 ok 不设 cookie；
+        - 错 key：按来源 IP 令牌桶限流，超限 429，否则 401；
+        - 正确 key：Set-Cookie ns_auth=...；X-Forwarded-Proto=https 时加 Secure。
+        """
+        try:
+            payload = await request.json()
+        except ValueError:
+            payload = None
+        submitted = payload.get("key") if isinstance(payload, dict) else None
+        submitted = submitted if isinstance(submitted, str) else ""
+        key = _configured_auth_key()
+        if not key:
+            return {"status": "ok"}
+        if not _secret_equal(submitted, key):
+            if not _login_attempt_allowed(_client_ip(request)):
+                raise HTTPException(status_code=429, detail="too many failed attempts")
+            raise HTTPException(status_code=401, detail="unauthorized")
+        response = JSONResponse({"status": "ok"})
+        response.set_cookie(
+            AUTH_COOKIE,
+            key,
+            max_age=AUTH_COOKIE_MAX_AGE,
+            httponly=True,
+            samesite="Lax",
+            secure=_forwarded_https(request),
+            path="/",
+        )
+        return response
+
+    @app.post("/logout")
+    async def logout():
+        """清除会话 cookie（此端点走保护规则：必须已认证，不特判公开）。"""
+        response = JSONResponse({"status": "ok"})
+        response.delete_cookie(AUTH_COOKIE, path="/")
+        return response
+
+    @app.get("/public/modules_status")
+    async def public_modules_status():
+        """匿名模块存活针眼：只有 `name -> bool`，**没有 url/pid/managed/error**。
+
+        复用 `/manage/modules` 的同一套可达性判定（`_module_reachable`），不新增
+        探测实现。匿名观众 / OBS 只需要知道"模块是否在跑"，不需要看到内网地址、
+        PID 或错误文本——那些是侦察面。端点存在本身也兼作 vedal 的匿名存活探针
+        （`/health` 已移入锁内）。
+        """
+        return {
+            "modules": {name: await _module_reachable(name) for name in _module_names()}
+        }
+
+    @app.get("/public/stream_view")
+    async def public_stream_view():
+        """匿名观看页针眼：只投影观众页真正消费的几个字段。
+
+        全量 `/stream/status`（loop.last_error、neuro_link.url、conversation_id、
+        chatbot 配置……）属锁内的管理数据；WatchView 实际只用"是否在播、标题/分区/
+        标签、观众数、本场是否存在、开始时刻"。复用同一套扇出
+        （`_fetch_module_state`，want 做分区过滤），摊平后只放行这些字段；
+        stream 不可达时返回 offline 形状——永不 5xx、永不回显错误文本
+        （audience.error 在这里恒为 null）。字段形状由契约测试钉住。
+        """
+        entry = await _fetch_module_state("stream", want="loop,metadata,audience", drop=None)
+        sections = (entry.get("status") or {}).get("sections") or {}
+        loop = (sections.get("loop") or {}).get("current") or {}
+        meta = (sections.get("metadata") or {}).get("current") or {}
+        aud = (sections.get("audience") or {}).get("current") or {}
+        persisted = loop.get("persisted")
+        persisted = persisted if isinstance(persisted, dict) else {}
+        return {
+            "state": loop.get("state") or "offline",
+            "live": bool(meta.get("live")),
+            "title": meta.get("title"),
+            "category": meta.get("category"),
+            "tags": meta.get("tags") or [],
+            "has_session": bool(loop.get("session_id")),
+            "started_at": (
+                persisted.get("started_at") if persisted.get("state") != "offline" else None
+            ),
+            "audience": {
+                "viewers": aud.get("viewers"),
+                "viewers_source": aud.get("viewers_source"),
+                "updated_at": aud.get("updated_at"),
+                "error": None,
+            },
+        }
 
     # ---------- /manage/state：各模块状态机投影的全景聚合 ----------
     # 必须注册在通用代理 /manage/{module}/{path} 之前；根路径 `/state` 属于 dashboard
@@ -561,7 +847,7 @@ def create_app() -> FastAPI:
         modules: dict[str, Any] = {}
         for name in _module_names():
             url = module_url(name)
-            reachable = True if name == "vedal" else await _is_reachable(url)
+            reachable = await _module_reachable(name)
             entry = _managed.get(name)
             managed = entry is not None and entry.proc.poll() is None
             pid = entry.proc.pid if managed else _live_pid(name)

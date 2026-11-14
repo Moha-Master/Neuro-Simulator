@@ -103,6 +103,7 @@ STREAM_SHAPE = Shape(
             "in_flight": T("int"),
             "discarded": T("int"),
             "last_discard": T("dict", "none"),
+            "emotes": T("dict"),
             "template_error": T("dict", "none"),
         },
         "games": {

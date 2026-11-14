@@ -3,9 +3,9 @@ import { api } from '@/api'
 
 /**
  * 模块可达性轮询。
- * dashboard 只与 vedal 通信；vedal 的 GET /manage/modules 报告各模块可达性。
- * 用于在模块未运行时阻止进入其管理页面（如 Neuro Sama），并在模块停止后
- * （用户已在页面上）及时切换到离线态。
+ * 观看页只与 vedal 通信；vedal 的匿名针眼 GET /public/modules_status 返回
+ * `{modules: {<name>: bool}}`（只有布尔，没有 url/pid/error）。用公开端点而不是
+ * /manage/modules：观看页是公网匿名页面，启用鉴权后 /manage/* 需要登录。
  */
 export function useModuleStatus(moduleName: string, pollIntervalMs = 5000) {
   const reachable = ref(false)
@@ -15,8 +15,8 @@ export function useModuleStatus(moduleName: string, pollIntervalMs = 5000) {
 
   async function check() {
     try {
-      const data = await api<{ modules: Record<string, { reachable: boolean }> }>('/manage/modules')
-      reachable.value = data.modules[moduleName]?.reachable ?? false
+      const data = await api<{ modules: Record<string, boolean> }>('/public/modules_status')
+      reachable.value = data.modules[moduleName] === true
     } catch {
       // vedal 不可达或模块未列出 → 视为不可达
       reachable.value = false

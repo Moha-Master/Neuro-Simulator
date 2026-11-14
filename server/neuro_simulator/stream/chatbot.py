@@ -65,18 +65,35 @@ _HISTORY_BATCHES = 6
 _RECENT_CHAT = 12
 # 同场次内已入列消息的签名窗口：模型爱复述自己上一批的"金句"，
 # 这里做一层廉价去重，避免刷屏式重复（并发下也兜住同一批被重复提交的极端情况）。
+# **表情行是例外**：真实聊天连发同一个表情是常态，表情轮只做同批相邻去重，
+# 不进这个全局窗口（否则 300 条窗口会系统性地吃掉 spam）。
 _DEDUP_WINDOW = 300
 
 # 工具调用是唯一的发言通道：普通 assistant 正文一律丢弃。
 _CHAT_TOOL = "send_chat_message"
+_EMOTE_TOOL = "send_emote_messages"
 
-# tool_choice 兼容档位：先点名具体函数，网关不认再退 required / auto。
-# 档位在进程内缓存（不随场次重置），避免每个 session 都重新撞一次 400。
-_TOOL_CHOICES: tuple[object, ...] = (
-    {"type": "function", "function": {"name": _CHAT_TOOL}},
-    "required",
-    "auto",
-)
+# 每个生成 tick 掷骰：表情轮 vs 文本轮。
+# 数据依据：26 场 VOD / 197 万条消息里 61.4% 是纯表情消息；v2 的公式化模板
+# （表情 + 文本混排）上线前，混排先并入文本轮，所以这里只切纯表情/文本两物种。
+EMOTE_MODE_PROBABILITY = 0.6
+
+# 同一条表情行最多连发几次（模型给多了 clamp，服务端不再二次加工）。
+_EMOTE_COUNT_MAX = 8
+
+
+def _tool_choices(tool_name: str) -> tuple[object, ...]:
+    """tool_choice 兼容档位：先点名具体函数，网关不认再退 required / auto。
+
+    档位在进程内缓存（不随场次重置），避免每个 session 都重新撞一次 400。
+    文本轮与表情轮共用同一个档位下标——网关对"工具"的兼容性是进程级事实。
+    """
+    return (
+        {"type": "function", "function": {"name": tool_name}},
+        "required",
+        "auto",
+    )
+
 
 _CHAT_CONTRACT = (
     "\n\n# Chat output contract\n"
@@ -86,6 +103,19 @@ _CHAT_CONTRACT = (
     "or explanations. If any format instruction above conflicts with this, the tool "
     "call wins."
 )
+
+_EMOTE_CONTRACT = (
+    "\n\n# Emote output contract\n"
+    "This is an emote round. Your normal reply text is never shown to viewers: only "
+    f"tool calls are visible. You MUST call the `{_EMOTE_TOOL}` tool this round; each "
+    "item in `messages` is one complete chat line from one viewer, made only of one "
+    "emote repeated `count` times. Pick a category id from the tool enum — the server "
+    "chooses the exact emote name. Use count 1 by default and at most "
+    "3 normally; use 5 or more only for a major celebration. Do not add usernames, "
+    "numbering, markdown, or explanations. If any format instruction above conflicts "
+    "with this, the tool call wins."
+)
+
 
 MetadataProvider = Callable[[], "tuple[str, str]"]
 AppendMessages = Callable[[list[tuple[str, str]]], Awaitable[list[int]]]
@@ -122,11 +152,61 @@ def _tool_schema(count: int) -> dict:
     }
 
 
+def _emote_tool_schema(categories) -> Optional[dict]:
+    """表情轮的工具：唯一输入是「大类 + 连发次数」。
+
+    工具 description 由大类清单动态拼装（``id — desc`` 逐行）。这是模型选类的
+    **唯一依据**：prompt 里不抄表情名，也不抄大类表；枚举/说明永远跟 DB 一致。
+    """
+    ids = [category.id for category in categories]
+    if not ids:
+        return None
+    guide = "\n".join(f"{category.id} — {category.desc}" for category in categories)
+    return {
+        "type": "function",
+        "function": {
+            "name": _EMOTE_TOOL,
+            "description": (
+                "Send one or more chat lines made only of emotes. Pick a category id "
+                "from the enum; the server chooses the exact emote from that category "
+                "and repeats it `count` times as one line. Send no text and invent no "
+                "emote names.\n\nCategories:\n" + guide
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "messages": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "category": {"type": "string", "enum": ids},
+                                "count": {
+                                    "type": "integer",
+                                    "minimum": 1,
+                                    "maximum": _EMOTE_COUNT_MAX,
+                                },
+                            },
+                            "required": ["category", "count"],
+                        },
+                    }
+                },
+                "required": ["messages"],
+            },
+        },
+    }
+
+
 class ChatbotManager:
-    def __init__(self, storage, persona, templates) -> None:
+    def __init__(self, storage, persona, templates, emote_categories=None) -> None:
         self.storage = storage
         self.persona = persona
         self.templates = templates
+        # 表情大类存储（server lifespan 在装配后注入；None = 降级，表情轮直接
+        # 静默放弃，不阻断文本轮）。
+        self.emote_categories = emote_categories
+        # 掷骰 + 类内采样共用；测试替换成固定实现即可确定性地跑两种轮次。
+        self._rng = random.Random()
         self._scheduler: Optional[asyncio.Task] = None
         self._tasks: set[asyncio.Task] = set()
         self._queue_row: Optional[int] = None
@@ -222,6 +302,16 @@ class ChatbotManager:
     def in_flight(self) -> int:
         """当前在途的生成任务数（供 /health 与 dashboard 观察并发调度）。"""
         return sum(1 for t in self._tasks if not t.done())
+
+    def emote_stats(self) -> dict:
+        """状态面用：大类数 / 成员数。同步读 CategoryStore 缓存，无 I/O。"""
+        store = self.emote_categories
+        if store is None:
+            return {"categories": 0, "members": 0}
+        return {
+            "categories": len(store.categories),
+            "members": store.member_count,
+        }
 
     def _context(self, messages_block: str) -> dict:
         """模板 context：优先用 loop 注入的（带 stream_status），否则给最小集合。"""
@@ -321,14 +411,52 @@ class ChatbotManager:
             # `templates.render` 已经把错误记进 chatbot.template_error，这里不重复记，
             # 也不让异常冒出任务（否则 asyncio 会甩"Task exception was never retrieved"）。
             return
-        system_prompt = self.persona.render_prompt(cb.count) + _CHAT_CONTRACT
+
+        mode = "emote" if self._rng.random() < EMOTE_MODE_PROBABILITY else "text"
+        if mode == "emote":
+            store = self.emote_categories
+            tool = _emote_tool_schema(store.categories if store is not None else [])
+            if tool is None:
+                # 大类清单未就绪（启动降级/空库）：本轮静默放弃，不阻断文本轮。
+                self._discard("emote_unavailable", "emote categories not loaded")
+                return
+            system_prompt = self.persona.render_prompt(cb.count) + _EMOTE_CONTRACT
+        else:
+            tool = _tool_schema(cb.count)
+            system_prompt = self.persona.render_prompt(cb.count) + _CHAT_CONTRACT
         async with self._history_lock:
             history = [msg for batch in self._history for msg in batch]
 
         message = await self._request_completion(
-            cb, system_prompt, history, user_content
+            cb, system_prompt, history, user_content, tool
         )
         if message is None:
+            return
+
+        if mode == "emote":
+            parsed = self._read_emote_calls(message)
+            if parsed is None:
+                return
+            items, content_preview = parsed
+            bodies, accepted = self._emote_rows(items)
+            if bodies is None:
+                return  # `_emote_rows` 已记 discard
+            if not bodies:
+                self._discard("empty", content_preview)
+                return
+            # 表情行只做同批相邻完全重复去重；跨批重复是真实 chat 的常态，
+            # 因此不进 `_seen` 全局签名窗口。
+            bodies = self._dedupe_adjacent(bodies)
+            fresh = self._fresh_rows(bodies)
+            if not fresh:
+                return
+            if not await self._append(fresh):
+                return
+            self._record_history(
+                fresh,
+                tool_name=_EMOTE_TOOL,
+                arguments={"messages": accepted},
+            )
             return
 
         raw_output, content_preview = self._read_tool_calls(message)
@@ -339,8 +467,7 @@ class ChatbotManager:
             self._discard("empty", content_preview)
             return
 
-        queue_row = self._queue_row
-        if queue_row is None or self._append_messages is None:
+        if self._queue_row is None or self._append_messages is None:
             return
         fresh: list[tuple[str, str]] = []
         for body in bodies:
@@ -348,24 +475,36 @@ class ChatbotManager:
             if key in self._seen:
                 continue  # 本场已经发过一模一样的行，跳过
             self._remember(key)
-            # 用户名由本地生成器负责，模型只写内容。
-            # 用 (纳秒时间戳, 内容) 播种：每条消息独立随机，不做撞名规避
-            # （真实 chat 里同一个人连发多条很正常）。
             fresh.append((random_username(f"{time.time_ns()}:{body}"), body))
         if not fresh:
             # 全部重复是正常现象（模型复述金句），不是失败：不记 discard、不写历史。
             return
+        if not await self._append(fresh):
+            return
+        self._record_history(fresh)
 
+    def _fresh_rows(self, bodies: list[str]) -> list[tuple[str, str]]:
+        """用户名由本地生成器负责，模型只写内容。
+
+        用 (纳秒时间戳, 内容) 播种：每条消息独立随机，不做撞名规避
+        （真实 chat 里同一个人连发多条很正常）。
+        """
+        return [
+            (random_username(f"{time.time_ns()}:{body}"), body) for body in bodies
+        ]
+
+    async def _append(self, fresh: list[tuple[str, str]]) -> bool:
+        """走 loop 的统一入列入口；失败只记 warning，不让任务异常冒出去。"""
+        if self._queue_row is None or self._append_messages is None:
+            return False
         try:
             await self._append_messages(fresh)
         except asyncio.CancelledError:
             raise
         except Exception as e:
-            # 入列是 loop 的职责；它失败只说明本轮没发出去，不能让任务异常冒出去
             logger.warning(f"Chatbot append failed: {type(e).__name__}: {e}")
-            return
-
-        self._record_history(fresh)
+            return False
+        return True
 
     async def _request_completion(
         self,
@@ -373,14 +512,15 @@ class ChatbotManager:
         system_prompt: str,
         history: list[dict],
         user_content: str,
+        tool: dict,
     ):
         """发一次 chat.completions；tool_choice 不兼容时就地降档重试。
 
         返回 `message`；请求失败/全部档位都不可用时返回 None（discard 已记）。
         """
-        tool = _tool_schema(cb.count)
+        choices = _tool_choices(str(tool["function"]["name"]))
         while True:
-            choice = _TOOL_CHOICES[self._tool_choice_index]
+            choice = choices[self._tool_choice_index]
             try:
                 client = await self._client_for(cb)
                 resp = await client.chat.completions.create(
@@ -403,7 +543,7 @@ class ChatbotManager:
                 if not self._is_tool_error(e):
                     self._discard("api_error", f"{type(e).__name__}: {e}")
                     return None
-                if self._tool_choice_index + 1 >= len(_TOOL_CHOICES):
+                if self._tool_choice_index + 1 >= len(choices):
                     self._discard("tools_unsupported", f"{type(e).__name__}: {e}")
                     return None
                 self._tool_choice_index += 1
@@ -412,7 +552,7 @@ class ChatbotManager:
                     choice,
                     type(e).__name__,
                     e,
-                    _TOOL_CHOICES[self._tool_choice_index],
+                    choices[self._tool_choice_index],
                 )
 
     @staticmethod
@@ -469,10 +609,133 @@ class ChatbotManager:
             return None, content
         return "\n".join(chunks), content
 
-    def _record_history(self, fresh: list[tuple[str, str]]) -> None:
-        """只记录实际入列的整批（assistant tool_calls + tool 结果）。"""
+    @staticmethod
+    def _clamp_count(value: object) -> int:
+        try:
+            count = int(value)  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            count = 1
+        return max(1, min(_EMOTE_COUNT_MAX, count))
+
+    def _read_emote_calls(self, message) -> Optional[tuple[list[tuple[str, int]], str]]:
+        """合并所有匹配 ``send_emote_messages`` 调用的 items。
+
+        返回 ``(items, content_preview)``；``None`` 表示本轮已记 discard。
+        未知 category 不在这一层过滤（留给 ``_emote_rows`` 计数记日志），count
+        在这里 clamp 到 1..8。
+        """
+        content = getattr(message, "content", "") or ""
+        calls = getattr(message, "tool_calls", None) or []
+        items: list[tuple[str, int]] = []
+        matched = False
+        for call in calls:
+            function = getattr(call, "function", None)
+            if function is None and isinstance(call, dict):
+                function = call.get("function")
+            if function is None:
+                continue
+            name = getattr(function, "name", None)
+            if name is None and isinstance(function, dict):
+                name = function.get("name")
+            if name != _EMOTE_TOOL:
+                continue
+            matched = True
+            arguments = getattr(function, "arguments", None)
+            if arguments is None and isinstance(function, dict):
+                arguments = function.get("arguments")
+            try:
+                payload = json.loads(arguments or "")
+            except (TypeError, ValueError):
+                self._discard("bad_arguments", content or str(arguments))
+                return None
+            if not isinstance(payload, dict) or "messages" not in payload:
+                self._discard("bad_arguments", content or str(arguments))
+                return None
+            value = payload["messages"]
+            if isinstance(value, dict):
+                value = [value]
+            if not isinstance(value, list):
+                self._discard("bad_arguments", content or str(arguments))
+                return None
+            for item in value:
+                if not isinstance(item, dict):
+                    continue
+                category = item.get("category")
+                if not isinstance(category, str) or not category.strip():
+                    continue
+                items.append(
+                    (category.strip(), self._clamp_count(item.get("count", 1)))
+                )
+
+        if not matched:
+            self._discard("no_tool_call", content)
+            return None
+        return items, content
+
+    def _emote_rows(
+        self, items: list[tuple[str, int]]
+    ) -> tuple[Optional[list[str]], list[dict]]:
+        """把 (category, count) 展开成表情行。
+
+        返回 ``(bodies, accepted_items)``；``bodies is None`` = 本轮静默放弃
+        （store 未就绪 / 类为空，discard 已记）。未知大类只丢弃该 item 并计数
+        记日志——模型偶尔会自己编一个 id，那是它的错误，不是整轮的失败。
+        """
+        store = self.emote_categories
+        if store is None:
+            self._discard("emote_unavailable", "emote categories not loaded")
+            return None, []
+        bodies: list[str] = []
+        accepted: list[dict] = []
+        unknown: list[str] = []
+        for category_id, count in items:
+            if store.find(category_id) is None:
+                unknown.append(category_id)
+                continue
+            name = store.sample(category_id, self._rng)
+            if name is None:
+                self._discard(
+                    "emote_unavailable", f"no emotes in category {category_id!r}"
+                )
+                return None, []
+            bodies.append((name + " ") * count)
+            accepted.append({"category": category_id, "count": count})
+        if unknown:
+            logger.info(
+                "Chatbot emote round dropped %d unknown category item(s): %s",
+                len(unknown),
+                ", ".join(unknown),
+            )
+        return [body.strip() for body in bodies], accepted
+
+    @staticmethod
+    def _dedupe_adjacent(bodies: list[str]) -> list[str]:
+        """只去掉同批**相邻**的完全重复行（真实 chat 连发同表情是常态）。"""
+        kept: list[str] = []
+        previous: Optional[str] = None
+        for body in bodies:
+            if previous is not None and body == previous:
+                continue
+            kept.append(body)
+            previous = body
+        return kept
+
+    def _record_history(
+        self,
+        fresh: list[tuple[str, str]],
+        *,
+        tool_name: str = _CHAT_TOOL,
+        arguments: Optional[dict] = None,
+    ) -> None:
+        """只记录实际入列的整批（assistant tool_calls + tool 结果）。
+
+        表情轮用同一形状（assistant tool_calls + tool），只是 arguments 记录
+        模型实际请求的 ``{category, count}`` 而不是服务端采样出的表情名——
+        历史里保留的是模型的决策，采样结果不需要回灌。
+        """
         texts = [body for _, body in fresh]
         call_id = f"call_{uuid.uuid4().hex[:12]}"
+        payload = arguments if arguments is not None else {"messages": texts}
         batch = [
             {
                 "role": "assistant",
@@ -482,8 +745,8 @@ class ChatbotManager:
                         "id": call_id,
                         "type": "function",
                         "function": {
-                            "name": _CHAT_TOOL,
-                            "arguments": json.dumps({"messages": texts}, ensure_ascii=False),
+                            "name": tool_name,
+                            "arguments": json.dumps(payload, ensure_ascii=False),
                         },
                     }
                 ],

@@ -165,6 +165,8 @@ def _chat_current(loop: Any) -> dict:
 
 def _chatbot_current(loop: Any) -> dict:
     cb = stream_settings.load().chatbot
+    stats = getattr(loop.chatbot, "emote_stats", None)
+    emotes = stats() if callable(stats) else {"categories": 0, "members": 0}
     return {
         "enabled": cb.enabled,
         "model": cb.model or None,
@@ -176,6 +178,7 @@ def _chatbot_current(loop: Any) -> dict:
         "in_flight": loop.chatbot.in_flight,
         "discarded": loop.chatbot.discarded,
         "last_discard": loop.chatbot.last_discard,
+        "emotes": emotes,
         # 消息模板最近一次实况渲染失败（成功即清除）；dashboard 的 State 页一眼可见
         "template_error": loop.templates.template_error,
     }

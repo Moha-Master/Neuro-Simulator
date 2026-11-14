@@ -344,5 +344,62 @@ class TestSnapshotShape(_Harness):
         self.assertEqual(snap["state"]["caption"]["hide_ms"], 1000)
 
 
+class TestTerminalReplayGate(_Harness):
+    """终态轮次的过期门控：Σ speech duration + 宽限之后不再作为重放基线。"""
+
+    @staticmethod
+    def _feed_terminal_turn(mirror, *, duration: float = 1.0) -> None:
+        mirror._apply_content({"type": "start", "turn_id": 5})
+        mirror._apply_content({
+            "type": "speech",
+            "turn_id": 5,
+            "step": 0,
+            "index": 0,
+            "text": "hi",
+            "duration": duration,
+        })
+        mirror._apply_content({"type": "done", "turn_id": 5})
+
+    async def test_terminal_turn_replays_within_grace(self):
+        mirror = NeuroMirror(self.loop)
+        self._feed_terminal_turn(mirror)
+        turn = mirror.snapshot()["turn"]
+        self.assertIsNotNone(turn, "宽限内仍要能续播/重放")
+        self.assertFalse(turn["active"])
+        self.assertEqual(len(turn["speech"]), 1)
+
+    async def test_terminal_turn_dropped_after_grace(self):
+        mirror = NeuroMirror(self.loop)
+        mirror._state = {"scene": {"id": "normal"}}
+        self._feed_terminal_turn(mirror, duration=2.0)
+        # 把终态时刻拨旧到「2s 语音 + 宽限」之外
+        mirror._terminal_at -= 2.0 + mirror_module.TERMINAL_REPLAY_GRACE_S + 1
+        snap = mirror.snapshot()
+        self.assertIsNone(snap["turn"], "过期终态轮次不再作为重放基线")
+        self.assertEqual(snap["state"]["scene"]["id"], "normal", "状态部分不受门控影响")
+
+    async def test_active_turn_never_expires(self):
+        mirror = NeuroMirror(self.loop)
+        mirror._apply_content({"type": "start", "turn_id": 6})
+        mirror._apply_content({
+            "type": "speech", "turn_id": 6, "step": 0, "index": 0,
+            "text": "still talking", "duration": 1.0,
+        })
+        # 强行走旧的终态标记也不应影响 active 轮次
+        mirror._terminal_at = 0.0
+        self.assertIsNotNone(mirror.snapshot()["turn"])
+
+    async def test_new_speech_clears_terminal_mark(self):
+        mirror = NeuroMirror(self.loop)
+        self._feed_terminal_turn(mirror)
+        # 终态后同一轮又续上新句：重新变成在途轮次，门控失效
+        mirror._apply_content({
+            "type": "speech", "turn_id": 5, "step": 1, "index": 1,
+            "text": "more", "duration": 1.0,
+        })
+        self.assertIsNone(mirror._terminal_at)
+        self.assertIsNotNone(mirror.snapshot()["turn"])
+
+
 if __name__ == "__main__":
     unittest.main()

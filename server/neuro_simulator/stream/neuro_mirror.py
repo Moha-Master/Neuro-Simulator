@@ -19,6 +19,7 @@ iframe 捕获时，窗口页才改吃这里转发的 feed。
 import asyncio
 import contextlib
 import logging
+import time
 from typing import TYPE_CHECKING, Any, Optional
 
 from . import settings as stream_settings
@@ -38,6 +39,12 @@ STATE_WANT = ["scene", "caption", "layers", "manifest"]
 
 _TERMINAL_EVENTS = frozenset(("done", "cancelled", "error"))
 
+# 终态轮次的快照过期窗口：语义与 neuro `UiState.TURN_GRACE_S` 对齐——终态后
+# 再等「Σ 各句 duration + 本轮时长」就视为过期，`snapshot()` 不再把它当重放基线
+# （否则下播/挂机后 iframe 重载会把最后一轮整句重播）。宽限内保留 speech，
+# 让已经开始播放的窗口还能续完音频。
+TERMINAL_REPLAY_GRACE_S = 10.0
+
 
 class NeuroMirror:
     """订阅 neuro 的两条总线，转发并缓存画面事件。
@@ -49,6 +56,7 @@ class NeuroMirror:
     def __init__(self, loop: "StreamLoop") -> None:
         self.loop = loop
         self._turn: Optional[dict] = None
+        self._terminal_at: Optional[float] = None
         self._state: dict[str, Any] = {}
         self._tasks: list[asyncio.Task] = []
 
@@ -76,8 +84,24 @@ class NeuroMirror:
     # ---------- 首帧重放 ----------
 
     def snapshot(self) -> dict:
-        """最近一轮 turn + 状态基线（只读缓存，绝不发请求）。"""
-        return {"turn": self._turn, "state": dict(self._state)}
+        """最近一轮 turn + 状态基线（只读缓存，绝不发请求）。
+
+        终态轮次超过「Σ speech duration + `TERMINAL_REPLAY_GRACE_S`」后不再返回，
+        视同没有在途轮次；`active=true` 的轮次永远照发。
+        """
+        turn = self._turn
+        if turn is not None and turn.get("active") is not True and self._terminal_at is not None:
+            speech = turn.get("speech")
+            total = 0.0
+            if isinstance(speech, list):
+                total = sum(
+                    float(seg.get("duration") or 0)
+                    for seg in speech
+                    if isinstance(seg, dict)
+                )
+            if time.monotonic() - self._terminal_at > total + TERMINAL_REPLAY_GRACE_S:
+                turn = None
+        return {"turn": turn, "state": dict(self._state)}
 
     def reset_turn(self) -> None:
         """丢弃 turn 基线（新场次开始时由 stream 调用）。
@@ -87,6 +111,7 @@ class NeuroMirror:
         只影响**新订阅者**的重放基线，避免把上一场说完的句子重新播一遍。
         """
         self._turn = None
+        self._terminal_at = None
 
     # ---------- 订阅循环 ----------
 
@@ -183,6 +208,7 @@ class NeuroMirror:
             turn = ev.get("turn")
             if not isinstance(turn, dict):
                 self._turn = None
+                self._terminal_at = None
                 return
             # mirror 不知道前端播放进度：重放时所有句子都从 0 开始（不复制神经侧
             # 的 consumed；否则中途重连的 iframe 会以为半句已经播过）
@@ -197,6 +223,8 @@ class NeuroMirror:
                     ],
                 }
             self._turn = turn
+            # 首帧自带终态（下播后重连）同样参与过期门控；active 的轮次清掉旧时刻。
+            self._terminal_at = None if turn.get("active") else time.monotonic()
             return
         if kind == "start":
             self._turn = {
@@ -204,6 +232,7 @@ class NeuroMirror:
                 "active": True,
                 "speech": [],
             }
+            self._terminal_at = None
             return
         if kind == "speech":
             if self._turn is None:
@@ -220,9 +249,11 @@ class NeuroMirror:
             # mirror 不知道前端播放进度；中途重载会重播当前轮已发出的句子
             seg["consumed"] = 0
             self._turn["speech"].append(seg)
+            self._terminal_at = None
             return
         if kind in _TERMINAL_EVENTS and self._turn is not None:
             self._turn["active"] = False
+            self._terminal_at = time.monotonic()
 
     def _apply_state(self, ev: dict) -> None:
         """维护状态基线（`sections.<name>.current`），并同步高亮开关。"""

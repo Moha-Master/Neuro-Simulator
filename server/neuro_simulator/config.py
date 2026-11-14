@@ -249,6 +249,13 @@ def validate_config(data: Dict[str, Any]) -> None:
             if f in chess:
                 _as_int(chess, f, 0)
 
+    # 单 key 认证：auth_key 是不透明字符串，空串 = 关闭鉴权。没有格式要求
+    # （用户可以贴任意口令），只校验类型，未知键仍按既有纪律不枚举。
+    vedal = data.get("vedal")
+    if isinstance(vedal, dict) and "auth_key" in vedal:
+        if not isinstance(vedal["auth_key"], str):
+            raise ValueError("vedal.auth_key 必须是字符串")
+
     for name, schema in data.items():
         if name != SERVER_SCHEMA and not isinstance(schema, dict):
             raise ValueError(f"顶层 schema {name} 必须是对象")
